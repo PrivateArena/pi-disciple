@@ -1,0 +1,32 @@
+{
+  "gate": {
+    "enabled": true,
+    "reviewLog": false,
+    "promptTimeoutMs": 0,
+    "permission": {
+      "*": "ask",
+      "read": "allow",
+      "grep": "allow",
+      "find": "allow",
+      "ls": "allow",
+      "path": {
+        "*": "allow",
+        "*.env": "deny",
+        "*.env.*": "deny",
+        "*.env.example": "allow",
+        "*.pem": "deny",
+        "*.key": "deny",
+        "*id_rsa*": "deny"
+      },
+      "external_directory": "ask",
+      "bash": { "*": "ask" },
+      "subagent": "allow"
+    }
+  },
+  "subagent": {
+    "maxTurns": 30,
+    "timeoutMinutes": 20,
+    "maxResultBytes": 20000,
+    "keepTranscripts": 20
+  }
+}

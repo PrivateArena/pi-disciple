@@ -1,0 +1,237 @@
+import { describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentSession, CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
+import {
+	CHILD_RETRIES,
+	CHILD_RETRY_MAX_DELAY_MS,
+	childSessionDir,
+	pruneTranscripts,
+	runChild,
+	totalUsage,
+	type ChildRunInput,
+} from "../child.ts";
+import { ROLES } from "../roles.ts";
+import { buildShims, type ShimHost } from "../shims.ts";
+import { writeFileSync } from "node:fs";
+
+interface Spy {
+	messages?: unknown[];
+	options?: CreateAgentSessionOptions;
+	disposed: boolean;
+	aborted: boolean;
+	promptArgs?: string[];
+	steers: string[];
+	emit?: (event: Record<string, unknown>) => void;
+}
+
+function stubSession(spy: Spy, behaviour: "answer" | "hang" | "throw" = "answer") {
+	const listeners: ((event: never) => void)[] = [];
+	const session = {
+		isStreaming: behaviour === "hang",
+		sessionFile: "/tmp/child.jsonl",
+		sessionManager: { getSessionId: () => "child-1" },
+		messages: (spy.messages ?? [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "the answer is in pi-gate/policy.ts" }],
+				usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			},
+		]),
+		subscribe(listener: (event: never) => void) {
+			listeners.push(listener);
+			spy.emit = (event) => listener(event as never);
+			return () => listeners.splice(listeners.indexOf(listener), 1);
+		},
+		async steer(text: string) {
+			spy.steers.push(text);
+		},
+		async prompt(text: string) {
+			spy.promptArgs = [text];
+			if (behaviour === "throw") throw new Error("provider exploded");
+			if (behaviour === "hang") await new Promise<never>(() => undefined);
+		},
+		async abort() {
+			spy.aborted = true;
+			session.isStreaming = false;
+		},
+		dispose() {
+			spy.disposed = true;
+		},
+	};
+	return { session: session as unknown as AgentSession };
+}
+
+function input(overrides: Partial<ChildRunInput> = {}): ChildRunInput {
+	const root = mkdtempSync(join(tmpdir(), "pi-sub-child-"));
+	const host: ShimHost = { parentCallId: "P", executeTool: async () => ({ result: { content: [], details: undefined }, isError: false }) as never };
+	return {
+		role: ROLES.explore,
+		task: "find the gate",
+		cwd: root,
+		agentDir: root,
+		model: { id: "stub", contextWindow: 200_000 } as never,
+		tools: buildShims(
+			[{ name: "read", label: "read", description: "read", parameters: { type: "object" } } as never],
+			ROLES.explore,
+			host,
+		),
+		sessionDir: root,
+		signal: new AbortController().signal,
+		onProgress: () => undefined,
+		...overrides,
+	};
+}
+
+describe("runChild", () => {
+	it("assembles a child with zero extensions and exactly the shim allowlist", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const base = input();
+		const result = await runChild({
+			...base,
+			sessionFactory: async (options) => {
+				spy.options = options;
+				return stubSession(spy);
+			},
+		});
+
+		expect(spy.options?.tools).toEqual(["read"]);
+		expect(spy.options?.customTools).toHaveLength(1);
+		expect(spy.options?.resourceLoader?.getExtensions().extensions).toEqual([]);
+		expect(spy.options?.resourceLoader?.getSystemPrompt?.()).toMatch(/subagent/);
+		expect(spy.options?.sessionManager?.getSessionDir?.()).toBe(childSessionDir(base.sessionDir));
+		expect(result.exit).toBe("done");
+		expect(result.text).toContain("pi-gate/policy.ts");
+		expect(result.childSessionFile).toBe("/tmp/child.jsonl");
+		expect(spy.disposed).toBe(true);
+	});
+
+	it("returns aborted and disposes when the parent aborts mid-run", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const controller = new AbortController();
+		const run = runChild({ ...input({ signal: controller.signal }), sessionFactory: async () => stubSession(spy, "hang") });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const started = Date.now();
+		controller.abort();
+		const result = await run;
+		expect(Date.now() - started).toBeLessThan(1000);
+		expect(result.exit).toBe("aborted");
+		expect(spy.disposed).toBe(true);
+	});
+
+	it("settles even when prompt() never resolves (FM-2)", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const controller = new AbortController();
+		const result = await runChild({
+			...input({ signal: controller.signal }),
+			role: { ...ROLES.explore, timeoutMinutes: 0.02 },
+			hardSlackMs: 40,
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		expect(result.exit).toBe("timeout");
+		expect(spy.steers.join(" ")).toMatch(/Summarise your findings now/);
+		expect(spy.disposed).toBe(true);
+	});
+
+	it("reports an error result without throwing", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const result = await runChild({ ...input(), sessionFactory: async () => stubSession(spy, "throw") });
+		expect(result.exit).toBe("error");
+		expect(result.error).toContain("provider exploded");
+		expect(spy.disposed).toBe(true);
+	});
+
+	it("steers to a conclusion at maxTurns and marks the run incomplete", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const controller = new AbortController();
+		const run = runChild({
+			...input({ signal: controller.signal }),
+			role: { ...ROLES.explore, maxTurns: 2 },
+			hardSlackMs: 60_000,
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		controller.abort();
+		const result = await run;
+		expect(spy.steers.join(" ")).toMatch(/reached its limit of 2 turns\. Summarise your findings now/);
+		expect(result.exit).toBe("aborted"); // the parent abort beats the earlier maxTurns steer
+		expect(result.turns).toBe(2);
+	});
+
+	it("counts tool calls and turns for the progress line", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const progress: number[] = [];
+		const controller = new AbortController();
+		const run = runChild({
+			...input({ signal: controller.signal, onProgress: (p) => progress.push(p.toolCalls) }),
+			hardSlackMs: 60_000,
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		spy.emit?.({ type: "tool_execution_start", toolCallId: "x", toolName: "bash" });
+		spy.emit?.({ type: "tool_execution_start", toolCallId: "y", toolName: "read" });
+		controller.abort();
+		const result = await run;
+		expect(result.toolCalls).toBe(2);
+		expect(progress).toEqual([1, 2, 2]); // the last emit carries the final state
+	});
+});
+
+describe("usage and transcripts", () => {
+	it("sums assistant usage for the footer (A9)", () => {
+		const usage = totalUsage([
+			{ role: "assistant", content: [], usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } },
+			{ role: "assistant", content: [], usage: { input: 4, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 9, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } },
+		] as never);
+		expect(usage?.totalTokens).toBe(12);
+		expect(totalUsage([] as never)).toBeUndefined();
+	});
+
+	it("keeps the newest transcripts and deletes the rest (FM-15)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-sub-prune-"));
+		for (let i = 0; i < 5; i++) writeFileSync(join(dir, `s${i}.jsonl`), "{}", "utf8");
+		const removed = await pruneTranscripts(dir, 2);
+		expect(removed).toBe(3);
+	});
+});
+
+describe("child resilience", () => {
+	it("keeps compaction off but retries transient provider errors (bounded)", async () => {
+		let captured: CreateAgentSessionOptions | undefined;
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		await runChild({
+			...input(),
+			sessionFactory: async (options) => {
+				captured = options;
+				return stubSession(spy);
+			},
+		});
+		const settings = captured?.settingsManager as unknown as { settings: Record<string, unknown> };
+		expect(settings.settings.compaction).toMatchObject({ enabled: false });
+		expect(settings.settings.retry).toMatchObject({ enabled: true, maxRetries: CHILD_RETRIES, maxAgentDelayMs: CHILD_RETRY_MAX_DELAY_MS });
+	});
+
+	it("maps a quiet provider error onto the result instead of reporting DONE", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const result = await runChild({
+			...input(),
+			sessionFactory: async () => {
+				spy.messages = [
+					{
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: '503 "The upstream provider was unable to process the request"',
+					} as never,
+				];
+				return stubSession(spy);
+			},
+		});
+		expect(result.exit).toBe("error");
+		expect(result.error).toContain("503");
+	});
+});
