@@ -116,3 +116,24 @@ describe("limits file", () => {
 		expect(loadSubagentLimits(join(root, "project"), true).limits.maxTurns).toBe(4);
 	});
 });
+
+describe("enabled switch", () => {
+	it("reads subagent.enabled and defaults to on", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-sub-enabled-"));
+		mkdirSync(join(root, "extensions", "pi-gate"), { recursive: true });
+		mkdirSync(join(root, ".pi", "extensions", "pi-gate"), { recursive: true });
+		writeFileSync(join(root, "extensions", "pi-gate", "config.json"), JSON.stringify({ subagent: { enabled: true } }), "utf8");
+		writeFileSync(join(root, ".pi", "extensions", "pi-gate", "config.json"), JSON.stringify({ subagent: { enabled: false } }), "utf8");
+		expect(loadSubagentLimits(root, false, root).limits.enabled).toBe(true);
+		expect(loadSubagentLimits(root, true, root).limits.enabled).toBe(false);
+	});
+
+	it("rejects a non-boolean enabled value", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-sub-enabled-"));
+		mkdirSync(join(root, "extensions", "pi-gate"), { recursive: true });
+		writeFileSync(join(root, "extensions", "pi-gate", "config.json"), JSON.stringify({ subagent: { enabled: "no" } }), "utf8");
+		const loaded = loadSubagentLimits(root, false, root);
+		expect(loaded.limits.enabled).toBe(true);
+		expect(loaded.errors.join(" ")).toMatch(/enabled must be a boolean/);
+	});
+});

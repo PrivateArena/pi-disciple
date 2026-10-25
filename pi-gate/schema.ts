@@ -60,6 +60,8 @@ export interface GateConfig {
 }
 
 export interface SubagentLimits {
+	/** Master switch for the `subagent` tool (`subagent.enabled`). */
+	enabled: boolean;
 	maxTurns: number;
 	timeoutMinutes: number;
 	maxResultBytes: number;
@@ -95,6 +97,7 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 };
 
 export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
+	enabled: true,
 	maxTurns: 30,
 	timeoutMinutes: 20,
 	maxResultBytes: 20000,
@@ -212,12 +215,7 @@ export interface ParsedSubagentConfig {
 	errors: string[];
 }
 
-const SUBAGENT_KEYS: readonly (keyof SubagentLimits)[] = [
-	"maxTurns",
-	"timeoutMinutes",
-	"maxResultBytes",
-	"keepTranscripts",
-];
+const SUBAGENT_NUMBER_KEYS = ["maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts"] as const satisfies readonly (keyof SubagentLimits)[];
 
 /** Parse the `subagent` section of one config file. Never throws. */
 export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubagentConfig {
@@ -228,7 +226,7 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 		errors.push(`${where}: "subagent" must be an object`);
 		return { limits, errors };
 	}
-	for (const key of SUBAGENT_KEYS) {
+	for (const key of SUBAGENT_NUMBER_KEYS) {
 		const value = raw[key];
 		if (value === undefined) continue;
 		if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
@@ -236,6 +234,10 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 			continue;
 		}
 		limits[key] = Math.floor(value);
+	}
+	if (raw.enabled !== undefined) {
+		if (typeof raw.enabled === "boolean") limits.enabled = raw.enabled;
+		else errors.push(`${where}: subagent.enabled must be a boolean, ignored`);
 	}
 	return { limits, errors };
 }

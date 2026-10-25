@@ -19,11 +19,14 @@
         "*id_rsa*": "deny"
       },
       "external_directory": "ask",
-      "bash": { "*": "ask" },
+      "bash": {
+        "*": "ask"
+      },
       "subagent": "allow"
     }
   },
   "subagent": {
+    "enabled": true,
     "maxTurns": 30,
     "timeoutMinutes": 20,
     "maxResultBytes": 20000,

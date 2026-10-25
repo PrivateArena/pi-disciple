@@ -49,6 +49,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 			const loaded = loadSubagentLimits(ctx.cwd, ctx.isProjectTrusted());
 			for (const error of loaded.errors.slice(0, 2)) ctx.ui.notify(`[subagent] ${error}`, "warning");
 			const limits = loaded.limits;
+			if (!limits.enabled) throw new Error("pi-subagent is disabled: set \"subagent\": { \"enabled\": true } in the config file");
 			const roleForRun = {
 				...role,
 				maxTurns: Math.min(role.maxTurns, limits.maxTurns),
@@ -103,6 +104,18 @@ export default function piSubagent(pi: ExtensionAPI) {
 				releaseGuard(toolCallId);
 			}
 		},
+	});
+
+	// Hidden from the model when the config turns the extension off — a tool the human cannot answer
+	// for should not be offered at all.
+	pi.on("before_agent_start", async (_event, ctx: ExtensionContext) => {
+		const loaded = loadSubagentLimits(ctx.cwd, ctx.isProjectTrusted());
+		const active = pi.getActiveTools();
+		const has = active.includes("subagent");
+		if (!loaded.limits.enabled && has) pi.setActiveTools(active.filter((name) => name !== "subagent"));
+		else if (loaded.limits.enabled && !has && pi.getAllTools().some((tool) => tool.name === "subagent")) {
+			pi.setActiveTools([...active, "subagent"]);
+		}
 	});
 
 	pi.on("session_shutdown", () => {

@@ -13,7 +13,7 @@ import type { SubagentLimits } from "../pi-gate/schema.ts";
 
 export type { SubagentLimits };
 
-export const DEFAULT_LIMITS: SubagentLimits = { maxTurns: 30, timeoutMinutes: 20, maxResultBytes: 20000, keepTranscripts: 20 };
+export const DEFAULT_LIMITS: SubagentLimits = { enabled: true, maxTurns: 30, timeoutMinutes: 20, maxResultBytes: 20000, keepTranscripts: 20 };
 
 export interface LoadedLimits {
 	limits: SubagentLimits;
@@ -22,6 +22,8 @@ export interface LoadedLimits {
 }
 
 const KEYS: readonly (keyof SubagentLimits)[] = ["maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts"];
+
+/** Read the numeric limits plus the `enabled` switch; anything else in the section is ignored. */
 
 const cache = new Map<string, { stamp: string; loaded: LoadedLimits }>();
 
@@ -45,6 +47,10 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 				continue;
 			}
 			loaded.limits = { ...loaded.limits, [key]: Math.floor(value) };
+		}
+		if (section.enabled !== undefined) {
+			if (typeof section.enabled === "boolean") loaded.limits = { ...loaded.limits, enabled: section.enabled };
+			else loaded.errors.push(`${file}: subagent.enabled must be a boolean, ignored`);
 		}
 	}
 	cache.set("limits", { stamp, loaded });

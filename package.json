@@ -16,5 +16,19 @@
   "devDependencies": {
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
-  }
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "permissions",
+    "subagent"
+  ],
+  "pi": {
+    "extensions": ["pi-gate/index.ts", "pi-subagent/index.ts"]
+  },
+  "files": [
+    "pi-gate",
+    "pi-subagent",
+    "!**/__tests__"
+  ]
 }
