@@ -29,7 +29,7 @@ pi-gate/
   inspect.ts       Facts: surfaces + paths + call ids extracted from a tool call           step 5
   policy.ts        layered Policy (defaults→global→project→grants→session), floors, deny   steps 6, 7
   grants.ts        session (memory) + persisted (config file) grants, review log helpers   step 8
-  prompt.ts        the 6-choice dialog → AskResult, titles, block text                     step 9
+  prompt.ts        the 8-choice dialog → AskResult, titles, block text                     step 9
   log.ts           review.jsonl + redact()                                                step 18
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
   index.ts         wiring: flags, footer, tool visibility, /gate                          steps 8, 9
@@ -49,8 +49,10 @@ pi-subagent/
 `pi-gate/config.json` is the shipped default. Scopes, lowest precedence first: built-in defaults →
 global file → project file (only when the cwd is trusted) → `grants.global` → `grants.project` →
 session grants. Within a surface, the **last matching pattern wins**; across facts, most-restrictive wins.
-Floors that no allow can downgrade: protected paths (the gate's own config, pi's config dir, git hooks,
-`.git`, `.pi`), shell wrappers/expansion, external directories, and any unparseable config (`degraded`).
+Floors escalate a value to at least `ask` no matter what any rule says: protected paths (the gate's own
+config and code, pi's config files, git hooks, the project's `.pi`), shell wrappers/expansion, external
+directories, and any unparseable config (`degraded`). Only the hard ones — protected paths and
+`degraded` — outlive "allow everything"; see the dialog section.
 
 ## Child model
 
@@ -70,10 +72,26 @@ rule — one wildcard per command segment (`git status *`, `cd *`), stored per s
 actually matches later; destructive (`rm`, `sudo`, `chmod`, …) and wrapper segments stay exact. A dismissed
 or timed-out dialog aborts (never allows). No UI (`pi -p`) blocks with the exact rule needed to allow it.
 
-"Allow everything" (dialog, or `/gate allow [off|5min|session]`) silences routine approvals for its whole
-scope. It never overrides a `deny` rule and never crosses a safety floor: protected paths, files outside
-the workspace, hidden arguments inside wrappers, and a broken config still open a dialog — with a note in
-the title saying why. The 5-minute window closes on its own (status line + notify on expiry).
+**Nothing in the dialog is truncated.** The title shows the whole call, every surfaced fact, and the exact
+rule (`rule: …` line) that a grant choice would write — in full; the TUI word-wraps and scrolls. Only the
+option labels shorten the rule (they have to stay single-line), and the unshortened rule sits right above
+them. pi's own limits are separate and not extension-configurable: the collapsed transcript preview shows
+20 visual lines (`ctrl+o` toggles it), and the bash tool caps what the *model* sees at 2000 lines / 50KB
+while saving the full output to a temp file (`core/tools/truncate.js`).
+
+"Allow everything" (dialog, or `/gate allow [off|5min|session]`) silences every approval in its scope:
+other commands, other tools — not just the call it was clicked on. It never overrides a `deny` rule, and
+it stops at the two **hard floors** — a write path to the gate's own config, pi's config files or git
+hooks, and a config file too broken to parse — because either one could switch the gate off from under
+the session. Those dialogs carry the reason in their title. Everything softer (a file outside the
+workspace, a hidden `$(…)` argument, an interpreter in a pipe, pi's own transcripts) is silenced, because
+a dialog that no choice can close is not a safeguard. Turning it on notifies, and the footer counts the
+window down; the 5-minute window closes on its own (status line + notify on expiry).
+
+A floor labels what is really there: it is computed from the call, not from whether some rule happened to
+be silent. And a rule whose pattern *is* the command — what "Allow this exact command" writes for a
+wrapper or destructive segment — is a decision about that command and is honoured; otherwise a grant for
+`npx vitest run` would be re-asked forever. Floors over coarse wildcards (`npx *`) still bite.
 
 ## Deviations from the plan (all verified against pi 1.4.0 types)
 
@@ -90,12 +108,19 @@ the title saying why. The 5-minute window closes on its own (status line + notif
    file supplies `permission` — otherwise a machine with no config would prompt for every call, reads
    included. A config that sets `permission` fully owns that layer, so its own `"*"` default still applies.
 8. `FactCheck.floor` is set for the `external_directory` fallback too (the type always had the variant, the
-   evaluator never assigned it) — an unlabelled floor would be invisible to "allow everything".
+   evaluator never assigned it) — an unlabelled floor would be invisible to "allow everything". Floors are
+   now computed from the call itself: `HARD_FLOORS` survive allow-everything (`protected_path`,
+   `degraded_config`), `SOFT_FLOORS` do not (`protected_read`, `wrapper`, `external_directory`), and
+   `allowAllBypasses()` replaced `noSafetyFloor()`.
+9. `protectedPathGlobs` guards the agent dir's *code and config* (`extensions/*`, `bin`, `npm`, `git`,
+   `settings.json`, `auth.json`, `models.json`, `SYSTEM.md`, …) rather than `~/.pi/agent/*` — flooring the
+   whole dir made every transcript or log read an un-silenceable dialog. A protected path reached by a
+   read-only tool floors as `protected_read`, by anything that can write as `protected_path`.
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 159 tests, no live provider needed
+npm test            # vitest run — 203 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```

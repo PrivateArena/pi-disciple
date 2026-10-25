@@ -70,15 +70,29 @@ describe("option labels", () => {
 		expect(labels.join("\n")).not.toMatch(/exactly/);
 	});
 
-	it("keeps every scope on one short line however long the command is", () => {
+	it("keeps the option list single-line, and puts the whole rule in the title instead", () => {
 		const long = `sudo rm -rf /repo/node_modules ${"x".repeat(120)} --preserve-root`;
-		const labels = optionLabels(decision({ grant: { surface: "bash", patterns: [long], label: long } }), "/repo");
-		expect(labels[1]).toContain("…");
-		expect(labels[1].length).toBeLessThan(90);
+		const withLong = decision({ grant: { surface: "bash", patterns: [long], label: long } });
+		const labels = optionLabels(withLong, "/repo");
 		for (const label of labels) {
 			expect(label).not.toMatch(/\n/);
-			expect(label.length).toBeLessThan(110);
+			expect(label).not.toContain("[…truncated]");
 		}
+		expect(dialogTitle(withLong)).toContain(long);
+	});
+
+	it("shows the whole call in the title — nothing is cut with a truncation marker", () => {
+		const long = `echo ${"y".repeat(900)} && cat pi-gate/prompt.ts`;
+		const title = dialogTitle(decision({ facts: { toolName: "bash", preview: long, callId: "c", cwd: "/repo", surfaces: [["bash", [long]]], paths: [] } }));
+		expect(title).toContain(long);
+		expect(title).not.toContain("[…truncated]");
+	});
+
+	it("lists every surfaced fact, not the first four", () => {
+		const checks = Array.from({ length: 6 }, (_, i) => ({ surface: `surface${i}`, value: `/very/long/path/${"z".repeat(200)}/file${i}.ts`, action: "ask" as const }));
+		const title = dialogTitle(decision({ checks }));
+		for (let i = 0; i < 6; i++) expect(title).toContain(`surface${i}`);
+		expect(title).toContain("z".repeat(200));
 	});
 
 	it("falls back to a bare wildcard when nothing is grantable", () => {

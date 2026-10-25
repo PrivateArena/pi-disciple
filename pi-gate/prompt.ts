@@ -2,7 +2,8 @@
  * The one dialog the whole design hangs on (plan step 7).
  *
  * Standard `ctx.ui.select` + `ctx.ui.input` only, so every pi front-end (TUI, RPC/Pendant) renders
- * it. Anything other than an explicit allow choice — Esc, dismiss, timeout, no UI — resolves to
+ * it. Text is shown in full — the human chooses on what they can see, and the option list scrolls.
+ * Anything other than an explicit allow choice — Esc, dismiss, timeout, no UI — resolves to
  * `abort`: a timeout never grants permission (FM-11).
  */
 
@@ -18,13 +19,22 @@ export const CHOICES: readonly Choice[] = ["once", "session", "project", "global
 
 const ALLOW_ALL_WINDOW_MINUTES = Math.round(ALLOW_ALL_WINDOW_MS / 60_000);
 
-/** Long commands live in the dialog title; a label only has to identify the rule. */
-const LABEL_PATTERN_CHARS = 56;
+/**
+ * Option labels stay single-line (displaySnippet) and long enough to identify the rule; the whole rule
+ * is repeated verbatim in the title (`rule:` line), so nothing is only ever available in cut form.
+ */
+const LABEL_PATTERN_CHARS = 200;
 
-/** The rule a choice would write, as the human reads it: single line, code-wrapped, length-capped. */
+/** The rule a choice would write, as the human reads it: single line, code-wrapped, full text in {@link ruleLine}. */
 function grantSummary(offer: Decision["grant"]): string {
-	const text = displaySnippet(offer?.label ?? "*", LABEL_PATTERN_CHARS);
-	return codeSpan(shorten(text || "*", LABEL_PATTERN_CHARS));
+	return codeSpan(shorten(displaySnippet(offer?.label ?? "*"), LABEL_PATTERN_CHARS));
+}
+
+/** Every pattern of the offer, verbatim and uncapped — what the grant scopes really write. */
+function ruleLine(decision: Decision): string {
+	const patterns = decision.grant?.patterns;
+	if (!patterns?.length) return "";
+	return `\nrule: ${patterns.map((pattern) => codeSpan(displaySnippet(pattern))).join("  ")}`;
 }
 
 export function optionLabels(decision: Decision, cwd: string): string[] {
@@ -43,16 +53,15 @@ export function optionLabels(decision: Decision, cwd: string): string[] {
 
 export function dialogTitle(decision: Decision, sub?: { role: string; task: string }, note?: string): string {
 	const floors = decision.floors.length ? ` [floor: ${decision.floors.join(", ")}]` : "";
-	const origin = sub ? `\nfrom subagent(${sub.role}): ${displaySnippet(sub.task, 120)}` : "";
+	const origin = sub ? `\nfrom subagent(${sub.role}): ${displaySnippet(sub.task)}` : "";
 	const banner = note ? `\n${note}` : "";
-	return `pi-gate: ${decision.facts.toolName} — ${codeSpan(displaySnippet(decision.facts.preview, 240))}${floors}${origin}${banner}\n${surfaceSummary(decision)}`;
+	return `pi-gate: ${decision.facts.toolName} — ${codeSpan(displaySnippet(decision.facts.preview))}${floors}${origin}${banner}${ruleLine(decision)}\n${surfaceSummary(decision)}`;
 }
 
 function surfaceSummary(decision: Decision): string {
 	return decision.checks
 		.filter((check) => check.surface !== decision.facts.toolName)
-		.slice(0, 4)
-		.map((check) => `${check.surface}: ${codeSpan(shorten(displaySnippet(check.value, 120), 120))} = ${check.action}${check.floor ? ` (${check.floor})` : ""}`)
+		.map((check) => `${check.surface}: ${codeSpan(displaySnippet(check.value))} = ${check.action}${check.floor ? ` (${check.floor})` : ""}`)
 		.join("\n");
 }
 

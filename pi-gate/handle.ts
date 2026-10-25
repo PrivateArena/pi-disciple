@@ -11,9 +11,9 @@ import { extract, type Facts } from "./inspect.ts";
 import {
 	ALLOW_ALL_WINDOW_MS,
 	allowAllActive,
+	allowAllBypasses,
 	blockReason,
 	evaluate,
-	noSafetyFloor,
 	type AllowAll,
 	type Decision,
 	type Policy,
@@ -101,9 +101,9 @@ export async function handleToolCall(
 			return { block: true, reason: blockReason(decision, "policy_deny") };
 		}
 
-		// "Allow everything" silences routine approvals for its whole scope. Hard floors — protected paths,
-		// files outside the workspace, hidden wrapper arguments, a broken config — still reach the dialog.
-		const bypassing = allowAllActive(state.allowAll, now()) && noSafetyFloor(decision);
+		// "Allow everything" silences every approval but the hard ones — the gate's own config, pi's config
+		// files, git hooks, and a config too broken to read. Those reach the dialog with the reason in the title.
+		const bypassing = allowAllActive(state.allowAll, now()) && allowAllBypasses(decision);
 		if (bypassing) {
 			await logit(appendLog, logPath, policy, decision, "allow_all", sub);
 			return;
@@ -143,9 +143,11 @@ export async function handleToolCall(
 			}
 			case "all_session":
 				setAllowAll(state, { until: null });
+				ctx.ui.notify("[gate] allow-everything is ON for this session — the footer shows it, /gate allow off stops it", "warning");
 				return;
 			case "all_timed":
 				setAllowAll(state, { until: now() + ALLOW_ALL_WINDOW_MS });
+				ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — /gate allow off stops it sooner`, "warning");
 				return;
 			case "abort_reason":
 				return { block: true, reason: blockReason(decision, "user_abort", redact(answer.reason ?? "")) };
@@ -168,7 +170,12 @@ export function setAllowAll(state: GateState, allowAll: AllowAll): void {
 export function allowAllNote(allowAll: AllowAll | undefined, now: number): string | undefined {
 	if (!allowAll || !allowAllActive(allowAll, now)) return undefined;
 	const scope = allowAll.until === null ? "for this session" : "until this window ends";
-	return `[gate] allow-everything is ON ${scope}: protected paths, files outside the workspace and hidden arguments still ask.`;
+	return (
+		"[gate] allow-everything is ON " +
+		scope +
+		": only the gate's own config, pi's config files and git hooks still ask, because those could switch the gate off. " +
+		"`/gate off` silences the gate itself for this run."
+	);
 }
 
 async function logit(
@@ -189,7 +196,7 @@ async function logit(
 		pattern: decision.matched?.pattern,
 		scope: decision.matched?.scope,
 		resolution,
-		preview: redact(displaySnippet(JSON.stringify({ surfaces: decision.facts.surfaces, paths: decision.facts.paths }), 600)),
+		preview: redact(displaySnippet(JSON.stringify({ surfaces: decision.facts.surfaces, paths: decision.facts.paths }))),
 		sub: sub ? { role: sub.role, taskExcerpt: displaySnippet(sub.task, 160) } : undefined,
 		floors: decision.floors,
 	});

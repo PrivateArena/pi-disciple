@@ -67,6 +67,16 @@ export function expandHome(p: string): string {
 	return p;
 }
 
+/**
+ * True when a rule's pattern *is* the value — the human named this exact call, not a class of calls.
+ * That distinction is what makes a floor survivable: `npx vitest run` allowed by name is a decision,
+ * `npx *` allowed is a shortcut over arbitrary code, and only the second one the floor must refuse.
+ */
+export function isExactRule(rule: { pattern: string }, value: string): boolean {
+	if (rule.pattern === "*") return value === "*";
+	return rule.pattern === value || expandHome(rule.pattern) === value;
+}
+
 // ---------------------------------------------------------------------------
 // paths
 // ---------------------------------------------------------------------------
@@ -124,9 +134,28 @@ export function pathPatternMatches(pattern: string, spelling: string): boolean {
  */
 export const PROTECTED_PATH_GLOBS: readonly string[] = ["*/.git/hooks/*", "*/.husky/*"];
 
+/**
+ * Agent-dir paths that are code or configuration — the ones whose contents run, or decide what runs.
+ * Deliberately *not* the whole agent dir: `sessions/`, `logs/` and `tmp/` hold transcripts, and
+ * flooring those made every transcript read an un-silenceable dialog under "allow everything".
+ */
+export const PROTECTED_AGENT_ENTRIES: readonly string[] = [
+	"extensions/*",
+	"bin/*",
+	"npm/*",
+	"git/*",
+	"settings.json",
+	"auth.json",
+	"models.json",
+	"models-store.json",
+	"SYSTEM.md",
+	"APPEND_SYSTEM.md",
+];
+
 export function protectedPathGlobs(cwd: string, agentDir: string): string[] {
+	const agent = stripTrailing(agentDir);
 	return [
-		`${stripTrailing(agentDir)}/*`,
+		...PROTECTED_AGENT_ENTRIES.map((entry) => `${agent}/${entry}`),
 		`${stripTrailing(cwd)}/.pi/extensions/*`,
 		`${stripTrailing(cwd)}/.pi/settings.json`,
 		...PROTECTED_PATH_GLOBS,
@@ -532,8 +561,14 @@ export function shorten(value: string, maxChars: number): string {
 	return `${value.slice(0, maxChars - 1)}…`;
 }
 
-/** Redacted, control-character-free, visibly truncated text for a dialog title (step 6 §6). */
-export function displaySnippet(value: string, maxChars = 400): string {
+/**
+ * Redacted, control-character-free, single-line text.
+ *
+ * Uncapped by default: the human would rather scroll through a whole command than approve a snippet of
+ * one (`[…truncated]` hid exactly the argument a decision turned on). Pass `maxChars` only where a
+ * fixed budget really matters — the review log line.
+ */
+export function displaySnippet(value: string, maxChars = Number.POSITIVE_INFINITY): string {
 	const clean = value
 		.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
 		.replace(/[\u0000-\u001f\u007f]+/g, " ")

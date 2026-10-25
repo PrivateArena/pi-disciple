@@ -28,6 +28,7 @@ import { getGlobalConfigFile, getProjectConfigFile, readConfigFile } from "./con
 import {
 	compoundPatternParts,
 	hasUnparsedExpansion,
+	isExactRule,
 	isExternalPath,
 	isProtectedPath,
 	matchesSegmentPattern,
@@ -67,7 +68,7 @@ export interface FactCheck {
 	value: string;
 	action: Action;
 	rule?: Rule;
-	floor?: "protected_path" | "wrapper" | "external_directory" | "degraded_config";
+	floor?: "protected_path" | "protected_read" | "wrapper" | "external_directory" | "degraded_config";
 }
 
 export interface GrantOffer {
@@ -97,21 +98,32 @@ export interface Decision {
 
 /**
  * "Allow everything" mode. `until === null` runs until the session ends; a timestamp closes the window
- * then. It silences routine approvals only — {@link SAFETY_FLOORS} still ask.
+ * then. It silences every approval except the ones behind {@link HARD_FLOORS}.
  */
 export interface AllowAll {
 	until: number | null;
 }
 
+/**
+ * The floors that survive "allow everything": a write to the gate's own config, pi's config files or
+ * git hooks, and a config file too broken to read. Everything else — an unusual command, a file
+ * outside the workspace, a hidden argument — is silenced for the scope the human just chose, because a
+ * dialog that no choice can silence is not a dialog, it is an outage.
+ *
+ * `protected_read` is the same path reached by a read-only tool (`read`/`grep`/`find`/`ls`): still
+ * asked by default, but "allow everything" may silence it — reading a transcript cannot reprogram the
+ * gate. `deny` rules are never a floor and are never overridden: they are an explicit instruction.
+ */
+export const HARD_FLOORS: readonly string[] = ["protected_path", "degraded_config"];
+
+/** Floors "allow everything" walks straight past. */
+export const SOFT_FLOORS: readonly string[] = ["protected_read", "wrapper", "external_directory"];
+
 /** Length of the "Allow everything for 5 minutes" window. */
 export const ALLOW_ALL_WINDOW_MS = 5 * 60 * 1000;
 
-/**
- * The floors that survive "allow everything": protected paths (incl. `.env`, keys, `.git`, `~/.pi`),
- * files outside the workspace, hidden arguments inside wrappers, and a broken config file. Skipping
- * these would turn one click into a blanket permission over the whole security model.
- */
-export const SAFETY_FLOORS: readonly string[] = ["protected_path", "external_directory", "wrapper", "degraded_config"];
+/** Tools that only ever read, so a protected path behind them is a look, not a rewrite. */
+export const READ_ONLY_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
 
 export function allowAllActive(allowAll: AllowAll | undefined, now: number): boolean {
 	if (!allowAll) return false;
@@ -119,11 +131,11 @@ export function allowAllActive(allowAll: AllowAll | undefined, now: number): boo
 }
 
 /**
- * True when an `ask` rests on nothing but routine rules, so "allow everything" may silence it. One hard
- * floor anywhere — protected path, external directory, hidden arguments, broken config — keeps the dialog.
+ * True when "allow everything" may let this call through. Written as a whitelist of the floors it may
+ * walk past, so a floor added later is hard by default rather than silently bypassed.
  */
-export function noSafetyFloor(decision: Decision): boolean {
-	return decision.floors.every((floor) => !SAFETY_FLOORS.includes(floor));
+export function allowAllBypasses(decision: Decision): boolean {
+	return decision.floors.every((floor) => SOFT_FLOORS.includes(floor));
 }
 
 export function resolveConfigPaths(cwd: string, trusted: boolean, agentDir: string = getAgentDir()): { globalFile: string; projectFile: string | null } {
@@ -315,29 +327,27 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 	const shellValues = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
 	const inPipeline = shell && shellValues.length > 1;
 	const protectedHit = isProtectedPath(facts.paths, policy.protectedGlobs);
+	const readOnly = READ_ONLY_TOOLS.includes(facts.toolName);
 	const checks: FactCheck[] = [];
 
-	const push = (surface: string, value: string, fallback: Action | undefined, escalation?: FactCheck["floor"]) => {
+	const push = (surface: string, value: string, fallback: Action | undefined) => {
 		const segments = shell && surface === facts.toolName ? shellValues : undefined;
 		const rule = matchRule(surface, value, policy, surface === facts.toolName, segments);
 		let action = rule?.action ?? fallback;
 		if (action === undefined) return;
+		// Floors are facts about the call, not about whichever rule happened to speak last: an `ask` from
+		// `external_directory: "ask"` is the same external access as a defaulted one, and labelling only the
+		// latter made every floor of the shipped config invisible to "allow everything".
+		const named = !!rule && isExactRule(rule, value);
 		let floor: FactCheck["floor"];
-		if (escalation && rule === undefined && action === "ask") {
-			// The floor *is* the reason for the ask — no rule of the human's said anything about this value.
-			floor = escalation;
-		} else if (action === "allow") {
-			if ((surface === "path" && isProtectedPath([value], policy.protectedGlobs)) || (surface !== "path" && protectedHit)) {
-				action = "ask";
-				floor = "protected_path";
-			} else if (shell && surface === facts.toolName && (isWrappedSegment(value, inPipeline) || hasUnparsedExpansion(value))) {
-				action = "ask";
-				floor = "wrapper";
-			} else if (policy.degraded) {
-				action = "ask";
-				floor = "degraded_config";
-			}
-		}
+		if (surface === "external_directory") floor = "external_directory";
+		else if ((surface === "path" && isProtectedPath([value], policy.protectedGlobs)) || (surface !== "path" && protectedHit))
+			floor = readOnly ? "protected_read" : "protected_path";
+		else if (shell && surface === facts.toolName && !named && (isWrappedSegment(value, inPipeline) || hasUnparsedExpansion(value)))
+			floor = "wrapper";
+		else if (policy.degraded) floor = "degraded_config";
+		// A floor escalates, never downgrades: `allow` on a guarded value is still an ask.
+		if (floor && action === "allow") action = "ask";
 		checks.push({ surface, value, action, rule, floor });
 	};
 
@@ -346,7 +356,7 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 	}
 	for (const spelling of facts.paths) {
 		push("path", spelling, "allow");
-		if (isExternalPath([spelling], facts.cwd)) push("external_directory", spelling, "ask", "external_directory");
+		if (isExternalPath([spelling], facts.cwd)) push("external_directory", spelling, "ask");
 	}
 
 	let action: Action = "allow";

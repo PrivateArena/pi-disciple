@@ -243,15 +243,48 @@ describe("ask outcomes", () => {
 		expect(result?.reason).toMatch(/Denied by policy/);
 	});
 
-	it("\"allow everything\" still asks for a path outside the workspace and says why in the title", async () => {
-		const policy = policyWith({ bash: { "*": "allow" } });
+	it("\"allow everything\" walks past a path outside the workspace and a hidden argument", async () => {
+		const policy = policyWith({ "*": "ask", bash: { "*": "ask" }, path: { "*": "allow" }, external_directory: "ask" });
 		const state = stateFor(policy);
 		state.allowAll = { until: null };
 		const log: UiLog = { titles: [], questions: [] };
-		await handleToolCall(bash("cat /etc/hosts"), stubCtx("0", log), state);
+		expect(await handleToolCall(bash("cat /etc/hosts"), stubCtx("0", log), state)).toBeUndefined();
+		expect(log.titles).toHaveLength(0);
+	});
+
+	it("\"allow everything\" still asks for the gate's own config and says why in the title", async () => {
+		const policy = policyWith({ "*": "allow", path: { "*": "allow" } });
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		const result = await handleToolCall(bash(`cat ${fixture?.agentDir}/extensions/pi-gate/config.json`), stubCtx("0", log), state);
+		expect(result).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
-		expect(log.titles[0]).toContain("external_directory");
+		expect(log.titles[0]).toContain("protected_path");
 		expect(log.titles[0]).toContain("allow-everything is ON");
+	});
+
+	it("\"allow everything\" silences a protected read, which cannot reprogram the gate", async () => {
+		const policy = policyWith({ "*": "allow", path: { "*": "allow" } });
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		const readSettings = { type: "tool_call", toolCallId: "c1", toolName: "read", input: { path: `${fixture?.agentDir}/settings.json` } } as ToolCallEvent;
+		expect(await handleToolCall(readSettings, stubCtx("0", log), state)).toBeUndefined();
+		expect(log.titles).toHaveLength(0);
+	});
+
+	it("makes an exact grant for a wrapper command stick — one click, then no more dialogs", async () => {
+		const policy = policyWith({ bash: { "*": "ask" } });
+		const grants: GrantRule[] = [];
+		const state = stateFor(policy, grants);
+		const log: UiLog = { titles: [], questions: [] };
+		await handleToolCall(bash("npx vitest run", "c1"), stubCtx("1", log), state);
+		expect(grants.map((rule) => rule.pattern)).toEqual(["npx vitest run"]);
+
+		const updated = state.applied[0]!;
+		expect(await handleToolCall(bash("npx vitest run", "c2"), stubCtx("1", log), { ...state, policy: updated })).toBeUndefined();
+		expect(log.titles).toHaveLength(1);
 	});
 
 	it("applies the policy changed by an earlier grant to later calls", async () => {

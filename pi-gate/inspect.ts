@@ -136,7 +136,7 @@ export const EXTRACTORS: Record<string, Extractor> = {
 /** Unknown tools (MCP, future built-ins): surface = tool name, paths from a parameter name scan. */
 export const defaultExtractor: Extractor = (input, cwd) => {
 	const scalars = Object.entries(input).filter(([, value]) => value === null || typeof value !== "object");
-	const rendered = scalars.length ? JSON.stringify(Object.fromEntries(scalars)).slice(0, 500) : "";
+	const rendered = scalars.length ? JSON.stringify(Object.fromEntries(scalars)) : "";
 	return { surfaces: [[(input.toolName as string) ?? "call", rendered ? [rendered] : []]], paths: scanPathParams(input, cwd) };
 };
 

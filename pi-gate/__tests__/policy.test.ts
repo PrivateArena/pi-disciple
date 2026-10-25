@@ -5,7 +5,7 @@ import {
 	evaluate,
 	isFullyDenied,
 	loadPolicy,
-	noSafetyFloor,
+	allowAllBypasses,
 	type Policy,
 	recomputeActive,
 	resolveConfigPaths,
@@ -210,18 +210,84 @@ describe("allow-everything mode", () => {
 		const decision = evaluate(extract("bash", { command: "git status" }, cwd, { callId: "t" }), policy);
 		expect(decision.action).toBe("ask");
 		expect(decision.floors).toEqual([]);
-		expect(noSafetyFloor(decision)).toBe(true);
+		expect(allowAllBypasses(decision)).toBe(true);
 	});
 
-	it("never silences a file outside the workspace, a protected path, or a hidden argument", () => {
+	it("silences a file outside the workspace and a hidden argument — that is what the human clicked", () => {
 		const { policy, cwd } = setup({ bash: { "*": "allow" } });
 		const external = evaluate(extract("bash", { command: "cat /etc/hosts" }, cwd, { callId: "t" }), policy);
 		expect(external.floors).toEqual(["external_directory"]);
-		expect(noSafetyFloor(external)).toBe(false);
+		expect(allowAllBypasses(external)).toBe(true);
 
 		const wrapper = evaluate(extract("bash", { command: "bash -c 'rm -rf /'" }, cwd, { callId: "t" }), policy);
 		expect(wrapper.floors).toContain("wrapper");
-		expect(noSafetyFloor(wrapper)).toBe(false);
+		expect(allowAllBypasses(wrapper)).toBe(true);
+	});
+
+	it("never silences a write to the gate's own config or to pi's config files", () => {
+		const { policy, cwd, agentDir } = setup({ "*": "allow", path: { "*": "allow" } });
+		const gateConfig = evaluate(extract("write", { path: `${agentDir}/extensions/pi-gate/config.json` }, cwd, { callId: "t" }), policy);
+		expect(gateConfig.action).toBe("ask");
+		expect(gateConfig.floors).toContain("protected_path");
+		expect(allowAllBypasses(gateConfig)).toBe(false);
+
+		const piSettings = evaluate(extract("bash", { command: `echo x > ${agentDir}/settings.json` }, cwd, { callId: "t" }), policy);
+		expect(piSettings.floors).toContain("protected_path");
+		expect(allowAllBypasses(piSettings)).toBe(false);
+	});
+
+	it("labels a floor even when a rule already asked for it", () => {
+		const { policy, cwd } = setup({ bash: { "*": "ask" }, external_directory: "ask", path: { "*": "allow" } });
+		const external = evaluate(extract("bash", { command: "cat /etc/hosts" }, cwd, { callId: "t" }), policy);
+		expect(external.action).toBe("ask");
+		expect(external.floors).toEqual(["external_directory"]);
+	});
+
+	it("does not floor pi's own transcripts, and still floors its config and extension code", () => {
+		const { policy, cwd, agentDir } = setup({ "*": "allow", path: { "*": "allow" } });
+		const transcript = evaluate(extract("read", { path: `${agentDir}/sessions/a/session.jsonl` }, cwd, { callId: "t" }), policy);
+		expect(transcript.floors).not.toContain("protected_path");
+		expect(transcript.floors).not.toContain("protected_read");
+
+		const extensionCode = evaluate(extract("edit", { path: `${agentDir}/extensions/pi-gate/policy.ts` }, cwd, { callId: "t" }), policy);
+		expect(extensionCode.floors).toContain("protected_path");
+	});
+
+	it("lets allow-everything silence a protected read, never a protected write", () => {
+		const { policy, cwd } = setup({ "*": "allow", path: { "*": "allow" } });
+		const gateConfig = `${cwd}/.pi/extensions/pi-gate/config.json`;
+		const read = evaluate(extract("read", { path: gateConfig }, cwd, { callId: "t" }), policy);
+		expect(read.action).toBe("ask");
+		expect(read.floors).toEqual(["protected_read"]);
+		expect(allowAllBypasses(read)).toBe(true);
+
+		const write = evaluate(extract("edit", { path: gateConfig }, cwd, { callId: "t" }), policy);
+		expect(write.floors).toEqual(["protected_path"]);
+		expect(allowAllBypasses(write)).toBe(false);
+	});
+});
+
+describe("exact rules against wrapper floors", () => {
+	it("honours a rule that names the wrapper command exactly, or the grant never takes effect", () => {
+		const { policy, cwd } = setup({ bash: { "*": "ask" } });
+		const granted = withSessionGrants(policy, [{ surface: "bash", pattern: "npx vitest run", action: "allow" }]);
+		const decision = evaluate(extract("bash", { command: "npx vitest run" }, cwd, { callId: "t" }), granted);
+		expect(decision.floors).toEqual([]);
+		expect(decision.action).toBe("allow");
+	});
+
+	it("still floors a coarse wildcard over a wrapper, which is permission for arbitrary code", () => {
+		const { policy, cwd } = setup({ bash: { "*": "ask", "npx *": "allow" } });
+		const decision = evaluate(extract("bash", { command: "npx some-package --flag" }, cwd, { callId: "t" }), policy);
+		expect(decision.floors).toContain("wrapper");
+		expect(decision.action).toBe("ask");
+	});
+
+	it("honours an exact rule over an unexpanded substitution for the same reason", () => {
+		const { policy, cwd } = setup({ bash: { "*": "ask" }, path: { "*": "allow" } });
+		const command = 'echo "built $(date)" > build/log';
+		const granted = withSessionGrants(policy, [{ surface: "bash", pattern: command, action: "allow" }]);
+		expect(evaluate(extract("bash", { command }, cwd, { callId: "t" }), granted).action).toBe("allow");
 	});
 });
 
