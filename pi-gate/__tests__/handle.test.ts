@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { handleToolCall, type GateState } from "../handle.ts";
 import { clearPolicyCache, loadPolicy, type Policy, withSessionGrants } from "../policy.ts";
-import { optionLabels } from "../prompt.ts";
 import { gateDoc, makeFixture, writeGlobalConfig, type Fixture } from "./fixture.ts";
 import type { GrantRule } from "../schema.ts";
 
@@ -45,6 +44,7 @@ function stateFor(policy: Policy, grants: GrantRule[] = []): GateState & { appli
 	return {
 		policy,
 		sessionGrants: grants,
+		allowAll: undefined,
 		subagentCalls: new Map(),
 		policyChanged: (next) => applied.push(next),
 		applied,
@@ -164,24 +164,94 @@ describe("ask outcomes", () => {
 		expect(log.titles[0]).toContain("find the auth code");
 	});
 
-	it("offers the exact command for persisted scopes and a wildcard for the session", async () => {
+	it("offers one wildcard rule for every grant scope", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const log: UiLog = { titles: [], questions: [] };
 		await handleToolCall(bash("git commit -m x"), stubCtx("0", log), stateFor(policy));
-		const labels = optionLabels(
-			{
-				grant: { surface: "bash", patterns: ["git commit *"], label: "git commit *", persisted: false },
-				persistedGrant: { surface: "bash", patterns: ["git commit -m x"], label: "git commit -m x", persisted: true },
-				facts: { toolName: "bash", preview: "x", callId: "c", cwd: fixture?.cwd ?? "/repo", surfaces: [["bash", ["git commit -m x"]]], paths: [] },
-				checks: [],
-				floors: [],
-				action: "ask",
+		const labels = log.questions[0]!;
+		expect(labels[1]).toBe("Allow `git commit *` for this session");
+		expect(labels[2]).toBe(`Allow \`git commit *\` for this project (${fixture?.cwd})`);
+		expect(labels[3]).toBe("Allow `git commit *` for all projects");
+	});
+
+	it("lets the call through and never asks again for a chained command once allowed for the session", async () => {
+		const policy = policyWith({ bash: { "*": "ask" } });
+		const grants: GrantRule[] = [];
+		const state = stateFor(policy, grants);
+		const log: UiLog = { titles: [], questions: [] };
+		await handleToolCall(bash("npm run lint && git status --porcelain", "c1"), stubCtx("1", log), state);
+		expect(grants.map((rule) => rule.pattern)).toEqual(["npm run *", "git status *"]);
+
+		const updated = state.applied[0]!;
+		const again = await handleToolCall(bash("npm run lint && git status --porcelain", "c2"), stubCtx("1", log), { ...state, policy: updated });
+		expect(again).toBeUndefined();
+		expect(log.titles).toHaveLength(1);
+	});
+
+	it("writes every segment of a chained command into the project config", async () => {
+		const policy = policyWith({ bash: { "*": "ask" } });
+		const log: UiLog = { titles: [], questions: [] };
+		const written: string[][] = [];
+		await handleToolCall(bash("npm run lint && git status --porcelain"), stubCtx("2", log), stateFor(policy), {
+			appendPersisted: async (offer, scope) => {
+				written.push([scope, ...offer.patterns]);
+				return { ok: true, file: "written" };
 			},
-			fixture?.cwd ?? "/repo",
-		);
-		expect(labels[1]).toContain("git commit *");
-		expect(labels[2]).toContain("git commit -m x");
-		expect(labels[0]).toBe("Allow once");
+		});
+		expect(written).toEqual([["project", "npm run *", "git status *"]]);
+	});
+
+	it("re-asks nothing after \"allow everything for this session\" (floors excepted)", async () => {
+		const policy = policyWith({ bash: { "*": "ask" } });
+		const state = stateFor(policy);
+		const log: UiLog = { titles: [], questions: [] };
+		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("6", log), state);
+		expect(state.allowAll).toEqual({ until: null });
+
+		const second = await handleToolCall(bash("npm publish", "c2"), stubCtx("6", log), state);
+		expect(second).toBeUndefined();
+		expect(log.titles).toHaveLength(1);
+	});
+
+	it("re-asks nothing inside the 5-minute window and asks again after it", async () => {
+		const policy = policyWith({ bash: { "*": "ask" } });
+		const state = stateFor(policy);
+		const log: UiLog = { titles: [], questions: [] };
+		let clock = 1_000_000;
+		const deps = { now: () => clock };
+
+		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("0", log), state, deps);
+		const timed = await handleToolCall(bash("git push", "c2"), stubCtx("7", log), state, deps);
+		expect(timed).toBeUndefined();
+		expect(state.allowAll).toEqual({ until: 1_000_000 + 5 * 60 * 1000 });
+
+		expect(await handleToolCall(bash("git fetch", "c3"), stubCtx("0", log), state, deps)).toBeUndefined();
+		expect(log.titles).toHaveLength(2);
+
+		clock += 5 * 60 * 1000 + 1;
+		await handleToolCall(bash("git pull", "c4"), stubCtx("0", log), state, deps);
+		expect(log.titles).toHaveLength(3);
+	});
+
+	it("\"allow everything\" never overrides a deny rule", async () => {
+		const policy = policyWith({ bash: { "*": "ask", "git push *": "deny" } });
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		const result = await handleToolCall(bash("git push origin main"), stubCtx("0", log), state);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/Denied by policy/);
+	});
+
+	it("\"allow everything\" still asks for a path outside the workspace and says why in the title", async () => {
+		const policy = policyWith({ bash: { "*": "allow" } });
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		await handleToolCall(bash("cat /etc/hosts"), stubCtx("0", log), state);
+		expect(log.titles).toHaveLength(1);
+		expect(log.titles[0]).toContain("external_directory");
+		expect(log.titles[0]).toContain("allow-everything is ON");
 	});
 
 	it("applies the policy changed by an earlier grant to later calls", async () => {

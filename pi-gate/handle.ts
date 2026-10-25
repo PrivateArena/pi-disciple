@@ -8,7 +8,17 @@
 
 import type { ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { extract, type Facts } from "./inspect.ts";
-import { blockReason, evaluate, type Decision, type Policy, withSessionGrants } from "./policy.ts";
+import {
+	ALLOW_ALL_WINDOW_MS,
+	allowAllActive,
+	blockReason,
+	evaluate,
+	noSafetyFloor,
+	type AllowAll,
+	type Decision,
+	type Policy,
+	withSessionGrants,
+} from "./policy.ts";
 import { appendPersisted, appendSession, type PersistedScope, type WriteResult } from "./grants.ts";
 import { ask, type AskResult } from "./prompt.ts";
 import { defaultLogPath, redact, reviewLog } from "./log.ts";
@@ -18,10 +28,14 @@ import type { GrantRule } from "./schema.ts";
 export interface GateState {
 	policy: Policy;
 	sessionGrants: GrantRule[];
+	/** "Allow everything" mode, set from the dialog; `undefined` when every call is judged normally. */
+	allowAll: AllowAll | undefined;
 	/** callId → what the `subagent(...)` call asked for, so nested dialogs can name their owner. */
 	subagentCalls: Map<string, { role: string; task: string }>;
 	/** Called after a grant changes the effective policy: reload + recompute active tools (step 9). */
 	policyChanged: (policy: Policy) => void;
+	/** Called when the human turns "allow everything" on or off, so the entry point can show and time it. */
+	allowAllChanged?: (allowAll: AllowAll) => void;
 }
 
 export interface GateDeps {
@@ -30,6 +44,8 @@ export interface GateDeps {
 	appendPersisted?: typeof appendPersisted;
 	reviewLog?: typeof reviewLog;
 	logPath?: () => string;
+	/** Injectable so the timed window is testable. */
+	now?: () => number;
 }
 
 export const OBSERVED_CALL_LIMIT = 64;
@@ -62,6 +78,7 @@ export async function handleToolCall(
 	const writePersisted = deps.appendPersisted ?? appendPersisted;
 	const appendLog = deps.reviewLog ?? reviewLog;
 	const logPath = deps.logPath?.() ?? defaultLogPath();
+	const now = deps.now ?? (() => Date.now());
 
 	try {
 		observeSubagentCall(state, event);
@@ -84,6 +101,14 @@ export async function handleToolCall(
 			return { block: true, reason: blockReason(decision, "policy_deny") };
 		}
 
+		// "Allow everything" silences routine approvals for its whole scope. Hard floors — protected paths,
+		// files outside the workspace, hidden wrapper arguments, a broken config — still reach the dialog.
+		const bypassing = allowAllActive(state.allowAll, now()) && noSafetyFloor(decision);
+		if (bypassing) {
+			await logit(appendLog, logPath, policy, decision, "allow_all", sub);
+			return;
+		}
+
 		if (!ctx.hasUI) {
 			await logit(appendLog, logPath, policy, decision, "no_ui", sub);
 			return { block: true, reason: blockReason(decision, "no_ui") };
@@ -94,6 +119,7 @@ export async function handleToolCall(
 			signal: ctx.signal,
 			timeoutMs: policy.config.promptTimeoutMs,
 			sub,
+			note: allowAllNote(state.allowAll, now()),
 		});
 		await logit(appendLog, logPath, policy, decision, answer.choice, sub);
 
@@ -108,13 +134,19 @@ export async function handleToolCall(
 			case "project":
 			case "global": {
 				const scope: PersistedScope = answer.choice;
-				if (decision.persistedGrant) {
-					const written: WriteResult = await writePersisted(decision.persistedGrant, scope, ctx.cwd);
+				if (decision.grant) {
+					const written: WriteResult = await writePersisted(decision.grant, scope, ctx.cwd);
 					if (!written.ok) ctx.ui.notify(`[gate] could not save the grant to ${written.file}: ${written.error}`, "error");
 				}
 				state.policyChanged(withSessionGrants(policy, state.sessionGrants));
 				return;
 			}
+			case "all_session":
+				setAllowAll(state, { until: null });
+				return;
+			case "all_timed":
+				setAllowAll(state, { until: now() + ALLOW_ALL_WINDOW_MS });
+				return;
 			case "abort_reason":
 				return { block: true, reason: blockReason(decision, "user_abort", redact(answer.reason ?? "")) };
 			case "abort":
@@ -125,6 +157,18 @@ export async function handleToolCall(
 		const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 		return { block: true, reason: `[gate] internal error: ${message}. The call was blocked (fail closed); run /gate status.` };
 	}
+}
+
+export function setAllowAll(state: GateState, allowAll: AllowAll): void {
+	state.allowAll = allowAll;
+	state.allowAllChanged?.(allowAll);
+}
+
+/** Tells the human, inside the dialog, why they are still being asked while "allow everything" is on. */
+export function allowAllNote(allowAll: AllowAll | undefined, now: number): string | undefined {
+	if (!allowAll || !allowAllActive(allowAll, now)) return undefined;
+	const scope = allowAll.until === null ? "for this session" : "until this window ends";
+	return `[gate] allow-everything is ON ${scope}: protected paths, files outside the workspace and hidden arguments still ask.`;
 }
 
 async function logit(

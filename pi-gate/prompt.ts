@@ -7,40 +7,45 @@
  */
 
 import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import type { Decision, GrantOffer } from "./policy.ts";
+import type { Decision } from "./policy.ts";
+import { ALLOW_ALL_WINDOW_MS } from "./policy.ts";
 import { codeSpan, displaySnippet, shorten } from "./match.ts";
 
-export type Choice = "once" | "session" | "project" | "global" | "abort" | "abort_reason";
+export type Choice = "once" | "session" | "project" | "global" | "abort" | "abort_reason" | "all_session" | "all_timed";
 
 /** Index-aligned with {@link optionLabels}. */
-export const CHOICES: readonly Choice[] = ["once", "session", "project", "global", "abort", "abort_reason"];
+export const CHOICES: readonly Choice[] = ["once", "session", "project", "global", "abort", "abort_reason", "all_session", "all_timed"];
+
+const ALLOW_ALL_WINDOW_MINUTES = Math.round(ALLOW_ALL_WINDOW_MS / 60_000);
 
 /** Long commands live in the dialog title; a label only has to identify the rule. */
 const LABEL_PATTERN_CHARS = 56;
 
 /** The rule a choice would write, as the human reads it: single line, code-wrapped, length-capped. */
-function grantSummary(offer: GrantOffer | undefined): string {
+function grantSummary(offer: Decision["grant"]): string {
 	const text = displaySnippet(offer?.label ?? "*", LABEL_PATTERN_CHARS);
 	return codeSpan(shorten(text || "*", LABEL_PATTERN_CHARS));
 }
 
 export function optionLabels(decision: Decision, cwd: string): string[] {
-	const session = grantSummary(decision.grant);
-	const persisted = grantSummary(decision.persistedGrant ?? decision.grant);
+	const grant = grantSummary(decision.grant);
 	return [
 		"Allow once",
-		`Allow ${session} for this session`,
-		`Allow ${persisted} exactly for this project (${cwd})`,
-		`Allow ${persisted} exactly for all projects`,
+		`Allow ${grant} for this session`,
+		`Allow ${grant} for this project (${cwd})`,
+		`Allow ${grant} for all projects`,
 		"Abort",
 		"Abort with reason…",
+		"Allow everything for this session",
+		`Allow everything for ${ALLOW_ALL_WINDOW_MINUTES} minutes`,
 	];
 }
 
-export function dialogTitle(decision: Decision, sub?: { role: string; task: string }): string {
+export function dialogTitle(decision: Decision, sub?: { role: string; task: string }, note?: string): string {
 	const floors = decision.floors.length ? ` [floor: ${decision.floors.join(", ")}]` : "";
 	const origin = sub ? `\nfrom subagent(${sub.role}): ${displaySnippet(sub.task, 120)}` : "";
-	return `pi-gate: ${decision.facts.toolName} — ${codeSpan(displaySnippet(decision.facts.preview, 240))}${floors}${origin}\n${surfaceSummary(decision)}`;
+	const banner = note ? `\n${note}` : "";
+	return `pi-gate: ${decision.facts.toolName} — ${codeSpan(displaySnippet(decision.facts.preview, 240))}${floors}${origin}${banner}\n${surfaceSummary(decision)}`;
 }
 
 function surfaceSummary(decision: Decision): string {
@@ -66,11 +71,11 @@ export interface AskIO {
 export async function ask(
 	ctx: Pick<ExtensionContext, "ui">,
 	decision: Decision,
-	options: { cwd: string; signal?: AbortSignal; timeoutMs?: number; sub?: { role: string; task: string }; io?: AskIO },
+	options: { cwd: string; signal?: AbortSignal; timeoutMs?: number; sub?: { role: string; task: string }; io?: AskIO; note?: string },
 ): Promise<AskResult> {
 	const ui = options.io ?? { select: ctx.ui.select.bind(ctx.ui), input: ctx.ui.input.bind(ctx.ui) };
 	const labels = optionLabels(decision, options.cwd);
-	const picked = await ui.select(dialogTitle(decision, options.sub), [...labels], {
+	const picked = await ui.select(dialogTitle(decision, options.sub, options.note), [...labels], {
 		signal: options.signal,
 		timeout: options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : undefined,
 	});

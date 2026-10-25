@@ -139,15 +139,20 @@ describe("env prefix, expansion and wrapper floors", () => {
 });
 
 describe("suggested grant patterns", () => {
-	it("persists the exact command, wildcards only in memory", () => {
-		expect(suggestBashPattern("git status --short", true)).toBe("git status --short");
-		expect(suggestBashPattern("git status --short", false)).toBe("git status *");
-		expect(suggestBashPattern("rm -rf build", false)).toBe("rm *");
+	it("wildcards the same way for every scope, keeping a two-word tool meaningful", () => {
+		expect(suggestBashPattern("git status --short")).toBe("git status *");
+		expect(suggestBashPattern("npm run build --watch")).toBe("npm run *");
 		expect(BASH_ARITY.git).toBe(2);
 	});
 
-	it("normalises whitespace before persisting", () => {
-		expect(suggestBashPattern("git   status   --short", true)).toBe("git status --short");
+	it("keeps destructive and wrapper commands exact", () => {
+		expect(suggestBashPattern("rm -rf build")).toBe("rm -rf build");
+		expect(suggestBashPattern("sudo reboot now")).toBe("sudo reboot now");
+		expect(suggestBashPattern("bash -c 'rm -rf /'")).toBe("bash -c 'rm -rf /'");
+	});
+
+	it("normalises whitespace before turning a command into a rule", () => {
+		expect(suggestBashPattern("git   status   --short")).toBe("git status *");
 		expect(normaliseCommand("a\t b")).toBe("a b");
 	});
 });

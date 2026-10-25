@@ -9,8 +9,7 @@ function decision(overrides: Partial<Decision> = {}): Decision {
 		checks: [],
 		floors: [],
 		facts: { toolName: "bash", preview: "sudo rm -rf /", callId: "c", cwd: "/repo", surfaces: [["bash", ["sudo rm -rf /"]]], paths: [] },
-		grant: { surface: "bash", patterns: ["sudo rm *"], label: "sudo rm *", persisted: false },
-		persistedGrant: { surface: "bash", patterns: ["sudo rm -rf /"], label: "sudo rm -rf /", persisted: true },
+		grant: { surface: "bash", patterns: ["sudo rm *"], label: "sudo rm *" },
 		...overrides,
 	} as Decision;
 }
@@ -42,15 +41,17 @@ function ctxWith(selectResult: string | undefined, inputResult: string | undefin
 afterEach(() => undefined);
 
 describe("option labels", () => {
-	it("are exactly the six scopes, index-aligned with CHOICES", () => {
+	it("are exactly the eight scopes, index-aligned with CHOICES", () => {
 		const labels = optionLabels(decision(), "/repo");
 		expect(labels).toEqual([
 			"Allow once",
 			"Allow `sudo rm *` for this session",
-			"Allow `sudo rm -rf /` exactly for this project (/repo)",
-			"Allow `sudo rm -rf /` exactly for all projects",
+			"Allow `sudo rm *` for this project (/repo)",
+			"Allow `sudo rm *` for all projects",
 			"Abort",
 			"Abort with reason…",
+			"Allow everything for this session",
+			"Allow everything for 5 minutes",
 		]);
 		expect(labels).toHaveLength(CHOICES.length);
 	});
@@ -60,32 +61,28 @@ describe("option labels", () => {
 		for (const label of labels.slice(1, 4)) expect(label).toContain("`");
 	});
 
-	it("keeps every scope on one short line however long the command is", () => {
-		const long = `cd /repo && find . -name "*.ts" -not -path "*/node_modules/*" -exec grep -l "a very long pattern indeed" {} \\; && head -20`;
-		const labels = optionLabels(
-			decision({
-				grant: { surface: "bash", patterns: ["cd *", "find *", "head *"], label: "cd * && find * && head *", persisted: false },
-				persistedGrant: { surface: "bash", patterns: long.split(" && "), label: long, persisted: true },
-			}),
-			"/repo",
-		);
-		expect(labels[1]).toBe("Allow `cd * && find * && head *` for this session");
-		for (const label of labels) {
-			expect(label).not.toMatch(/\n/);
-			expect(label.length).toBeLessThan(130);
-		}
-		expect(labels[2]).toContain("…");
+	it("offers one identical rule for every scope — session, project and global", () => {
+		const labels = optionLabels(decision(), "/repo");
+		const rule = (label: string) => label.match(/`[^`]*`/)?.[0];
+		expect(rule(labels[1])).toBe("`sudo rm *`");
+		expect(rule(labels[2])).toBe(rule(labels[1]));
+		expect(rule(labels[3])).toBe(rule(labels[1]));
+		expect(labels.join("\n")).not.toMatch(/exactly/);
 	});
 
-	it("marks a persisted grant as exact, in memory as a wildcard", () => {
-		const labels = optionLabels(decision(), "/repo");
-		expect(labels[1]).not.toContain("exactly");
-		expect(labels[2]).toContain("exactly");
-		expect(labels[3]).toContain("exactly");
+	it("keeps every scope on one short line however long the command is", () => {
+		const long = `sudo rm -rf /repo/node_modules ${"x".repeat(120)} --preserve-root`;
+		const labels = optionLabels(decision({ grant: { surface: "bash", patterns: [long], label: long } }), "/repo");
+		expect(labels[1]).toContain("…");
+		expect(labels[1].length).toBeLessThan(90);
+		for (const label of labels) {
+			expect(label).not.toMatch(/\n/);
+			expect(label.length).toBeLessThan(110);
+		}
 	});
 
 	it("falls back to a bare wildcard when nothing is grantable", () => {
-		const labels = optionLabels(decision({ grant: undefined, persistedGrant: undefined }), "/repo");
+		const labels = optionLabels(decision({ grant: undefined }), "/repo");
 		expect(labels[1]).toBe("Allow `*` for this session");
 	});
 });
@@ -157,6 +154,11 @@ describe("dialog title", () => {
 		const flagged = decision();
 		flagged.floors = ["protected_path", "wrapper"];
 		expect(dialogTitle(flagged)).toContain("[floor: protected_path, wrapper]");
+	});
+
+	it("carries the allow-everything note when one is given", () => {
+		expect(dialogTitle(decision(), undefined, "[gate] allow-everything is ON for this session")).toContain("allow-everything is ON");
+		expect(dialogTitle(decision())).not.toContain("allow-everything");
 	});
 
 	it("code-wraps the command and every surfaced value", () => {

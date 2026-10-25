@@ -8,9 +8,9 @@ import { gateDoc, makeFixture, readJson, writeGlobalConfig, type Fixture } from 
 
 let fixture: Fixture | undefined;
 
-const offer = (pattern: string, persisted: boolean, surface = "bash"): GrantOffer => ({ surface, patterns: [pattern], label: pattern, persisted });
+const offer = (pattern: string, surface = "bash"): GrantOffer => ({ surface, patterns: [pattern], label: pattern });
 /** A multi-segment offer, exactly as a chained command produces one. */
-const multiOffer = (...patterns: string[]): GrantOffer => ({ surface: "bash", patterns, label: patterns.join(" && "), persisted: false });
+const multiOffer = (...patterns: string[]): GrantOffer => ({ surface: "bash", patterns, label: patterns.join(" && ") });
 
 afterEach(() => {
 	fixture?.cleanup();
@@ -21,7 +21,7 @@ afterEach(() => {
 describe("session grants", () => {
 	it("live in memory and are cleared without touching a file", () => {
 		const grants = createSessionGrants();
-		appendSession(grants, offer("git commit *", false));
+		appendSession(grants, offer("git commit *"));
 		expect(grants).toEqual([{ surface: "bash", pattern: "git commit *", action: "allow" }]);
 		clearSession(grants);
 		expect(grants).toEqual([]);
@@ -29,8 +29,8 @@ describe("session grants", () => {
 
 	it("deduplicates the same pattern", () => {
 		const grants = createSessionGrants();
-		appendSession(grants, offer("ls", false));
-		appendSession(grants, offer("ls", false));
+		appendSession(grants, offer("ls"));
+		appendSession(grants, offer("ls"));
 		expect(grants).toHaveLength(1);
 	});
 
@@ -62,8 +62,8 @@ describe("persisted grants", () => {
 	it("appends both of two sequential grants", async () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
-		await appendPersisted(offer("git commit -m x", true), "global", fixture.cwd);
-		await appendPersisted(offer("cargo build", true), "global", fixture.cwd);
+		await appendPersisted(offer("git commit -m x"), "global", fixture.cwd);
+		await appendPersisted(offer("cargo build"), "global", fixture.cwd);
 
 		const file = persistedFile("global", fixture.cwd);
 		const doc = readJson(file) as { gate: { grants: { global: unknown[] }; permission: unknown } };
@@ -74,7 +74,7 @@ describe("persisted grants", () => {
 	it("keeps the file valid and re-readable by the policy loader", async () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
-		await appendPersisted(offer("ls", true), "global", fixture.cwd);
+		await appendPersisted(offer("ls"), "global", fixture.cwd);
 		clearPolicyCache();
 		const policy = loadPolicy(fixture.cwd, true, fixture.agentDir);
 		expect(policy.errors).toEqual([]);
@@ -86,8 +86,8 @@ describe("persisted grants", () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
 		await Promise.all([
-			appendPersisted(offer("git status", true), "global", fixture.cwd),
-			appendPersisted(offer("git diff", true), "global", fixture.cwd),
+			appendPersisted(offer("git status"), "global", fixture.cwd),
+			appendPersisted(offer("git diff"), "global", fixture.cwd),
 		]);
 		const doc = readJson(persistedFile("global", fixture.cwd)) as { gate: { grants: { global: { pattern: string }[] } } };
 		const patterns = doc.gate.grants.global.map((grant) => grant.pattern).sort();
@@ -97,7 +97,7 @@ describe("persisted grants", () => {
 	it("writes project grants to the project file only", async () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
-		const written = await appendPersisted(offer("go test ./...", true), "project", fixture.cwd);
+		const written = await appendPersisted(offer("go test ./..."), "project", fixture.cwd);
 		expect(written.ok).toBe(true);
 		expect(written.file).toContain(".pi/extensions/pi-gate/config.json");
 		const globalDoc = readJson(persistedFile("global", fixture.cwd)) as { gate?: { grants?: unknown } };
@@ -107,7 +107,7 @@ describe("persisted grants", () => {
 	it("writes every segment of a chained command as its own grant", async () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
-		const chained: GrantOffer = { surface: "bash", patterns: ["cd /repo", "git status"], label: "cd /repo && git status", persisted: true };
+		const chained: GrantOffer = { surface: "bash", patterns: ["cd /repo", "git status"], label: "cd /repo && git status" };
 		await appendPersisted(chained, "global", fixture.cwd);
 		const doc = readJson(persistedFile("global", fixture.cwd)) as { gate: { grants: { global: { pattern: string }[] } } };
 		expect(doc.gate.grants.global.map((grant) => grant.pattern)).toEqual(["cd /repo", "git status"]);
@@ -116,7 +116,7 @@ describe("persisted grants", () => {
 	it("is idempotent for a repeated chained grant", async () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
-		const chained: GrantOffer = { surface: "bash", patterns: ["cd /repo", "git status"], label: "cd /repo && git status", persisted: true };
+		const chained: GrantOffer = { surface: "bash", patterns: ["cd /repo", "git status"], label: "cd /repo && git status" };
 		await appendPersisted(chained, "global", fixture.cwd);
 		await appendPersisted(chained, "global", fixture.cwd);
 		const doc = readJson(persistedFile("global", fixture.cwd)) as { gate: { grants: { global: unknown[] } } };
@@ -126,7 +126,7 @@ describe("persisted grants", () => {
 	it("clears grants on reset", async () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
-		await appendPersisted(offer("ls", true), "global", fixture.cwd);
+		await appendPersisted(offer("ls"), "global", fixture.cwd);
 		const cleared = await resetPersisted("global", fixture.cwd);
 		expect(cleared.ok).toBe(true);
 		const doc = readJson(persistedFile("global", fixture.cwd)) as { gate: { grants: { global: unknown[] } } };
@@ -136,7 +136,7 @@ describe("persisted grants", () => {
 	it("refuses to write into an unparseable config instead of clobbering it", async () => {
 		fixture = makeFixture();
 		writeGlobalConfig(fixture, "{ not json ");
-		const result = await appendPersisted(offer("ls", true), "global", fixture.cwd);
+		const result = await appendPersisted(offer("ls"), "global", fixture.cwd);
 		expect(result.ok).toBe(false);
 		expect(result.error).toMatch(/invalid JSON/);
 	});

@@ -51,9 +51,17 @@ session grants. Within a surface, the **last matching pattern wins**; across fac
 Floors that no allow can downgrade: protected paths (the gate's own config, pi's config dir, git hooks,
 `.git`, `.pi`), shell wrappers/expansion, external directories, and any unparseable config (`degraded`).
 
-Dialog: `Allow once · Allow for this session · Allow for this project · Allow for all projects · Abort ·
-Abort with reason…`. A dismissed or timed-out dialog aborts (never allows). No UI (`pi -p`) blocks with
-the exact rule needed to allow it.
+Dialog choices, in list order: `Allow once` · `Allow <rule> for this session` · `Allow <rule> for this
+project (<cwd>)` · `Allow <rule> for all projects` · `Abort` · `Abort with reason…` · `Allow everything
+for this session` · `Allow everything for 5 minutes`. All three "Allow <rule>" choices write the **same**
+rule — one wildcard per command segment (`git status *`, `cd *`), stored per segment so a chained command
+actually matches later; destructive (`rm`, `sudo`, `chmod`, …) and wrapper segments stay exact. A dismissed
+or timed-out dialog aborts (never allows). No UI (`pi -p`) blocks with the exact rule needed to allow it.
+
+"Allow everything" (dialog, or `/gate allow [off|5min|session]`) silences routine approvals for its whole
+scope. It never overrides a `deny` rule and never crosses a safety floor: protected paths, files outside
+the workspace, hidden arguments inside wrappers, and a broken config still open a dialog — with a note in
+the title saying why. The 5-minute window closes on its own (status line + notify on expiry).
 
 ## Deviations from the plan (all verified against pi 1.4.0 types)
 
@@ -66,11 +74,16 @@ the exact rule needed to allow it.
 5. `reviewLog` records allow decisions too, not only ask resolutions (FM-17 audit value).
 6. Two extra modules: `pi-gate/handle.ts` (testable pipeline seam) and `pi-subagent/run.ts` (guard + result
    mapping), so `index.ts` stays wiring only.
+7. The built-in default permission map is a real rule layer (`scope: "builtin"`) **only** when no config
+   file supplies `permission` — otherwise a machine with no config would prompt for every call, reads
+   included. A config that sets `permission` fully owns that layer, so its own `"*"` default still applies.
+8. `FactCheck.floor` is set for the `external_directory` fallback too (the type always had the variant, the
+   evaluator never assigned it) — an unlabelled floor would be invisible to "allow everything".
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 132 tests, no live provider needed
+npm test            # vitest run — 159 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```

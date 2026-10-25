@@ -18,6 +18,7 @@ import {
 	type GrantRule,
 	SCOPE_PRECEDENCE,
 	type Scope,
+	flattenPermission,
 	isAction,
 	mostRestrictive,
 	parseGateConfig,
@@ -79,7 +80,6 @@ export interface GrantOffer {
 	patterns: string[];
 	/** Single-line summary of `patterns`, for the dialog. */
 	label: string;
-	persisted: boolean;
 }
 
 export interface Decision {
@@ -89,10 +89,41 @@ export interface Decision {
 	matched?: Rule;
 	/** Set when the call is blocked: model-facing text. */
 	reason?: string;
+	/** What any "Allow <scope>" choice remembers — one shape for session, project and global. */
 	grant?: GrantOffer;
-	persistedGrant?: GrantOffer;
 	floors: string[];
 	checks: FactCheck[];
+}
+
+/**
+ * "Allow everything" mode. `until === null` runs until the session ends; a timestamp closes the window
+ * then. It silences routine approvals only — {@link SAFETY_FLOORS} still ask.
+ */
+export interface AllowAll {
+	until: number | null;
+}
+
+/** Length of the "Allow everything for 5 minutes" window. */
+export const ALLOW_ALL_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * The floors that survive "allow everything": protected paths (incl. `.env`, keys, `.git`, `~/.pi`),
+ * files outside the workspace, hidden arguments inside wrappers, and a broken config file. Skipping
+ * these would turn one click into a blanket permission over the whole security model.
+ */
+export const SAFETY_FLOORS: readonly string[] = ["protected_path", "external_directory", "wrapper", "degraded_config"];
+
+export function allowAllActive(allowAll: AllowAll | undefined, now: number): boolean {
+	if (!allowAll) return false;
+	return allowAll.until === null || now < allowAll.until;
+}
+
+/**
+ * True when an `ask` rests on nothing but routine rules, so "allow everything" may silence it. One hard
+ * floor anywhere — protected path, external directory, hidden arguments, broken config — keeps the dialog.
+ */
+export function noSafetyFloor(decision: Decision): boolean {
+	return decision.floors.every((floor) => !SAFETY_FLOORS.includes(floor));
 }
 
 export function resolveConfigPaths(cwd: string, trusted: boolean, agentDir: string = getAgentDir()): { globalFile: string; projectFile: string | null } {
@@ -179,9 +210,13 @@ function buildPolicy(o: {
 
 	const permission = globalConfig.permission ?? DEFAULT_GATE_CONFIG.permission;
 	const defaultAction = isAction(permission["*"]) ? (permission["*"] as Action) : "ask";
+	// The built-in defaults are a real rule layer, not display text: without it a machine with no config
+	// file — or one that omits `permission` — would ask for every call, including the reads and
+	// in-workspace edits the shipped defaults allow. Only when no file supplies a permission map.
+	const builtinRules = globalConfig.permission === undefined ? flattenPermission(DEFAULT_GATE_CONFIG.permission).map(toRule("builtin")) : [];
 
 	return {
-		rules: orderRules(rules),
+		rules: orderRules([...builtinRules, ...rules]),
 		files,
 		errors,
 		invalidScopes,
@@ -282,13 +317,16 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 	const protectedHit = isProtectedPath(facts.paths, policy.protectedGlobs);
 	const checks: FactCheck[] = [];
 
-	const push = (surface: string, value: string, fallback: Action | undefined) => {
+	const push = (surface: string, value: string, fallback: Action | undefined, escalation?: FactCheck["floor"]) => {
 		const segments = shell && surface === facts.toolName ? shellValues : undefined;
 		const rule = matchRule(surface, value, policy, surface === facts.toolName, segments);
 		let action = rule?.action ?? fallback;
 		if (action === undefined) return;
 		let floor: FactCheck["floor"];
-		if (action === "allow") {
+		if (escalation && rule === undefined && action === "ask") {
+			// The floor *is* the reason for the ask — no rule of the human's said anything about this value.
+			floor = escalation;
+		} else if (action === "allow") {
 			if ((surface === "path" && isProtectedPath([value], policy.protectedGlobs)) || (surface !== "path" && protectedHit)) {
 				action = "ask";
 				floor = "protected_path";
@@ -308,7 +346,7 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 	}
 	for (const spelling of facts.paths) {
 		push("path", spelling, "allow");
-		if (isExternalPath([spelling], facts.cwd)) push("external_directory", spelling, "ask");
+		if (isExternalPath([spelling], facts.cwd)) push("external_directory", spelling, "ask", "external_directory");
 	}
 
 	let action: Action = "allow";
@@ -329,8 +367,7 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 		matched,
 		checks,
 		floors: [...new Set(checks.flatMap((check) => (check.floor ? [check.floor] : [])))],
-		grant: offerGrant(facts, false),
-		persistedGrant: offerGrant(facts, true),
+		grant: offerGrant(facts),
 	};
 }
 
@@ -339,26 +376,28 @@ function severityOf(action: Action): number {
 }
 
 /**
- * What the dialog offers to remember, one pattern per command segment. Shell segments get a
- * wildcard prefix in memory and the exact command for persisted scopes (FM-10).
+ * What the dialog offers to remember: one wildcard pattern per command segment, identical for every
+ * scope. Persisted grants used to store the exact command while a session grant stored a wildcard, so
+ * one click meant two different things — and an exact multi-argument command is useless as a rule.
+ * `suggestBashPattern` keeps dangerous and wrapper segments exact, so the wildcard is not naive.
  */
-export function offerGrant(facts: Facts, persisted: boolean): GrantOffer | undefined {
+export function offerGrant(facts: Facts): GrantOffer | undefined {
 	const values = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
 	if (values.length === 0) return undefined;
 	const shell = isShellTool(facts.toolName);
-	const patterns = shell ? values.map((seg) => suggestBashPattern(seg, persisted)) : [values[0]!];
-	return { surface: facts.toolName, patterns, label: patterns.join(shell ? " && " : ""), persisted };
+	const patterns = shell ? values.map((seg) => suggestBashPattern(seg)) : [values[0]!];
+	return { surface: facts.toolName, patterns, label: patterns.join(shell ? " && " : "") };
 }
 
 /** Model-facing text for a blocked call, naming the fix (FM-12). */
 export function blockReason(decision: Decision, kind: "policy_deny" | "user_abort" | "no_ui", instruction?: string): string {
-	const { facts, matched, persistedGrant, grant } = decision;
+	const { facts, matched, grant } = decision;
 	if (kind === "user_abort") {
 		return instruction
 			? `[gate] Blocked by the user. Follow this instruction verbatim and do not retry the blocked call: ${instruction}`
 			: `[gate] Blocked by the user: ${facts.preview}. Do not retry it; choose another approach or ask.`;
 	}
-	const fixPatterns = [...new Set(persistedGrant?.patterns ?? grant?.patterns ?? ["*"])];
+	const fixPatterns = [...new Set(grant?.patterns ?? ["*"])];
 	const fix = fixPatterns.map((pattern) => `"${pattern}": "allow"`).join(", ");
 	if (kind === "no_ui") {
 		return (

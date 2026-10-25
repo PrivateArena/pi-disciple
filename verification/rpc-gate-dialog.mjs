@@ -12,6 +12,7 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "age
 const PROJ = process.argv[3] ?? process.cwd();
 const REPO = new URL("../", import.meta.url).pathname;
 const answerWith = process.argv[2] ?? "Allow once";
+const secondCommand = process.argv[4] ?? "git status --short && echo MORE";
 
 const child = spawn("pi", ["--mode", "rpc", "--no-extensions", "--extension", `${REPO}/pi-gate/index.ts`], {
 	cwd: PROJ,
@@ -37,7 +38,16 @@ createInterface({ input: child.stdout }).on("line", (line) => {
 			console.log("   -> leaving unanswered (promptTimeoutMs test)");
 			return;
 		}
-		const chosen = (event.options ?? []).find((o) => o.includes(answerWith)) ?? event.options?.[0];
+		const options = event.options ?? [];
+		const chosen = /^\d+$/.test(answerWith)
+			? options[Number(answerWith)]
+			: options.find((option) => option.toLowerCase().includes(answerWith.toLowerCase()));
+		if (!chosen) {
+			console.error(`\nno option matches "${answerWith}" — refusing to answer rather than skewing the run`);
+			process.exitCode = 2;
+			child.kill("SIGTERM");
+			process.exit(2);
+		}
 		console.log(`   -> answering: ${chosen}`);
 		setTimeout(() => send({ type: "extension_ui_response", id: event.id, value: chosen }), 200);
 		return;
@@ -52,6 +62,11 @@ createInterface({ input: child.stdout }).on("line", (line) => {
 		console.log(`[tool result] ${JSON.stringify(event.result?.content ?? "").slice(0, 200)}`);
 		return;
 	}
+	if (event.type === "agent_end") {
+		console.log("[agent end]");
+		askAgain();
+		return;
+	}
 	if (event.type === "message_end") {
 		for (const part of event.message?.content ?? []) {
 			if (part.type === "toolCall") console.log(`[tool call] ${part.name} ${JSON.stringify(part.arguments).slice(0, 100)}`);
@@ -60,9 +75,24 @@ createInterface({ input: child.stdout }).on("line", (line) => {
 	}
 });
 
-send({ type: "prompt", message: "Run the bash command: ls -la src -- and tell me how many entries it listed." });
+send({ type: "prompt", message: "Run the bash command: ls -la src && echo DONE -- and tell me what it printed." });
+
+// Second, identical prompt: an allow that was supposed to be remembered must make this turn dialog-free.
+let prompts = 1;
+const askAgain = () => {
+	if (prompts > 1) return;
+	prompts++;
+	setTimeout(
+		() =>
+			send({
+				type: "prompt",
+				message: `Run this exact bash command now with the bash tool, never reuse earlier output: ${secondCommand} -- then tell me what it printed.`,
+			}),
+		400,
+	);
+};
 setTimeout(() => {
-	console.log(`\ndialogs seen: ${dialogs}`);
+	console.log(`\nprompts: ${prompts} · dialogs seen: ${dialogs} (second command: "${secondCommand}")`);
 	child.kill("SIGTERM");
 	process.exit(0);
-}, 30_000);
+}, 90_000);

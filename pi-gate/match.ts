@@ -418,14 +418,60 @@ export function normaliseCommand(seg: string): string {
  * and never for a wrapper or interpreter segment, whose wildcard would outlive the call it came
  * from (`sh evil.sh` must not be covered by a session grant made for `curl x | sh`).
  */
-export function suggestBashPattern(seg: string, persisted: boolean): string {
+export function suggestBashPattern(seg: string): string {
 	const normalised = normaliseCommand(seg);
-	if (persisted || isWrappedSegment(normalised, true)) return normalised;
+	if (isWrappedSegment(normalised, true) || isDestructiveHead(normalised)) return normalised;
 	const tokens = tokenize(peelEnvPrefix(normalised).command);
 	if (tokens.length === 0) return normalised;
 	const name = tokens[0]!.split("/").pop()!;
 	const arity = BASH_ARITY[name] ?? 1;
 	return `${tokens.slice(0, Math.min(arity, tokens.length)).join(" ")} *`;
+}
+
+/**
+ * Commands whose wildcard form is far broader than the call the human actually looked at: `rm *` is not
+ * "the same kind of thing" as `rm -rf build`, it is permission to delete anything. These keep the
+ * exact command in every scope, which is what the dialog text promises.
+ */
+export const DESTRUCTIVE_HEADS: ReadonlySet<string> = new Set([
+	"rm",
+	"rmdir",
+	"unlink",
+	"shred",
+	"truncate",
+	"dd",
+	"mkfs",
+	"fdisk",
+	"parted",
+	"mount",
+	"umount",
+	"mv",
+	"chown",
+	"chgrp",
+	"chmod",
+	"kill",
+	"pkill",
+	"killall",
+	"sudo",
+	"doas",
+	"su",
+	"systemctl",
+	"service",
+	"shutdown",
+	"reboot",
+	"halt",
+	"poweroff",
+	"nsenter",
+	"useradd",
+	"userdel",
+	"usermod",
+	"crontab",
+]);
+
+export function isDestructiveHead(seg: string): boolean {
+	const tokens = tokenize(peelEnvPrefix(normaliseCommand(seg)).command);
+	const name = (tokens[0] ?? "").split("/").pop() ?? "";
+	return DESTRUCTIVE_HEADS.has(name);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { clearPolicyCache, evaluate, isFullyDenied, loadPolicy, type Policy, recomputeActive, resolveConfigPaths, withSessionGrants } from "../policy.ts";
+import {
+	allowAllActive,
+	clearPolicyCache,
+	evaluate,
+	isFullyDenied,
+	loadPolicy,
+	noSafetyFloor,
+	type Policy,
+	recomputeActive,
+	resolveConfigPaths,
+	withSessionGrants,
+} from "../policy.ts";
 import { extract } from "../inspect.ts";
 import { DEFAULT_GATE_CONFIG } from "../schema.ts";
 import { gateDoc, makeFixture, writeGlobalConfig, writeProjectConfig, type Fixture } from "./fixture.ts";
@@ -153,11 +164,80 @@ describe("defaults", () => {
 		expect(policy.files).toEqual([]);
 		expect(policy.config.permission).toEqual(DEFAULT_GATE_CONFIG.permission);
 		expect(policy.defaultAction).toBe("ask");
+		expect(policy.rules.length).toBeGreaterThan(0);
+		expect(policy.rules.filter((rule) => rule.scope !== "builtin")).toEqual([]);
 	});
 
 	it("defaults to ask when permission has no wildcard entry", () => {
 		const { policy, cwd } = setup({ read: "allow" });
 		expect(policy.defaultAction).toBe("ask");
 		expect(actionOf(policy, cwd, "mcp__x__y", { value: 1 })).toBe("ask");
+	});
+});
+
+describe("grant offers", () => {
+	it("are one wildcard rule per segment, the same in every scope", () => {
+		const { policy, cwd } = setup({ bash: { "*": "ask" } });
+		const decision = evaluate(extract("bash", { command: "git status --short && npm run lint" }, cwd, { callId: "t" }), policy);
+		expect(decision.grant?.patterns).toEqual(["git status *", "npm run *"]);
+		expect(decision.grant?.label).toBe("git status * && npm run *");
+		expect("persistedGrant" in decision).toBe(false);
+	});
+
+	it("keep a destructive command exact, so the rule cannot outgrow the call it came from", () => {
+		const { policy, cwd } = setup({ bash: { "*": "ask" } });
+		const decision = evaluate(extract("bash", { command: "rm -rf build/out" }, cwd, { callId: "t" }), policy);
+		expect(decision.grant?.patterns).toEqual(["rm -rf build/out"]);
+	});
+
+	it("name the concrete value for a non-shell tool, since a path has no wildcard form", () => {
+		const { policy, cwd } = setup({ edit: "ask" });
+		const decision = evaluate(extract("edit", { path: `${cwd}/src/a.ts` }, cwd, { callId: "t" }), policy);
+		expect(decision.grant?.patterns).toEqual([`${cwd}/src/a.ts`]);
+	});
+});
+
+describe("allow-everything mode", () => {
+	it("runs to the end of the session when no deadline is set, and expires otherwise", () => {
+		expect(allowAllActive(undefined, 10)).toBe(false);
+		expect(allowAllActive({ until: null }, 10)).toBe(true);
+		expect(allowAllActive({ until: 11 }, 10)).toBe(true);
+		expect(allowAllActive({ until: 10 }, 10)).toBe(false);
+	});
+
+	it("silences a routine approval", () => {
+		const { policy, cwd } = setup({ bash: { "*": "ask" } });
+		const decision = evaluate(extract("bash", { command: "git status" }, cwd, { callId: "t" }), policy);
+		expect(decision.action).toBe("ask");
+		expect(decision.floors).toEqual([]);
+		expect(noSafetyFloor(decision)).toBe(true);
+	});
+
+	it("never silences a file outside the workspace, a protected path, or a hidden argument", () => {
+		const { policy, cwd } = setup({ bash: { "*": "allow" } });
+		const external = evaluate(extract("bash", { command: "cat /etc/hosts" }, cwd, { callId: "t" }), policy);
+		expect(external.floors).toEqual(["external_directory"]);
+		expect(noSafetyFloor(external)).toBe(false);
+
+		const wrapper = evaluate(extract("bash", { command: "bash -c 'rm -rf /'" }, cwd, { callId: "t" }), policy);
+		expect(wrapper.floors).toContain("wrapper");
+		expect(noSafetyFloor(wrapper)).toBe(false);
+	});
+});
+
+describe("shipped defaults inside the workspace", () => {
+	it("allows edits and reads in the project, asks for shell, and refuses secret files", () => {
+		fixture = makeFixture();
+		clearPolicyCache();
+		const policy = loadPolicy(fixture.cwd, true, fixture.agentDir);
+		const cwd = fixture.cwd;
+		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/src/a.ts` })).toBe("allow");
+		expect(actionOf(policy, cwd, "write", { path: `${cwd}/src/new.ts` })).toBe("allow");
+		expect(actionOf(policy, cwd, "read", { path: `${cwd}/src/a.ts` })).toBe("allow");
+		expect(actionOf(policy, cwd, "bash", { command: "ls" })).toBe("ask");
+		expect(actionOf(policy, cwd, "read", { path: `${cwd}/.env` })).toBe("deny");
+		expect(actionOf(policy, cwd, "read", { path: `${cwd}/.env.example` })).toBe("allow");
+		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/.git/hooks/pre-commit` })).toBe("ask");
+		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/../else/file.ts` })).toBe("ask");
 	});
 });

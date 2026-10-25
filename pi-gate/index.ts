@@ -16,6 +16,7 @@ import { isFullyDenied, loadPolicy, type Policy, recomputeActive, resolveConfigP
 import { writeDefaultConfig } from "./config-file.ts";
 import { clearSession, createSessionGrants, resetPersisted, type PersistedScope } from "./grants.ts";
 import { handleToolCall, type GateState } from "./handle.ts";
+import { ALLOW_ALL_WINDOW_MS, type AllowAll } from "./policy.ts";
 import { DEFAULT_GATE_CONFIG, type GrantRule } from "./schema.ts";
 
 export default function piGate(pi: ExtensionAPI) {
@@ -24,6 +25,8 @@ export default function piGate(pi: ExtensionAPI) {
 	const hiddenByGate = new Set<string>();
 	const subagentCalls = new Map<string, { role: string; task: string }>();
 	let offForSession = false;
+	let allowAll: AllowAll | undefined;
+	let allowAllTimer: ReturnType<typeof setTimeout> | undefined;
 
 	pi.registerFlag("no-gate", { type: "boolean", default: false, description: "Disable the permission gate for this run" });
 
@@ -72,24 +75,51 @@ export default function piGate(pi: ExtensionAPI) {
 
 	const footer = (ctx: ExtensionContext) => {
 		const on = !disabled() && policy?.config.enabled !== false;
-		ctx.ui.setStatus("pi-gate", on ? `gate: on · ${policy?.files.length ?? 0} file(s)` : "gate: off");
+		if (!on) return ctx.ui.setStatus("pi-gate", "gate: off");
+		const base = `gate: on · ${policy?.files.length ?? 0} file(s)`;
+		if (!allowAll) return ctx.ui.setStatus("pi-gate", base);
+		const mode = allowAll.until === null ? "allow-everything: session" : `allow-everything: ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`;
+		ctx.ui.setStatus("pi-gate", `${base} · ${mode}`);
+	};
+
+	/** The timed window has to close on its own — a status line is not a timer. */
+	const applyAllowAll = (ctx: ExtensionContext, next: AllowAll | undefined) => {
+		allowAll = next;
+		if (allowAllTimer) clearTimeout(allowAllTimer);
+		allowAllTimer = undefined;
+		const until = next?.until;
+		if (typeof until === "number") {
+			const remaining = Math.max(0, until - Date.now());
+			allowAllTimer = setTimeout(() => {
+				allowAll = undefined;
+				allowAllTimer = undefined;
+				footer(ctx);
+				ctx.ui.notify(`[gate] allow-everything window (${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} min) expired — approvals are back on`, "info");
+			}, remaining);
+		}
+		footer(ctx);
 	};
 
 	const state = (ctx: ExtensionContext): GateState => ({
 		// Reload per call: `loadPolicy` is mtime-stamped, so config edits apply without a restart (step 5).
 		policy: refresh(ctx),
 		sessionGrants,
+		allowAll,
 		subagentCalls,
 		policyChanged: (next: Policy) => {
 			policy = next;
 			applyToolVisibility(next);
 		},
+		allowAllChanged: (next: AllowAll) => applyAllowAll(ctx, next),
 	});
 
 	pi.on("session_start", (_event, ctx) => {
 		clearSession(sessionGrants);
 		hiddenByGate.clear();
 		subagentCalls.clear();
+		allowAll = undefined;
+		if (allowAllTimer) clearTimeout(allowAllTimer);
+		allowAllTimer = undefined;
 		const current = refresh(ctx);
 		if (current.files.length === 0) {
 			const seeded = seedConfig(resolveConfigPaths(ctx.cwd, true).globalFile);
@@ -108,6 +138,9 @@ export default function piGate(pi: ExtensionAPI) {
 		clearSession(sessionGrants);
 		hiddenByGate.clear();
 		subagentCalls.clear();
+		allowAll = undefined;
+		if (allowAllTimer) clearTimeout(allowAllTimer);
+		allowAllTimer = undefined;
 		ctx.ui.setStatus("pi-gate", undefined);
 	});
 
@@ -122,7 +155,7 @@ export default function piGate(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("gate", {
-		description: "Permission gate: status | grants | reload | reset grants [project|global] | off | on",
+		description: "Permission gate: status | grants | reload | allow [off|5min|session] | reset grants [project|global] | off | on",
 		async handler(args: string, ctx: ExtensionContext) {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			const sub = (parts[0] ?? "status").toLowerCase();
@@ -140,6 +173,18 @@ export default function piGate(pi: ExtensionAPI) {
 				footer(ctx);
 				report(ctx, current);
 				ctx.ui.notify(`[gate] reloaded ${current.files.length || "no"} config file(s), ${current.rules.length} rule(s)`, "info");
+				return;
+			}
+			if (sub === "allow") {
+				const mode = (parts[1] ?? "off").toLowerCase();
+				if (mode === "off") {
+					applyAllowAll(ctx, undefined);
+					ctx.ui.notify("[gate] allow-everything is off", "info");
+					return;
+				}
+				const next: AllowAll = mode === "session" ? { until: null } : { until: Date.now() + ALLOW_ALL_WINDOW_MS };
+				applyAllowAll(ctx, next);
+				ctx.ui.notify(next.until === null ? "[gate] allow-everything on for this session (protected paths still ask)" : "[gate] allow-everything on for 5 minutes (protected paths still ask)", "warning");
 				return;
 			}
 			if (sub === "reset") {
@@ -173,6 +218,7 @@ export default function piGate(pi: ExtensionAPI) {
 				`config files: ${current.files.length ? current.files.join(", ") : "none (built-in defaults)"}`,
 				`trusted project dir: ${ctx.isProjectTrusted() ? "yes" : "no (project config ignored)"}`,
 				`session grants: ${sessionGrants.map((g) => `${g.surface} "${g.pattern}"`).join(", ") || "none"}`,
+				`allow-everything: ${!allowAll ? "off" : allowAll.until === null ? "on for this session" : `on for ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`} (protected paths, external files, hidden arguments still ask)`,
 				`hidden tools: ${[...hiddenByGate].join(", ") || "none"}`,
 				`rules: ${current.rules.length} · visible tools: ${recomputeActive(tools, current).length}/${tools.length}`,
 				`bash surface: ${JSON.stringify(current.config.permission.bash ?? DEFAULT_GATE_CONFIG.permission.bash)}`,
