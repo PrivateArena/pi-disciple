@@ -34,7 +34,8 @@ pi-gate/
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
   index.ts         wiring: flags, footer, tool visibility, /gate                          steps 8, 9
 pi-subagent/
-  roles.ts         explore | scout | worker | reviewer + config overrides                step 10
+  roles.ts         explore | general-purpose | review, hard-coded allowlists + budgets        step 10
+  model-override.ts subagent.model pin: "provider/id" / "provider:id" / bare id -> Model     step 10
   prompt.ts        child system prompt + task wrapper                                     step 11
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
   child.ts         runChild(): assembly, timeouts, steering, transcripts, usage            steps 13, 14
@@ -50,6 +51,17 @@ global file → project file (only when the cwd is trusted) → `grants.global` 
 session grants. Within a surface, the **last matching pattern wins**; across facts, most-restrictive wins.
 Floors that no allow can downgrade: protected paths (the gate's own config, pi's config dir, git hooks,
 `.git`, `.pi`), shell wrappers/expansion, external directories, and any unparseable config (`degraded`).
+
+## Child model
+
+By default the child runs on **the model the session is on** (`ctx.model`), and the result header names
+it (`model: local/qwen3.8-flash-next (inherited)`), so the answer never depends on opening transcripts.
+`subagent.model` pins a different one: `"provider/id"` (pi's CLI form), `"provider:id"`, or a bare id
+(an ambiguous bare id resolves against the parent's provider, else the error names the candidates).
+Gateway ids contain slashes and colons themselves, so a prefix counts as a provider only when the
+registry knows it. A bad pin warns and the child stays on the session model; overriding to a
+non-reasoning model also drops the child's thinking level to `off`. The pin is config, never a tool
+parameter - the model still cannot choose its own child model.
 
 Dialog choices, in list order: `Allow once` · `Allow <rule> for this session` · `Allow <rule> for this
 project (<cwd>)` · `Allow <rule> for all projects` · `Abort` · `Abort with reason…` · `Allow everything

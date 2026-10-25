@@ -66,6 +66,12 @@ export interface SubagentLimits {
 	timeoutMinutes: number;
 	maxResultBytes: number;
 	keepTranscripts: number;
+	/**
+	 * Pin the child's model: `provider/id` (pi's CLI form), `provider:id`, or a bare `id`.
+	 * Unset means the child inherits the model the session is on. Human-authored config only —
+	 * the tool itself still takes no model parameter.
+	 */
+	model?: string;
 }
 
 /** Matches the shipped default config block in the plan (step 17). */
@@ -242,6 +248,10 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 	if (raw.enabled !== undefined) {
 		if (typeof raw.enabled === "boolean") limits.enabled = raw.enabled;
 		else errors.push(`${where}: subagent.enabled must be a boolean, ignored`);
+	}
+	if (raw.model !== undefined) {
+		if (typeof raw.model === "string" && raw.model.trim()) limits.model = raw.model.trim();
+		else errors.push(`${where}: subagent.model must be a non-empty string like "provider/id", ignored`);
 	}
 	return { limits, errors };
 }

@@ -115,6 +115,41 @@ describe("limits file", () => {
 		});
 		expect(loadSubagentLimits(join(root, "project"), true).limits.maxTurns).toBe(4);
 	});
+
+	it("reads a model pin and lets the project scope replace it", () => {
+		fixture({
+			global: { subagent: { model: "kilo:minimax/minimax-m2.7:free" } },
+			project: { subagent: { model: "local/qwen3.8-flash-next" } },
+		});
+		const loaded = loadSubagentLimits(join(root, "project"), true);
+		expect(loaded.limits.model).toBe("local/qwen3.8-flash-next");
+		expect(loaded.errors).toEqual([]);
+	});
+
+	it("leaves the model unpinned when no file sets one", () => {
+		fixture({ global: { subagent: { maxTurns: 5 } } });
+		expect(loadSubagentLimits(root, false).limits.model).toBeUndefined();
+	});
+
+	it("reports a malformed model without disabling the tool", () => {
+		fixture({ global: { subagent: { enabled: true, model: 42 } } });
+		const loaded = loadSubagentLimits(root, false);
+		expect(loaded.limits.enabled).toBe(true);
+		expect(loaded.limits.model).toBeUndefined();
+		expect(loaded.errors.join(" ")).toContain("subagent.model");
+	});
+
+	it("tolerates hand-written JSONC comments like pi-gate does", () => {
+		const agentDir = join(root, `agent-jsonc-${Math.random().toString(36).slice(2)}`);
+		const path = join(agentDir, "extensions/pi-gate/config.json");
+		mkdirSync(join(path, ".."), { recursive: true });
+		writeFileSync(path, `{\n // pin the cheap local model\n "subagent": { "maxTurns": 6, "model": "local/qwen3.8-flash-next" }\n}\n`, "utf8");
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		const loaded = loadSubagentLimits(root, false);
+		expect(loaded.limits.maxTurns).toBe(6);
+		expect(loaded.limits.model).toBe("local/qwen3.8-flash-next");
+		expect(loaded.errors.join(" ")).toContain("comments were stripped");
+	});
 });
 
 describe("enabled switch", () => {

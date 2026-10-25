@@ -17,6 +17,7 @@ import { ROLE_ORDER, resolveRole } from "./roles.ts";
 import { buildShims, NESTED_CALL_CEILING, type ShimHost } from "./shims.ts";
 import { childSessionDir, pruneTranscripts, runChild } from "./child.ts";
 import { loadSubagentLimits } from "./config-file.ts";
+import { childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
 import { claimGuard, composeResult, currentGuard, formatProgress, releaseGuard, type SubagentDetails } from "./run.ts";
 
 const parameters = Type.Object({
@@ -56,6 +57,18 @@ export default function piSubagent(pi: ExtensionAPI) {
 				timeoutMinutes: Math.min(role.timeoutMinutes, limits.timeoutMinutes),
 			};
 
+			// Child model: the session's model, unless the human pinned subagent.model in the config.
+			let model = ctx.model;
+			let overridden = false;
+			if (limits.model) {
+				const resolved = resolveChildModel(limits.model, ctx.modelRegistry, ctx.model);
+				if (resolved.status === "error") ctx.ui.notify(`[subagent] ${resolved.message} — running on the session model`, "warning");
+				else {
+					model = resolved.model;
+					overridden = true;
+				}
+			}
+
 			const controller = new AbortController();
 			const parentSignal = signal ?? ctx.signal;
 			if (parentSignal?.aborted) controller.abort();
@@ -82,8 +95,8 @@ export default function piSubagent(pi: ExtensionAPI) {
 					task: args.task,
 					cwd: ctx.cwd,
 					agentDir: getAgentDir(),
-					model: ctx.model,
-					thinkingLevel: ctx.thinkingLevel ?? "off",
+					model: model,
+					thinkingLevel: childThinkingLevel(model, ctx.thinkingLevel ?? "off"),
 					tools: shims,
 					sessionDir: ctx.sessionManager.getSessionDir(),
 					signal: controller.signal,
@@ -99,6 +112,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 					removedTranscripts: removed,
 					nestedCalls: tally.calls,
 					shimTools: shims.map((shim) => shim.name),
+					model: modelLabel(model, overridden),
 				});
 			} finally {
 				releaseGuard(toolCallId);

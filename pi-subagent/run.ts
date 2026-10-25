@@ -54,6 +54,8 @@ export interface SubagentDetails {
 	removedTranscripts?: number;
 	nestedCalls?: number;
 	shimTools?: string[];
+	/** Which model the child actually ran on, e.g. `local/qwen3.8-flash-next (inherited)`. */
+	model?: string;
 	error?: string;
 }
 
@@ -82,6 +84,7 @@ export function composeResult(
 	const status = result.exit === "done" ? "DONE" : `INCOMPLETE (${result.exit})`;
 	const header =
 		`[subagent ${role} · ${status} · ${result.turns} turns · ${result.toolCalls} tool calls · ${(elapsedMs / 1000).toFixed(1)}s]` +
+		(extra.model ? `\nmodel: ${extra.model}` : "") +
 		(sessionFile ? `\ntranscript: ${sessionFile}` : "") +
 		(result.error ? `\nerror: ${result.error}` : "");
 	const answer = body || "(the subagent returned no text)";

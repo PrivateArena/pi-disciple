@@ -44,6 +44,13 @@ describe("parseSubagentConfig", () => {
 		expect(parsed.limits).toEqual({ maxTurns: 5, maxResultBytes: 1000 });
 		expect(parsed.errors).toHaveLength(2);
 	});
+
+	it("parses a model pin and rejects a non-string one", () => {
+		expect(parseSubagentConfig({ model: " local/qwen3.8-flash-next " }, "test").limits).toEqual({ model: "local/qwen3.8-flash-next" });
+		const bad = parseSubagentConfig({ model: false }, "test");
+		expect(bad.limits.model).toBeUndefined();
+		expect(bad.errors.join(" ")).toContain("subagent.model");
+	});
 });
 
 describe("defaults", () => {

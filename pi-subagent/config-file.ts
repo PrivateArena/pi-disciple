@@ -23,7 +23,11 @@ export interface LoadedLimits {
 
 const KEYS: readonly (keyof SubagentLimits)[] = ["maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts"];
 
-/** Read the numeric limits plus the `enabled` switch; anything else in the section is ignored. */
+/**
+ * Read the numeric limits, the `enabled` switch and the `model` pin; anything else in the section is
+ * ignored. A malformed value contributes an error and leaves that field at its previous value, so a
+ * typo tightens nothing and cannot disable the tool.
+ */
 
 const cache = new Map<string, { stamp: string; loaded: LoadedLimits }>();
 
@@ -52,6 +56,11 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 			if (typeof section.enabled === "boolean") loaded.limits = { ...loaded.limits, enabled: section.enabled };
 			else loaded.errors.push(`${file}: subagent.enabled must be a boolean, ignored`);
 		}
+		if (section.model !== undefined) {
+			if (typeof section.model === "string" && section.model.trim()) {
+				loaded.limits = { ...loaded.limits, model: section.model.trim() };
+			} else loaded.errors.push(`${file}: subagent.model must be a non-empty string like "provider/id", ignored`);
+		}
 	}
 	cache.set("limits", { stamp, loaded });
 	return loaded;
@@ -68,13 +77,23 @@ function readSubagentSection(file: string, errors: string[]): Record<string, unk
 	}
 	if (!text) return undefined;
 	try {
-		const json = JSON.parse(text) as unknown;
-		const section = (json as { subagent?: unknown })?.subagent;
-		return section && typeof section === "object" && !Array.isArray(section) ? (section as Record<string, unknown>) : {};
-	} catch (error) {
-		errors.push(`${file}: invalid JSON, using default limits (${(error as Error).message})`);
-		return undefined;
+		return pickSection(JSON.parse(text), errors, undefined);
+	} catch {
+		// Same JSONC tolerance as pi-gate/config-file.ts: a hand-written config with comments must not
+		// silently degrade the subagent to defaults.
+		try {
+			return pickSection(JSON.parse(stripJsonComments(text)), errors, `${file}: comments were stripped on read (pi-subagent never writes this file)`);
+		} catch (error) {
+			errors.push(`${file}: invalid JSON, using default limits (${(error as Error).message})`);
+			return undefined;
+		}
 	}
+}
+
+function pickSection(json: unknown, errors: string[], warning: string | undefined): Record<string, unknown> | undefined {
+	if (warning) errors.push(warning);
+	const section = (json as { subagent?: unknown })?.subagent;
+	return section && typeof section === "object" && !Array.isArray(section) ? (section as Record<string, unknown>) : {};
 }
 
 function safeMtime(file: string): number {
@@ -83,4 +102,43 @@ function safeMtime(file: string): number {
 	} catch {
 		return 0;
 	}
+}
+
+/**
+ * Remove `//` and block comments outside string literals. Verbatim copy of `pi-gate/config-file.ts`
+ * (same reasoning as `DEFAULT_LIMITS` above: importing the gate module would make this reader
+ * depend on gate code it must not reach).
+ */
+export function stripJsonComments(text: string): string {
+	let out = "";
+	let inString = false;
+	let quote = "";
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i]!;
+		if (inString) {
+			out += c;
+			if (c === "\\" && i + 1 < text.length) out += text[++i];
+			else if (c === quote) inString = false;
+			continue;
+		}
+		if (c === '"' || c === "'") {
+			inString = true;
+			quote = c;
+			out += c;
+			continue;
+		}
+		if (c === "/" && text[i + 1] === "/") {
+			while (i < text.length && text[i] !== "\n") i++;
+			out += "\n";
+			continue;
+		}
+		if (c === "/" && text[i + 1] === "*") {
+			i += 2;
+			while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
+			i++;
+			continue;
+		}
+		out += c;
+	}
+	return out;
 }
