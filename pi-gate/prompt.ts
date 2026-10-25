@@ -7,22 +7,31 @@
  */
 
 import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import type { Decision } from "./policy.ts";
-import { displaySnippet } from "./match.ts";
+import type { Decision, GrantOffer } from "./policy.ts";
+import { codeSpan, displaySnippet, shorten } from "./match.ts";
 
 export type Choice = "once" | "session" | "project" | "global" | "abort" | "abort_reason";
 
 /** Index-aligned with {@link optionLabels}. */
 export const CHOICES: readonly Choice[] = ["once", "session", "project", "global", "abort", "abort_reason"];
 
+/** Long commands live in the dialog title; a label only has to identify the rule. */
+const LABEL_PATTERN_CHARS = 56;
+
+/** The rule a choice would write, as the human reads it: single line, code-wrapped, length-capped. */
+function grantSummary(offer: GrantOffer | undefined): string {
+	const text = displaySnippet(offer?.label ?? "*", LABEL_PATTERN_CHARS);
+	return codeSpan(shorten(text || "*", LABEL_PATTERN_CHARS));
+}
+
 export function optionLabels(decision: Decision, cwd: string): string[] {
-	const sessionPattern = decision.grant?.pattern ?? "*";
-	const persistedPattern = decision.persistedGrant?.pattern ?? sessionPattern;
+	const session = grantSummary(decision.grant);
+	const persisted = grantSummary(decision.persistedGrant ?? decision.grant);
 	return [
 		"Allow once",
-		`Allow "${sessionPattern}" for this session`,
-		`Allow "${persistedPattern}" for this project (${cwd})`,
-		`Allow "${persistedPattern}" for all projects`,
+		`Allow ${session} for this session`,
+		`Allow ${persisted} exactly for this project (${cwd})`,
+		`Allow ${persisted} exactly for all projects`,
 		"Abort",
 		"Abort with reason…",
 	];
@@ -31,14 +40,14 @@ export function optionLabels(decision: Decision, cwd: string): string[] {
 export function dialogTitle(decision: Decision, sub?: { role: string; task: string }): string {
 	const floors = decision.floors.length ? ` [floor: ${decision.floors.join(", ")}]` : "";
 	const origin = sub ? `\nfrom subagent(${sub.role}): ${displaySnippet(sub.task, 120)}` : "";
-	return `pi-gate: ${decision.facts.toolName} — ${displaySnippet(decision.facts.preview, 240)}${floors}${origin}\n${surfaceSummary(decision)}`;
+	return `pi-gate: ${decision.facts.toolName} — ${codeSpan(displaySnippet(decision.facts.preview, 240))}${floors}${origin}\n${surfaceSummary(decision)}`;
 }
 
 function surfaceSummary(decision: Decision): string {
 	return decision.checks
 		.filter((check) => check.surface !== decision.facts.toolName)
 		.slice(0, 4)
-		.map((check) => `${check.surface}: ${displaySnippet(check.value, 120)} = ${check.action}${check.floor ? ` (${check.floor})` : ""}`)
+		.map((check) => `${check.surface}: ${codeSpan(shorten(displaySnippet(check.value, 120), 120))} = ${check.action}${check.floor ? ` (${check.floor})` : ""}`)
 		.join("\n");
 }
 

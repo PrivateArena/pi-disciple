@@ -9,8 +9,8 @@ function decision(overrides: Partial<Decision> = {}): Decision {
 		checks: [],
 		floors: [],
 		facts: { toolName: "bash", preview: "sudo rm -rf /", callId: "c", cwd: "/repo", surfaces: [["bash", ["sudo rm -rf /"]]], paths: [] },
-		grant: { surface: "bash", pattern: "sudo rm *", label: "sudo rm *", persisted: false },
-		persistedGrant: { surface: "bash", pattern: "sudo rm -rf /", label: "sudo rm -rf /", persisted: true },
+		grant: { surface: "bash", patterns: ["sudo rm *"], label: "sudo rm *", persisted: false },
+		persistedGrant: { surface: "bash", patterns: ["sudo rm -rf /"], label: "sudo rm -rf /", persisted: true },
 		...overrides,
 	} as Decision;
 }
@@ -46,13 +46,47 @@ describe("option labels", () => {
 		const labels = optionLabels(decision(), "/repo");
 		expect(labels).toEqual([
 			"Allow once",
-			'Allow "sudo rm *" for this session',
-			'Allow "sudo rm -rf /" for this project (/repo)',
-			'Allow "sudo rm -rf /" for all projects',
+			"Allow `sudo rm *` for this session",
+			"Allow `sudo rm -rf /` exactly for this project (/repo)",
+			"Allow `sudo rm -rf /` exactly for all projects",
 			"Abort",
 			"Abort with reason…",
 		]);
 		expect(labels).toHaveLength(CHOICES.length);
+	});
+
+	it("code-wraps the rule so markdown cannot reinterpret it", () => {
+		const labels = optionLabels(decision(), "/repo");
+		for (const label of labels.slice(1, 4)) expect(label).toContain("`");
+	});
+
+	it("keeps every scope on one short line however long the command is", () => {
+		const long = `cd /repo && find . -name "*.ts" -not -path "*/node_modules/*" -exec grep -l "a very long pattern indeed" {} \\; && head -20`;
+		const labels = optionLabels(
+			decision({
+				grant: { surface: "bash", patterns: ["cd *", "find *", "head *"], label: "cd * && find * && head *", persisted: false },
+				persistedGrant: { surface: "bash", patterns: long.split(" && "), label: long, persisted: true },
+			}),
+			"/repo",
+		);
+		expect(labels[1]).toBe("Allow `cd * && find * && head *` for this session");
+		for (const label of labels) {
+			expect(label).not.toMatch(/\n/);
+			expect(label.length).toBeLessThan(130);
+		}
+		expect(labels[2]).toContain("…");
+	});
+
+	it("marks a persisted grant as exact, in memory as a wildcard", () => {
+		const labels = optionLabels(decision(), "/repo");
+		expect(labels[1]).not.toContain("exactly");
+		expect(labels[2]).toContain("exactly");
+		expect(labels[3]).toContain("exactly");
+	});
+
+	it("falls back to a bare wildcard when nothing is grantable", () => {
+		const labels = optionLabels(decision({ grant: undefined, persistedGrant: undefined }), "/repo");
+		expect(labels[1]).toBe("Allow `*` for this session");
 	});
 });
 
@@ -123,5 +157,11 @@ describe("dialog title", () => {
 		const flagged = decision();
 		flagged.floors = ["protected_path", "wrapper"];
 		expect(dialogTitle(flagged)).toContain("[floor: protected_path, wrapper]");
+	});
+
+	it("code-wraps the command and every surfaced value", () => {
+		const title = dialogTitle(decision({ checks: [{ surface: "external_directory", value: "/mnt/usb/_data_", action: "ask" }] }));
+		expect(title).toContain("`sudo rm -rf /`");
+		expect(title).toContain("`/mnt/usb/_data_`");
 	});
 });

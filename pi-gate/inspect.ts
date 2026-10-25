@@ -25,7 +25,12 @@ export interface Facts {
 export type Extractor = (
 	input: Record<string, unknown>,
 	cwd: string,
-) => { surfaces: Array<[surface: string, values: string[]]>; paths: string[] };
+) => {
+	surfaces: Array<[surface: string, values: string[]]>;
+	paths: string[];
+	/** Verbatim call text for the dialog; defaults to the fact values joined with `&&`. */
+	preview?: string;
+};
 
 const SHELL_TOOLS: readonly string[] = ["bash", "powershell"];
 const PATH_PARAM_NAMES = [
@@ -99,7 +104,9 @@ const shellExtractor = (surface: string): Extractor => (input, cwd) => {
 	const segments = segmentCommands(command).map(normaliseCommand);
 	const values = segments.length ? segments : command.trim() ? [normaliseCommand(command)] : [];
 	const paths = [...new Set(segments.flatMap((seg) => shellPathTokens(seg, cwd)))];
-	return { surfaces: [[surface, values]], paths };
+	// The dialog shows the operators the human actually wrote (`|`, `;`, `||`), not a lossy `&&` join.
+	const preview = values.length ? normaliseCommand(command) : undefined;
+	return { surfaces: [[surface, values]], paths, preview };
 };
 
 const pathToolExtractor = (surface: string, fallbackPath?: string): Extractor => (input, cwd) => {
@@ -151,7 +158,7 @@ export function extract(
 	if (!surfaces.has(toolName)) surfaces.set(toolName, []);
 	const paths = [...new Set(extracted.paths)];
 	// The dialog must show the whole call, not one segment of it (§10 A2).
-	const whole = surfaces.get(toolName)?.join(" && ") ?? `${toolName} ${JSON.stringify(input ?? {})}`;
+	const whole = extracted.preview ?? surfaces.get(toolName)?.join(" && ") ?? `${toolName} ${JSON.stringify(input ?? {})}`;
 	const preview = displaySnippet(whole);
 	return {
 		toolName,

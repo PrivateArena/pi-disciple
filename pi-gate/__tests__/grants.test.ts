@@ -8,7 +8,9 @@ import { gateDoc, makeFixture, readJson, writeGlobalConfig, type Fixture } from 
 
 let fixture: Fixture | undefined;
 
-const offer = (pattern: string, persisted: boolean, surface = "bash"): GrantOffer => ({ surface, pattern, label: pattern, persisted });
+const offer = (pattern: string, persisted: boolean, surface = "bash"): GrantOffer => ({ surface, patterns: [pattern], label: pattern, persisted });
+/** A multi-segment offer, exactly as a chained command produces one. */
+const multiOffer = (...patterns: string[]): GrantOffer => ({ surface: "bash", patterns, label: patterns.join(" && "), persisted: false });
 
 afterEach(() => {
 	fixture?.cleanup();
@@ -30,6 +32,29 @@ describe("session grants", () => {
 		appendSession(grants, offer("ls", false));
 		appendSession(grants, offer("ls", false));
 		expect(grants).toHaveLength(1);
+	});
+
+	it("stores one rule per segment of a chained command", () => {
+		const grants = createSessionGrants();
+		const added = appendSession(grants, multiOffer("cd *", "git status *"));
+		expect(added).toHaveLength(2);
+		expect(grants).toEqual([
+			{ surface: "bash", pattern: "cd *", action: "allow" },
+			{ surface: "bash", pattern: "git status *", action: "allow" },
+		]);
+	});
+
+	it("collapses repeated segments into one rule", () => {
+		const grants = createSessionGrants();
+		expect(appendSession(grants, multiOffer("ls *", "ls *"))).toHaveLength(1);
+		expect(grants).toHaveLength(1);
+	});
+
+	it("appends only the segments a second chained command adds", () => {
+		const grants = createSessionGrants();
+		appendSession(grants, multiOffer("cd *", "git status *"));
+		expect(appendSession(grants, multiOffer("cd *", "npm test *"))).toEqual([{ surface: "bash", pattern: "npm test *", action: "allow" }]);
+		expect(grants).toHaveLength(3);
 	});
 });
 
@@ -77,6 +102,25 @@ describe("persisted grants", () => {
 		expect(written.file).toContain(".pi/extensions/pi-gate/config.json");
 		const globalDoc = readJson(persistedFile("global", fixture.cwd)) as { gate?: { grants?: unknown } };
 		expect(globalDoc.gate?.grants).toBeUndefined();
+	});
+
+	it("writes every segment of a chained command as its own grant", async () => {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
+		const chained: GrantOffer = { surface: "bash", patterns: ["cd /repo", "git status"], label: "cd /repo && git status", persisted: true };
+		await appendPersisted(chained, "global", fixture.cwd);
+		const doc = readJson(persistedFile("global", fixture.cwd)) as { gate: { grants: { global: { pattern: string }[] } } };
+		expect(doc.gate.grants.global.map((grant) => grant.pattern)).toEqual(["cd /repo", "git status"]);
+	});
+
+	it("is idempotent for a repeated chained grant", async () => {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
+		const chained: GrantOffer = { surface: "bash", patterns: ["cd /repo", "git status"], label: "cd /repo && git status", persisted: true };
+		await appendPersisted(chained, "global", fixture.cwd);
+		await appendPersisted(chained, "global", fixture.cwd);
+		const doc = readJson(persistedFile("global", fixture.cwd)) as { gate: { grants: { global: unknown[] } } };
+		expect(doc.gate.grants.global).toHaveLength(2);
 	});
 
 	it("clears grants on reset", async () => {

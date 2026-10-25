@@ -414,16 +414,76 @@ export function normaliseCommand(seg: string): string {
  * Suggested grant pattern for a bash segment.
  *
  * `persisted` scopes (project / all projects) get the **exact** command (FM-10): `pnpm *` would be
- * arbitrary code execution committed to git from one click. Wildcards are only used in memory.
+ * arbitrary code execution committed to git from one click. Wildcards are only used in memory —
+ * and never for a wrapper or interpreter segment, whose wildcard would outlive the call it came
+ * from (`sh evil.sh` must not be covered by a session grant made for `curl x | sh`).
  */
 export function suggestBashPattern(seg: string, persisted: boolean): string {
 	const normalised = normaliseCommand(seg);
-	if (persisted) return normalised;
+	if (persisted || isWrappedSegment(normalised, true)) return normalised;
 	const tokens = tokenize(peelEnvPrefix(normalised).command);
 	if (tokens.length === 0) return normalised;
 	const name = tokens[0]!.split("/").pop()!;
 	const arity = BASH_ARITY[name] ?? 1;
 	return `${tokens.slice(0, Math.min(arity, tokens.length)).join(" ")} *`;
+}
+
+// ---------------------------------------------------------------------------
+// compound patterns
+// ---------------------------------------------------------------------------
+
+/**
+ * The segments of a hand-written compound pattern (`git status * && npm test`), or `undefined`
+ * when the pattern is a single command. Grant offers are per segment, but a config file may still
+ * chain them, and a chained pattern has to match the call it was written for.
+ */
+export function compoundPatternParts(pattern: string): string[] | undefined {
+	if (!/[|;&\n]/.test(pattern)) return undefined;
+	const parts = segmentCommands(pattern).map(normaliseCommand).filter(Boolean);
+	return parts.length > 1 ? parts : undefined;
+}
+
+/**
+ * True when every pattern segment matches a **distinct** command segment. Matching is
+ * order-independent — `a && b` and `b && a` are the same set of side effects — and a pattern may
+ * not cover more segments than the call has, so a chained pattern never allows one of its commands
+ * on its own. Safety comes from the caller: every segment of a call must be allowed separately.
+ */
+export function matchesSegmentPattern(patternSegments: readonly string[], segments: readonly string[]): boolean {
+	if (patternSegments.length === 0 || patternSegments.length > segments.length) return false;
+	const used = new Array<boolean>(segments.length).fill(false);
+	const assign = (from: number): boolean => {
+		if (from >= patternSegments.length) return true;
+		const part = patternSegments[from]!;
+		for (let i = 0; i < segments.length; i++) {
+			if (used[i] || !wildcardMatch(part, segments[i]!)) continue;
+			used[i] = true;
+			if (assign(from + 1)) return true;
+			used[i] = false;
+		}
+		return false;
+	};
+	return assign(0);
+}
+
+/**
+ * Markdown inline code. Front-ends render dialog text as markdown, so `*`, `_` and `[]` in a shell
+ * command would be eaten as formatting; a code span is rendered verbatim. The fence grows past any
+ * run of backticks in the value, so a command cannot close its own span early.
+ */
+export function codeSpan(value: string): string {
+	const text = value.trim();
+	if (!text) return "";
+	let fence = "`";
+	while (text.includes(fence)) fence = `${fence}\``;
+	const pad = /^[`\s]|[`\s]$/.test(text) ? " " : "";
+	return `${fence}${pad}${text}${pad}${fence}`;
+}
+
+/** Visibly truncated single-line text with a hard character budget (dialog labels). */
+export function shorten(value: string, maxChars: number): string {
+	if (maxChars <= 1 || value.length <= maxChars) return value;
+	return `${value.slice(0, maxChars - 1)}…`;
 }
 
 /** Redacted, control-character-free, visibly truncated text for a dialog title (step 6 §6). */

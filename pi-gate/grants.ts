@@ -20,15 +20,25 @@ export function createSessionGrants(): GrantRule[] {
 	return [];
 }
 
-/** The rule a dialog choice creates: session scope gets a wildcard, persisted scopes the exact call. */
-export function toGrantRule(offer: GrantOffer, action: Action = "allow"): GrantRule {
-	return { surface: offer.surface, pattern: offer.pattern, action };
+/** The rules a dialog choice creates: one per command segment, session scope wildcards, persisted scopes the exact call. */
+export function toGrantRules(offer: GrantOffer, action: Action = "allow"): GrantRule[] {
+	const out: GrantRule[] = [];
+	for (const pattern of offer.patterns) {
+		if (out.some((rule) => rule.pattern === pattern)) continue;
+		out.push({ surface: offer.surface, pattern, action });
+	}
+	return out;
 }
 
-export function appendSession(grants: GrantRule[], offer: GrantOffer): GrantRule {
-	const rule = toGrantRule(offer);
-	if (!grants.some((existing) => existing.surface === rule.surface && existing.pattern === rule.pattern)) grants.push(rule);
-	return rule;
+/** Append every pattern of one offer, skipping duplicates. Returns the rules actually added. */
+export function appendSession(grants: GrantRule[], offer: GrantOffer): GrantRule[] {
+	const added: GrantRule[] = [];
+	for (const rule of toGrantRules(offer)) {
+		if (grants.some((existing) => existing.surface === rule.surface && existing.pattern === rule.pattern)) continue;
+		grants.push(rule);
+		added.push(rule);
+	}
+	return added;
 }
 
 export function clearSession(grants: GrantRule[]): void {
@@ -55,12 +65,13 @@ export function persistedFile(scope: PersistedScope, cwd: string): string {
  */
 export async function appendPersisted(offer: GrantOffer, scope: PersistedScope, cwd: string): Promise<WriteResult> {
 	const file = persistedFile(scope, cwd);
-	const rule = toGrantRule(offer);
+	const rules = toGrantRules(offer);
 	return mutateGrants(file, scope, (grants) => {
-		if (grants.some((existing) => existing.surface === rule.surface && existing.pattern === rule.pattern && existing.action === rule.action)) {
-			return { grants, changed: false };
-		}
-		return { grants: [...grants, rule], changed: true };
+		const missing = rules.filter(
+			(rule) => !grants.some((existing) => existing.surface === rule.surface && existing.pattern === rule.pattern && existing.action === rule.action),
+		);
+		if (missing.length === 0) return { grants, changed: false };
+		return { grants: [...grants, ...missing], changed: true };
 	});
 }
 

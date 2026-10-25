@@ -170,8 +170,8 @@ describe("ask outcomes", () => {
 		await handleToolCall(bash("git commit -m x"), stubCtx("0", log), stateFor(policy));
 		const labels = optionLabels(
 			{
-				grant: { surface: "bash", pattern: "git commit *", label: "", persisted: false },
-				persistedGrant: { surface: "bash", pattern: "git commit -m x", label: "", persisted: true },
+				grant: { surface: "bash", patterns: ["git commit *"], label: "git commit *", persisted: false },
+				persistedGrant: { surface: "bash", patterns: ["git commit -m x"], label: "git commit -m x", persisted: true },
 				facts: { toolName: "bash", preview: "x", callId: "c", cwd: fixture?.cwd ?? "/repo", surfaces: [["bash", ["git commit -m x"]]], paths: [] },
 				checks: [],
 				floors: [],

@@ -76,6 +76,10 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 	permission: {
 		"*": "ask",
 		read: "allow",
+		// Inside the workspace the agent may create and change files without a prompt: the `path`
+		// rules, the `external_directory` floor and the protected-path floor still bound it.
+		write: "allow",
+		edit: "allow",
 		grep: "allow",
 		find: "allow",
 		ls: "allow",

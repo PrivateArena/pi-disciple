@@ -25,9 +25,11 @@ import {
 } from "./schema.ts";
 import { getGlobalConfigFile, getProjectConfigFile, readConfigFile } from "./config-file.ts";
 import {
+	compoundPatternParts,
 	hasUnparsedExpansion,
 	isExternalPath,
 	isProtectedPath,
+	matchesSegmentPattern,
 	pathPatternMatches,
 	protectedPathGlobs,
 	suggestBashPattern,
@@ -69,7 +71,13 @@ export interface FactCheck {
 
 export interface GrantOffer {
 	surface: string;
-	pattern: string;
+	/**
+	 * One pattern per command segment. A compound command (`a && b | c`) is evaluated per segment, so
+	 * a grant has to be stored per segment too — a single chained pattern would match no segment and
+	 * the allowance would silently do nothing.
+	 */
+	patterns: string[];
+	/** Single-line summary of `patterns`, for the dialog. */
 	label: string;
 	persisted: boolean;
 }
@@ -215,8 +223,13 @@ export function withSessionGrants(policy: Policy, grants: readonly GrantRule[]):
 // rule matching
 // ---------------------------------------------------------------------------
 
-function patternMatches(surface: string, pattern: string, value: string): boolean {
+function patternMatches(surface: string, pattern: string, value: string, segments?: readonly string[]): boolean {
 	if (pattern === "*") return true;
+	// A chained pattern (only ever offered for shell surfaces) describes the whole call, not one part.
+	if (segments) {
+		const parts = compoundPatternParts(pattern);
+		if (parts) return matchesSegmentPattern(parts, segments);
+	}
 	if (surface === "path") return pathPatternMatches(pattern, value);
 	return wildcardMatch(pattern, value);
 }
@@ -225,11 +238,11 @@ function patternMatches(surface: string, pattern: string, value: string): boolea
  * The last rule matching one fact, with the named surface taking precedence over the `"*"`
  * tool-name wildcard (`permission["*"]` is the default for *all* surfaces, not a more specific rule).
  */
-function matchRule(surface: string, value: string, policy: Policy, isToolSurface: boolean): Rule | undefined {
+function matchRule(surface: string, value: string, policy: Policy, isToolSurface: boolean, segments?: readonly string[]): Rule | undefined {
 	let named: Rule | undefined;
 	let generic: Rule | undefined;
 	for (const rule of policy.rules) {
-		if (!patternMatches(surface, rule.pattern, value)) continue;
+		if (!patternMatches(surface, rule.pattern, value, segments)) continue;
 		if (rule.surface === surface) named = rule;
 		// permission["*"] is the tool-name wildcard: it must not silence `path` / `external_directory`.
 		else if (rule.surface === "*" && isToolSurface) generic = rule;
@@ -264,12 +277,14 @@ export function recomputeActive(toolNames: readonly string[], policy: Policy): s
 
 export function evaluate(facts: Facts, policy: Policy): Decision {
 	const shell = isShellTool(facts.toolName);
-	const inPipeline = shell && (facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1].length ?? 0) > 1;
+	const shellValues = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
+	const inPipeline = shell && shellValues.length > 1;
 	const protectedHit = isProtectedPath(facts.paths, policy.protectedGlobs);
 	const checks: FactCheck[] = [];
 
 	const push = (surface: string, value: string, fallback: Action | undefined) => {
-		const rule = matchRule(surface, value, policy, surface === facts.toolName);
+		const segments = shell && surface === facts.toolName ? shellValues : undefined;
+		const rule = matchRule(surface, value, policy, surface === facts.toolName, segments);
 		let action = rule?.action ?? fallback;
 		if (action === undefined) return;
 		let floor: FactCheck["floor"];
@@ -324,16 +339,15 @@ function severityOf(action: Action): number {
 }
 
 /**
- * What the dialog offers to remember. Shell grants are suggested per segment; persisted scopes get
- * the exact command (FM-10), the session scope gets the arity-wildcard prefix.
+ * What the dialog offers to remember, one pattern per command segment. Shell segments get a
+ * wildcard prefix in memory and the exact command for persisted scopes (FM-10).
  */
 export function offerGrant(facts: Facts, persisted: boolean): GrantOffer | undefined {
 	const values = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
 	if (values.length === 0) return undefined;
-	const pattern = isShellTool(facts.toolName)
-		? values.map((seg) => suggestBashPattern(seg, persisted)).join(" && ")
-		: values[0]!;
-	return { surface: facts.toolName, pattern, label: pattern, persisted };
+	const shell = isShellTool(facts.toolName);
+	const patterns = shell ? values.map((seg) => suggestBashPattern(seg, persisted)) : [values[0]!];
+	return { surface: facts.toolName, patterns, label: patterns.join(shell ? " && " : ""), persisted };
 }
 
 /** Model-facing text for a blocked call, naming the fix (FM-12). */
@@ -344,11 +358,12 @@ export function blockReason(decision: Decision, kind: "policy_deny" | "user_abor
 			? `[gate] Blocked by the user. Follow this instruction verbatim and do not retry the blocked call: ${instruction}`
 			: `[gate] Blocked by the user: ${facts.preview}. Do not retry it; choose another approach or ask.`;
 	}
-	const fix = persistedGrant?.pattern ?? grant?.pattern ?? "*";
+	const fixPatterns = [...new Set(persistedGrant?.patterns ?? grant?.patterns ?? ["*"])];
+	const fix = fixPatterns.map((pattern) => `"${pattern}": "allow"`).join(", ");
 	if (kind === "no_ui") {
 		return (
 			`[gate] Blocked: ${facts.toolName} "${facts.preview}" needs approval and this session has no UI. ` +
-			`Add {"${fix}": "allow"} to the "${facts.toolName}" section of ${getGlobalConfigFile()}, or run pi interactively.`
+			`Add {${fix}} to the "${facts.toolName}" section of ${getGlobalConfigFile()}, or run pi interactively.`
 		);
 	}
 	return (

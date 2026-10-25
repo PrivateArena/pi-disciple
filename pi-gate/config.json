@@ -6,6 +6,8 @@
     "permission": {
       "*": "ask",
       "read": "allow",
+      "write": "allow",
+      "edit": "allow",
       "grep": "allow",
       "find": "allow",
       "ls": "allow",
