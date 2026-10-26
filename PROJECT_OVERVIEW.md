@@ -29,7 +29,7 @@ pi-gate/
   inspect.ts       Facts: surfaces + paths + call ids extracted from a tool call           step 5
   policy.ts        layered Policy (defaults→global→project→grants→session), floors, deny   steps 6, 7
   grants.ts        session (memory) + persisted (config file) grants, review log helpers   step 8
-  prompt.ts        the 8-choice dialog → AskResult, titles, block text                     step 9
+  prompt.ts        the 9-choice dialog → AskResult, titles, block text                     step 9
   log.ts           review.jsonl + redact()                                                step 18
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
   index.ts         wiring: flags, footer, tool visibility, /gatec                          steps 8, 9
@@ -86,12 +86,20 @@ registry knows it. A bad pin warns and the child stays on the session model; ove
 non-reasoning model also drops the child's thinking level to `off`. The pin is config, never a tool
 parameter - the model still cannot choose its own child model.
 
-Dialog choices, in list order: `Allow once` · `Allow <rule> for this session` · `Allow <rule> for this
-project (<cwd>)` · `Allow <rule> for all projects` · `Abort` · `Abort with reason…` · `Allow everything
-for this session` · `Allow everything for 5 minutes`. All three "Allow <rule>" choices write the **same**
-rule — one wildcard per command segment (`git status *`, `cd *`), stored per segment so a chained command
-actually matches later; destructive (`rm`, `sudo`, `chmod`, …) and wrapper segments stay exact. A dismissed
-or timed-out dialog aborts (never allows). No UI (`pi -p`) blocks with the exact rule needed to allow it.
+Dialog choices, in list order: `Allow once` · `Allow with reason…` · `Allow <rule> for this session` ·
+`Allow <rule> for this project (<cwd>)` · `Allow <rule> for all projects` · `Abort` · `Abort with reason…` ·
+`Allow everything for this session` · `Allow everything for 5 minutes`. All three "Allow <rule>" choices
+write the **same** rule — one wildcard per command segment (`git status *`, `cd *`), stored per segment so a
+chained command actually matches later; destructive (`rm`, `sudo`, `chmod`, …) and wrapper segments stay
+exact. A dismissed or timed-out dialog aborts (never allows) — and Esc on a note input counts as dismissed,
+so changing one's mind mid-note never grants. No UI (`pi -p`) blocks with the exact rule needed to allow it.
+
+The two note-taking choices are mirrors, and both texts the model sees are short markdown: `Blocked by user
+with note: …` when the call is vetoed, `Allowed by user with note: …` prepended to the tool result when it is
+let through (`handle.ts` `attachNote`, keyed by `toolCallId` — a `tool_call` result has no text channel). The
+note travels with that one call, including a call made inside a subagent, which is what makes
+"allow with reason" usable to steer a running agent instead of only vetoing it. No JSON config snippets and no
+"do not retry" prose in any block text: they read as dares and invite config edits nobody asked for.
 
 **Nothing in the dialog is truncated.** The title shows the whole call, every surfaced fact, and the exact
 rule (`rule: …` line) that a grant choice would write — in full; the TUI word-wraps and scrolls. Only the
@@ -177,7 +185,7 @@ tool event keeps reporting activity.
 ## Commands
 
 ```bash
-npm test            # vitest run — 243 tests, no live provider needed
+npm test            # vitest run — 256 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```

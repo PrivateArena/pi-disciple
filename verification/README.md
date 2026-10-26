@@ -32,11 +32,12 @@ PI_CODING_AGENT_DIR=/tmp/gate-agent node verification/rpc-gate-dialog.mjs "for t
 They load this repo's extensions explicitly with `--no-extensions -e ./pi-gate/index.ts …`, so a globally
 installed copy cannot double-gate the same run. They need a live provider, so they consume quota. Expected evidence:
 
-* `rpc-gate-dialog.mjs` — `[DIALOG] pi-gate: bash …` with all eight options; the title carries the whole
+* `rpc-gate-dialog.mjs` — `[DIALOG] pi-gate: bash …` with all nine options; the title carries the whole
   call, every surfaced fact, and a `rule:` line with the unshortened patterns a grant would write (no
   `[…truncated]` anywhere, whatever the command length); the three grant scopes name the same per-segment
   wildcard rule (`ls * && echo *`); the tool runs only after the answer; `timeout` leaves it blocked
-  (`Abort`, never allow); `Abort with reason` puts the typed text in the tool result verbatim; a remembered
+  (`Abort`, never allow); `Abort with reason` puts `Blocked by user with note: <text>` in the tool result
+  verbatim, `Allow with reason` lets the call run and puts `Allowed by user with note: <text>` on its result; a remembered
   allow makes an identical second command run without a dialog; `everything for this session` is followed by
   a *different* second command, which must also run without a dialog.
 * `rpc-subagent-gate.mjs` — a dialog titled `… from subagent(explore): <task>` raised by the **child's**

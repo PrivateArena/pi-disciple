@@ -7,17 +7,19 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import piGate from "../index.ts";
 import { clearPolicyCache } from "../policy.ts";
 import { gateDoc, makeFixture, writeGlobalConfig, type Fixture } from "./fixture.ts";
+import { CHOICES } from "../prompt.ts";
 
 let fixture: Fixture | undefined;
 
 /** Dialog option indices, as the human counts them. */
-const ONCE = 0;
-const ALL_SESSION = 6;
-const ALL_TIMED = 7;
+const ONCE = CHOICES.indexOf("once");
+const ALLOW_REASON = CHOICES.indexOf("allow_reason");
+const ALL_SESSION = CHOICES.indexOf("all_session");
+const ALL_TIMED = CHOICES.indexOf("all_timed");
 
 interface StubPi {
 	pi: ExtensionAPI;
@@ -105,6 +107,19 @@ afterEach(() => {
 });
 
 describe("extension wiring keeps the switch it was given", () => {
+	it("delivers an allow-with-reason note on that call's result, through the registered tool_result handler", async () => {
+		const { stub, log } = await boot();
+		expect(await answer(stub, log, ALLOW_REASON, call("bash", { command: "git commit -m x" }, "c1"))).toBeUndefined();
+		expect(log.titles).toHaveLength(1);
+
+		const result = { type: "tool_result", toolCallId: "c1", toolName: "bash", input: {}, content: [{ type: "text", text: "committed" }], isError: false } as unknown as ToolResultEvent;
+		const patched = (await stub.emit("tool_result", stubCtx(ONCE, log, stub), result)) as { content?: { text?: string }[] };
+		expect(patched?.content?.map((part) => part.text)).toEqual(["Allowed by user with note: x", "committed"]);
+
+		const other = { ...result, toolCallId: "c2" } as unknown as ToolResultEvent;
+		expect(await stub.emit("tool_result", stubCtx(ONCE, log, stub), other)).toBeUndefined();
+	});
+
 	it("carries allow-everything across calls, to calls that are not the one it was clicked on", async () => {
 		const { stub, log } = await boot();
 		await answer(stub, log, ALL_SESSION, call("bash", { command: "git commit -m x" }, "c1"));

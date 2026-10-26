@@ -41,10 +41,11 @@ function ctxWith(selectResult: string | undefined, inputResult: string | undefin
 afterEach(() => undefined);
 
 describe("option labels", () => {
-	it("are exactly the eight scopes, index-aligned with CHOICES", () => {
+	it("are exactly the nine choices, index-aligned with CHOICES", () => {
 		const labels = optionLabels(decision(), "/repo");
 		expect(labels).toEqual([
 			"Allow once",
+			"Allow with reason…",
 			"Allow `sudo rm *` for this session",
 			"Allow `sudo rm *` for this project (/repo)",
 			"Allow `sudo rm *` for all projects",
@@ -58,15 +59,15 @@ describe("option labels", () => {
 
 	it("code-wraps the rule so markdown cannot reinterpret it", () => {
 		const labels = optionLabels(decision(), "/repo");
-		for (const label of labels.slice(1, 4)) expect(label).toContain("`");
+		for (const label of labels.slice(2, 5)) expect(label).toContain("`");
 	});
 
 	it("offers one identical rule for every scope — session, project and global", () => {
 		const labels = optionLabels(decision(), "/repo");
 		const rule = (label: string) => label.match(/`[^`]*`/)?.[0];
-		expect(rule(labels[1])).toBe("`sudo rm *`");
-		expect(rule(labels[2])).toBe(rule(labels[1]));
-		expect(rule(labels[3])).toBe(rule(labels[1]));
+		expect(rule(labels[2])).toBe("`sudo rm *`");
+		expect(rule(labels[3])).toBe(rule(labels[2]));
+		expect(rule(labels[4])).toBe(rule(labels[2]));
 		expect(labels.join("\n")).not.toMatch(/exactly/);
 	});
 
@@ -97,7 +98,7 @@ describe("option labels", () => {
 
 	it("falls back to a bare wildcard when nothing is grantable", () => {
 		const labels = optionLabels(decision({ grant: undefined }), "/repo");
-		expect(labels[1]).toBe("Allow `*` for this session");
+		expect(labels[2]).toBe("Allow `*` for this session");
 	});
 });
 
@@ -124,6 +125,28 @@ describe("ask", () => {
 		expect(result.reason).toBe("use the make target");
 		expect(capture.inputs).toHaveLength(1);
 		expect(capture.inputs[0]?.title).toMatch(/instead/);
+	});
+
+	it("chains one input for allow-with-reason and keeps the note", async () => {
+		const capture: Captured = { inputs: [] };
+		const ctx = ctxWith("Allow with reason…", "use the make target", capture);
+		const result = await ask(ctx, decision(), { cwd: "/repo" });
+		expect(result.choice).toBe("allow_reason");
+		expect(result.reason).toBe("use the make target");
+		expect(capture.inputs).toHaveLength(1);
+		expect(capture.inputs[0]?.title).toMatch(/should know/);
+	});
+
+	it("escalates a dismissed note input to abort — Esc on the note never grants", async () => {
+		const capture: Captured = { inputs: [] };
+		const ctx = ctxWith("Allow with reason…", undefined, capture);
+		expect((await ask(ctx, decision(), { cwd: "/repo" })).choice).toBe("abort");
+	});
+
+	it("keeps the allow itself when the note is entered empty", async () => {
+		const capture: Captured = { inputs: [] };
+		const ctx = ctxWith("Allow with reason…", "   ", capture);
+		expect((await ask(ctx, decision(), { cwd: "/repo" })).choice).toBe("once");
 	});
 
 	it("falls back to a plain abort when the reason is empty", async () => {

@@ -384,28 +384,6 @@ export function offerGrant(facts: Facts): GrantOffer | undefined {
 	return { surface: facts.toolName, patterns, label: patterns.join(shell ? " && " : "") };
 }
 
-/** Model-facing text for a blocked call, naming the fix (FM-12). */
-export function blockReason(decision: Decision, kind: "policy_deny" | "user_abort" | "no_ui", instruction?: string): string {
-	const { facts, matched, grant } = decision;
-	if (kind === "user_abort") {
-		return instruction
-			? `[gate] Blocked by the user. Follow this instruction verbatim and do not retry the blocked call: ${instruction}`
-			: `[gate] Blocked by the user: ${facts.preview}. Do not retry it; choose another approach or ask.`;
-	}
-	const fixPatterns = [...new Set(grant?.patterns ?? ["*"])];
-	const fix = fixPatterns.map((pattern) => `"${pattern}": "allow"`).join(", ");
-	if (kind === "no_ui") {
-		return (
-			`[gate] Blocked: ${facts.toolName} "${facts.preview}" needs approval and this session has no UI. ` +
-			`Add {${fix}} to the "${facts.toolName}" section of ${getGlobalConfigFile()}, or run pi interactively.`
-		);
-	}
-	return (
-		`[gate] Denied by policy${matched ? `: ${matched.surface} "${matched.pattern}" = deny (${matched.scope})` : ""}. ` +
-		`Do not retry ${facts.preview}. This rule cannot be approved interactively.`
-	);
-}
-
 /** Convenience wrapper used by the extension entry point and by tests. */
 export function evaluateCall(
 	toolName: string,

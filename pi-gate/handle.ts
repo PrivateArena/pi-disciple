@@ -4,14 +4,18 @@
  *
  * Every outcome except an explicit allow blocks: `deny` from policy, an abort, a dismissed or timed
  * out dialog, no UI at all, or an internal error.
+ *
+ * The two note-taking choices are mirrors: `abort_reason` blocks with the note in the reason, and
+ * `allow_reason` lets the call run and puts the same-shaped note on its `tool_result` ({@link attachNote}).
+ * Both texts are model-facing, so both are short markdown — no `[gate]` prose, no config JSON, no
+ * instructions about retrying.
  */
 
-import type { ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolCallEvent, ToolCallEventResult, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { extract, type Facts } from "./inspect.ts";
 import {
 	ALLOW_ALL_WINDOW_MS,
 	allowAllActive,
-	blockReason,
 	evaluate,
 	type AllowAll,
 	type Decision,
@@ -19,7 +23,7 @@ import {
 	withSessionGrants,
 } from "./policy.ts";
 import { appendPersisted, appendSession, type PersistedScope, type WriteResult } from "./grants.ts";
-import { ask, type AskResult } from "./prompt.ts";
+import { ask, blockReason, type AskResult } from "./prompt.ts";
 import { defaultLogPath, redact, reviewLog } from "./log.ts";
 import { displaySnippet } from "./match.ts";
 import type { GrantRule } from "./schema.ts";
@@ -31,6 +35,11 @@ export interface GateState {
 	allowAll: AllowAll | undefined;
 	/** callId → what the `subagent(...)` call asked for, so nested dialogs can name their owner. */
 	subagentCalls: Map<string, { role: string; task: string }>;
+	/**
+	 * callId → the note from an "allow with reason" choice, awaiting the matching `tool_result` (see
+	 * {@link attachNote}). A `tool_call` result has no channel for text, so the note rides the tool result.
+	 */
+	pendingNotes: PendingNotes;
 	/** Called after a grant changes the effective policy: reload + recompute active tools (step 9). */
 	policyChanged: (policy: Policy) => void;
 	/** Called when the human turns "allow everything" on or off, so the entry point can show and time it. */
@@ -48,6 +57,39 @@ export interface GateDeps {
 }
 
 export const OBSERVED_CALL_LIMIT = 64;
+
+/** callId → note. Bounded like {@link GateState.subagentCalls}: a blocked or aborted call never produces a result to consume it. */
+export type PendingNotes = Map<string, string>;
+export const PENDING_NOTE_LIMIT = 64;
+
+export function rememberNote(notes: PendingNotes, callId: string, note: string): void {
+	if (notes.size >= PENDING_NOTE_LIMIT && !notes.has(callId)) {
+		const oldest = notes.keys().next();
+		if (!oldest.done) notes.delete(oldest.value);
+	}
+	notes.set(callId, note);
+}
+
+/**
+ * Hand the human's note to the agent: prepend it to the result of the call it was allowed with. The
+ * note sits exactly where the model reads the outcome of that call, so it steers the next step without
+ * blocking anything. Returns `undefined` (no intervention) for every call nobody annotated.
+ *
+ * Everything else is passed through untouched — pi drops `structuredContent` when a handler replaces
+ * `content` without restating it.
+ */
+export function attachNote(event: ToolResultEvent, notes: PendingNotes): ToolResultEventResult | undefined {
+	const note = notes.get(event.toolCallId);
+	if (note === undefined) return undefined;
+	notes.delete(event.toolCallId);
+	return {
+		content: [{ type: "text", text: `Allowed by user with note: ${note}` }, ...event.content],
+		details: event.details,
+		isError: event.isError,
+		...(event.usage === undefined ? {} : { usage: event.usage }),
+		...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }),
+	};
+}
 
 export function observeSubagentCall(state: GateState, event: ToolCallEvent): void {
 	if (event.toolName !== "subagent") return;
@@ -125,6 +167,10 @@ export async function handleToolCall(
 
 		switch (answer.choice) {
 			case "once":
+				return;
+			case "allow_reason":
+				// The call runs; the note reaches the agent on this call's tool result.
+				rememberNote(state.pendingNotes, event.toolCallId, redact(answer.reason ?? ""));
 				return;
 			case "session": {
 				if (decision.grant) appendSession(state.sessionGrants, decision.grant);

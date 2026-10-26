@@ -3,8 +3,11 @@
  *
  * Scopes, lowest precedence first: built-in defaults, `~/.pi/agent/extensions/pi-gate/config.json`,
  * `<cwd>/.pi/extensions/pi-gate/config.json` (trusted projects only), `grants.global`,
- * `grants.project`, and in-memory session grants. Dialog choices: allow once / this session / this
- * project / all projects / abort / abort with reason.
+ * `grants.project`, and in-memory session grants. Dialog choices: allow once / allow with a note /
+ * this session / this project / all projects / abort / abort with a note / allow everything.
+ *
+ * A note from "allow with reason" is delivered on that call's `tool_result`, which is the only channel
+ * to the model that a `tool_call` handler still has.
  *
  * The gate applies to every `tool_call` in the session, including the nested calls a subagent makes
  * through the parent's tool pipeline — which is why `pi-subagent` needs no permission code at all.
@@ -15,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { isFullyDenied, loadPolicy, type Policy, recomputeActive, resolveConfigPaths, withSessionGrants } from "./policy.ts";
 import { writeDefaultConfig } from "./config-file.ts";
 import { clearSession, createSessionGrants, resetPersisted, type PersistedScope } from "./grants.ts";
-import { handleToolCall, type GateState } from "./handle.ts";
+import { handleToolCall, attachNote, type GateState, type PendingNotes } from "./handle.ts";
 import { ALLOW_ALL_WINDOW_MS, type AllowAll } from "./policy.ts";
 import { DEFAULT_GATE_CONFIG, type GrantRule } from "./schema.ts";
 
@@ -24,6 +27,7 @@ export default function piGate(pi: ExtensionAPI) {
 	const sessionGrants: GrantRule[] = createSessionGrants();
 	const hiddenByGate = new Set<string>();
 	const subagentCalls = new Map<string, { role: string; task: string }>();
+	const pendingNotes: PendingNotes = new Map();
 	let offForSession = false;
 	let allowAll: AllowAll | undefined;
 	let allowAllTimer: ReturnType<typeof setTimeout> | undefined;
@@ -106,6 +110,7 @@ export default function piGate(pi: ExtensionAPI) {
 		sessionGrants,
 		allowAll,
 		subagentCalls,
+		pendingNotes,
 		policyChanged: (next: Policy) => {
 			policy = next;
 			applyToolVisibility(next);
@@ -117,6 +122,7 @@ export default function piGate(pi: ExtensionAPI) {
 		clearSession(sessionGrants);
 		hiddenByGate.clear();
 		subagentCalls.clear();
+		pendingNotes.clear();
 		allowAll = undefined;
 		if (allowAllTimer) clearTimeout(allowAllTimer);
 		allowAllTimer = undefined;
@@ -138,6 +144,7 @@ export default function piGate(pi: ExtensionAPI) {
 		clearSession(sessionGrants);
 		hiddenByGate.clear();
 		subagentCalls.clear();
+		pendingNotes.clear();
 		allowAll = undefined;
 		if (allowAllTimer) clearTimeout(allowAllTimer);
 		allowAllTimer = undefined;
@@ -148,6 +155,9 @@ export default function piGate(pi: ExtensionAPI) {
 		if (disabled()) return;
 		return handleToolCall(event, ctx, state(ctx));
 	});
+
+	// "Allow with reason": the note the human typed goes on the result of the call it approved.
+	pi.on("tool_result", (event) => attachNote(event, pendingNotes));
 
 	pi.on("before_agent_start", (_event, ctx) => {
 		if (disabled()) return;

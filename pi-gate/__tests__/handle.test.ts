@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
-import { allowAllNote, handleToolCall, type GateState } from "../handle.ts";
+import { allowAllNote, attachNote, handleToolCall, PENDING_NOTE_LIMIT, rememberNote, type GateState } from "../handle.ts";
 import { clearPolicyCache, loadPolicy, type Policy, withSessionGrants } from "../policy.ts";
 import { gateDoc, makeFixture, writeGlobalConfig, type Fixture } from "./fixture.ts";
 import type { GrantRule } from "../schema.ts";
+import { CHOICES, type Choice } from "../prompt.ts";
 
 let fixture: Fixture | undefined;
 
@@ -19,7 +20,7 @@ interface UiLog {
 	questions: string[][];
 }
 
-function stubCtx(policyChoice: string | undefined | "undefined", log: UiLog): ExtensionContext {
+function stubCtx(policyChoice: Choice | "undefined", log: UiLog): ExtensionContext {
 	return {
 	 cwd: fixture?.cwd ?? "/repo",
 		hasUI: true,
@@ -30,7 +31,7 @@ function stubCtx(policyChoice: string | undefined | "undefined", log: UiLog): Ex
 			select: async (title: string, options: string[]) => {
 				log.titles.push(title);
 				log.questions.push(options);
-				return policyChoice === "undefined" ? undefined : options[Number(policyChoice)] ?? undefined;
+				return policyChoice === "undefined" ? undefined : options[CHOICES.indexOf(policyChoice)] ?? undefined;
 			},
 			input: async () => "use the make target instead",
 			notify: () => undefined,
@@ -46,6 +47,7 @@ function stateFor(policy: Policy, grants: GrantRule[] = []): GateState & { appli
 		sessionGrants: grants,
 		allowAll: undefined,
 		subagentCalls: new Map(),
+		pendingNotes: new Map(),
 		policyChanged: (next) => applied.push(next),
 		applied,
 	};
@@ -67,27 +69,63 @@ describe("ask outcomes", () => {
 	it("lets the call through on allow once", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const log: UiLog = { titles: [], questions: [] };
-		const result = await handleToolCall(bash("git commit -m x"), stubCtx("0", log), stateFor(policy));
+		const result = await handleToolCall(bash("git commit -m x"), stubCtx("once", log), stateFor(policy));
 		expect(result).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
 		expect(log.titles[0]).toContain("git commit -m x");
 	});
 
-	it("blocks on abort with a reason the model can act on", async () => {
+	it("lets the call through on allow-with-reason and queues the note for that call", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
+		const state = stateFor(policy);
 		const log: UiLog = { titles: [], questions: [] };
-		const result = await handleToolCall(bash("rm -rf build"), stubCtx("4", log), stateFor(policy));
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toMatch(/Blocked by the user/);
-		expect(result?.reason).toContain("rm -rf build");
+		const result = await handleToolCall(bash("git commit -m x", "c1"), stubCtx("allow_reason", log), state);
+		expect(result).toBeUndefined();
+		expect(state.pendingNotes.get("c1")).toBe("use the make target instead");
 	});
 
-	it("passes an abort-with-reason instruction verbatim", async () => {
+	it("redacts secrets out of an allow-with-reason note", async () => {
+		const policy = policyWith({ bash: { "*": "ask" } });
+		const state = stateFor(policy);
+		const ctx = {
+			...stubCtx("allow_reason", { titles: [], questions: [] }),
+			ui: { ...stubCtx("allow_reason", { titles: [], questions: [] }).ui, input: async () => "keep going, token=abc123" },
+		} as unknown as ExtensionContext;
+		await handleToolCall(bash("git commit -m x", "c1"), ctx, state);
+		expect(state.pendingNotes.get("c1")).toContain("token=<redacted>");
+	});
+
+	it("puts the queued note on that call's result and nowhere else", async () => {
+		const notes = new Map([["c1", "use the make target instead"]]);
+		const result = { type: "tool_result", toolCallId: "c1", toolName: "bash", input: {}, content: [{ type: "text", text: "ok" }], isError: false } as unknown as Parameters<typeof attachNote>[0];
+		const patched = attachNote(result, notes);
+		expect(patched?.content?.map((part) => (part as { text?: string }).text)).toEqual(["Allowed by user with note: use the make target instead", "ok"]);
+		expect(patched?.isError).toBe(false);
+		expect(attachNote({ ...result, toolCallId: "c2" } as typeof result, notes)).toBeUndefined();
+		expect(notes.size).toBe(0);
+	});
+
+	it("drops the oldest note past the ceiling so an unresultful call cannot leak the map", () => {
+		const notes = new Map();
+		for (let i = 0; i <= PENDING_NOTE_LIMIT; i++) rememberNote(notes, `c${i}`, "n");
+		expect(notes.size).toBe(PENDING_NOTE_LIMIT);
+		expect(notes.has("c0")).toBe(false);
+	});
+
+	it("blocks on abort, naming the call", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const log: UiLog = { titles: [], questions: [] };
-		const result = await handleToolCall(bash("rm -rf build"), stubCtx("5", log), stateFor(policy));
+		const result = await handleToolCall(bash("rm -rf build"), stubCtx("abort", log), stateFor(policy));
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("use the make target instead");
+		expect(result?.reason).toBe("Blocked by user: `rm -rf build`");
+	});
+
+	it("passes an abort-with-reason note verbatim, in a one-line template", async () => {
+		const policy = policyWith({ bash: { "*": "ask" } });
+		const log: UiLog = { titles: [], questions: [] };
+		const result = await handleToolCall(bash("rm -rf build"), stubCtx("abort_reason", log), stateFor(policy));
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe("Blocked by user with note: use the make target instead");
 	});
 
 	it("treats a dismissed or timed out dialog as abort", async () => {
@@ -102,13 +140,13 @@ describe("ask outcomes", () => {
 		const grants: GrantRule[] = [];
 		const state = stateFor(policy, grants);
 		const log: UiLog = { titles: [], questions: [] };
-		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("1", log), state);
+		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("session", log), state);
 		expect(grants).toHaveLength(1);
 		expect(state.applied).toHaveLength(1);
 
 		const updated = state.applied[0]!;
 		expect(updated.rules.some((rule) => rule.scope === "grants.session")).toBe(true);
-		const second = await handleToolCall(bash("git commit -m x", "c2"), stubCtx("1", log), { ...state, policy: updated });
+		const second = await handleToolCall(bash("git commit -m x", "c2"), stubCtx("session", log), { ...state, policy: updated });
 		expect(second).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
 	});
@@ -118,7 +156,7 @@ describe("ask outcomes", () => {
 		const log: UiLog = { titles: [], questions: [] };
 		const written: string[] = [];
 		const state = stateFor(policy);
-		await handleToolCall(bash("git commit -m x"), stubCtx("2", log), state, {
+		await handleToolCall(bash("git commit -m x"), stubCtx("project", log), state, {
 			appendPersisted: async (_offer, scope, cwd) => {
 				written.push(`${scope}:${cwd}`);
 				return { ok: true, file: "written" };
@@ -130,24 +168,25 @@ describe("ask outcomes", () => {
 	it("blocks a policy deny without opening a dialog", async () => {
 		const policy = policyWith({ bash: { "*": "deny" } });
 		const log: UiLog = { titles: [], questions: [] };
-		const result = await handleToolCall(bash("rm -rf /"), stubCtx("0", log), stateFor(policy));
+		const result = await handleToolCall(bash("rm -rf /"), stubCtx("once", log), stateFor(policy));
 		expect(result?.block).toBe(true);
 		expect(log.titles).toHaveLength(0);
-		expect(result?.reason).toMatch(/Denied by policy/);
+		expect(result?.reason).toMatch(/^Blocked by policy/);
 	});
 
 	it("blocks without a UI and names the exact fix (FM-12)", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
-		const ctx = { ...stubCtx("0", { titles: [], questions: [] }), hasUI: false, mode: "print" } as ExtensionContext;
+		const ctx = { ...stubCtx("once", { titles: [], questions: [] }), hasUI: false, mode: "print" } as ExtensionContext;
 		const result = await handleToolCall(bash("git commit -m x"), ctx, stateFor(policy));
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain('"git commit -m x"');
+		expect(result?.reason).toContain("`git commit -m x`");
 		expect(result?.reason).toMatch(/no UI|config/);
+		expect(result?.reason).not.toMatch(/[{}]/);
 	});
 
 	it("fails closed when the pipeline throws (FM-5)", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
-		const result = await handleToolCall(bash("ls"), stubCtx("0", { titles: [], questions: [] }), stateFor(policy), {
+		const result = await handleToolCall(bash("ls"), stubCtx("once", { titles: [], questions: [] }), stateFor(policy), {
 			extract: () => {
 				throw new Error("boom in the extractor");
 			},
@@ -162,7 +201,7 @@ describe("ask outcomes", () => {
 		state.subagentCalls.set("root", { role: "explore", task: "find the auth code" });
 		const log: UiLog = { titles: [], questions: [] };
 		const nested = { ...bash("grep secret src", "root/3"), parentToolCallId: "root/3" } as ToolCallEvent;
-		await handleToolCall(nested, stubCtx("0", log), state);
+		await handleToolCall(nested, stubCtx("once", log), state);
 		expect(log.titles[0]).toContain("explore");
 		expect(log.titles[0]).toContain("find the auth code");
 	});
@@ -170,11 +209,11 @@ describe("ask outcomes", () => {
 	it("offers one wildcard rule for every grant scope", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const log: UiLog = { titles: [], questions: [] };
-		await handleToolCall(bash("git commit -m x"), stubCtx("0", log), stateFor(policy));
+		await handleToolCall(bash("git commit -m x"), stubCtx("once", log), stateFor(policy));
 		const labels = log.questions[0]!;
-		expect(labels[1]).toBe("Allow `git commit *` for this session");
-		expect(labels[2]).toBe(`Allow \`git commit *\` for this project (${fixture?.cwd})`);
-		expect(labels[3]).toBe("Allow `git commit *` for all projects");
+		expect(labels[2]).toBe("Allow `git commit *` for this session");
+		expect(labels[3]).toBe(`Allow \`git commit *\` for this project (${fixture?.cwd})`);
+		expect(labels[4]).toBe("Allow `git commit *` for all projects");
 	});
 
 	it("lets the call through and never asks again for a chained command once allowed for the session", async () => {
@@ -182,11 +221,11 @@ describe("ask outcomes", () => {
 		const grants: GrantRule[] = [];
 		const state = stateFor(policy, grants);
 		const log: UiLog = { titles: [], questions: [] };
-		await handleToolCall(bash("npm run lint && git status --porcelain", "c1"), stubCtx("1", log), state);
+		await handleToolCall(bash("npm run lint && git status --porcelain", "c1"), stubCtx("session", log), state);
 		expect(grants.map((rule) => rule.pattern)).toEqual(["npm run *", "git status *"]);
 
 		const updated = state.applied[0]!;
-		const again = await handleToolCall(bash("npm run lint && git status --porcelain", "c2"), stubCtx("1", log), { ...state, policy: updated });
+		const again = await handleToolCall(bash("npm run lint && git status --porcelain", "c2"), stubCtx("session", log), { ...state, policy: updated });
 		expect(again).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
 	});
@@ -195,7 +234,7 @@ describe("ask outcomes", () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const log: UiLog = { titles: [], questions: [] };
 		const written: string[][] = [];
-		await handleToolCall(bash("npm run lint && git status --porcelain"), stubCtx("2", log), stateFor(policy), {
+		await handleToolCall(bash("npm run lint && git status --porcelain"), stubCtx("project", log), stateFor(policy), {
 			appendPersisted: async (offer, scope) => {
 				written.push([scope, ...offer.patterns]);
 				return { ok: true, file: "written" };
@@ -208,10 +247,10 @@ describe("ask outcomes", () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const state = stateFor(policy);
 		const log: UiLog = { titles: [], questions: [] };
-		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("6", log), state);
+		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("all_session", log), state);
 		expect(state.allowAll).toEqual({ until: null });
 
-		const second = await handleToolCall(bash("npm publish", "c2"), stubCtx("6", log), state);
+		const second = await handleToolCall(bash("npm publish", "c2"), stubCtx("all_session", log), state);
 		expect(second).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
 	});
@@ -223,16 +262,16 @@ describe("ask outcomes", () => {
 		let clock = 1_000_000;
 		const deps = { now: () => clock };
 
-		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("0", log), state, deps);
-		const timed = await handleToolCall(bash("git push", "c2"), stubCtx("7", log), state, deps);
+		await handleToolCall(bash("git commit -m x", "c1"), stubCtx("once", log), state, deps);
+		const timed = await handleToolCall(bash("git push", "c2"), stubCtx("all_timed", log), state, deps);
 		expect(timed).toBeUndefined();
 		expect(state.allowAll).toEqual({ until: 1_000_000 + 5 * 60 * 1000 });
 
-		expect(await handleToolCall(bash("git fetch", "c3"), stubCtx("0", log), state, deps)).toBeUndefined();
+		expect(await handleToolCall(bash("git fetch", "c3"), stubCtx("once", log), state, deps)).toBeUndefined();
 		expect(log.titles).toHaveLength(2);
 
 		clock += 5 * 60 * 1000 + 1;
-		await handleToolCall(bash("git pull", "c4"), stubCtx("0", log), state, deps);
+		await handleToolCall(bash("git pull", "c4"), stubCtx("once", log), state, deps);
 		expect(log.titles).toHaveLength(3);
 	});
 
@@ -241,9 +280,9 @@ describe("ask outcomes", () => {
 		const state = stateFor(policy);
 		state.allowAll = { until: null };
 		const log: UiLog = { titles: [], questions: [] };
-		const result = await handleToolCall(bash("git push origin main"), stubCtx("0", log), state);
+		const result = await handleToolCall(bash("git push origin main"), stubCtx("once", log), state);
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toMatch(/Denied by policy/);
+		expect(result?.reason).toMatch(/^Blocked by policy/);
 	});
 
 	it("\"allow everything\" walks past a path outside the workspace and a hidden argument", async () => {
@@ -251,7 +290,7 @@ describe("ask outcomes", () => {
 		const state = stateFor(policy);
 		state.allowAll = { until: null };
 		const log: UiLog = { titles: [], questions: [] };
-		expect(await handleToolCall(bash("cat /etc/hosts"), stubCtx("0", log), state)).toBeUndefined();
+		expect(await handleToolCall(bash("cat /etc/hosts"), stubCtx("once", log), state)).toBeUndefined();
 		expect(log.titles).toHaveLength(0);
 	});
 
@@ -269,7 +308,7 @@ describe("ask outcomes", () => {
 			bash(`echo x > ${fixture?.cwd}/.git/hooks/pre-commit`, "c5"), // code that runs as the user
 		];
 		for (const call of calls) {
-			expect(await handleToolCall(call, stubCtx("0", log), state)).toBeUndefined();
+			expect(await handleToolCall(call, stubCtx("once", log), state)).toBeUndefined();
 		}
 		expect(log.titles).toHaveLength(0);
 	});
@@ -284,11 +323,11 @@ describe("ask outcomes", () => {
 		const state = stateFor(degraded);
 		const log: UiLog = { titles: [], questions: [] };
 		// off: a config that cannot be read escalates every allow, so the call is asked about
-		expect(await handleToolCall(bash("cat a.ts"), stubCtx("0", log), state)).toBeUndefined();
+		expect(await handleToolCall(bash("cat a.ts"), stubCtx("once", log), state)).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
 
 		state.allowAll = { until: null };
-		expect(await handleToolCall(bash("cat b.ts", "c2"), stubCtx("0", log), state)).toBeUndefined();
+		expect(await handleToolCall(bash("cat b.ts", "c2"), stubCtx("once", log), state)).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
 	});
 
@@ -297,7 +336,7 @@ describe("ask outcomes", () => {
 		const state = stateFor(policy);
 		state.allowAll = { until: null };
 		const log: UiLog = { titles: [], questions: [] };
-		const headless = { ...stubCtx("0", log), hasUI: false } as ExtensionContext;
+		const headless = { ...stubCtx("once", log), hasUI: false } as ExtensionContext;
 		expect(await handleToolCall(bash(`echo x > ${fixture?.agentDir}/settings.json`), headless, state)).toBeUndefined();
 		expect(log.titles).toHaveLength(0);
 	});
@@ -315,7 +354,7 @@ describe("ask outcomes", () => {
 		state.allowAll = { until: null };
 		const log: UiLog = { titles: [], questions: [] };
 		const readSettings = { type: "tool_call", toolCallId: "c1", toolName: "read", input: { path: `${fixture?.agentDir}/settings.json` } } as ToolCallEvent;
-		expect(await handleToolCall(readSettings, stubCtx("0", log), state)).toBeUndefined();
+		expect(await handleToolCall(readSettings, stubCtx("once", log), state)).toBeUndefined();
 		expect(log.titles).toHaveLength(0);
 	});
 
@@ -324,11 +363,11 @@ describe("ask outcomes", () => {
 		const grants: GrantRule[] = [];
 		const state = stateFor(policy, grants);
 		const log: UiLog = { titles: [], questions: [] };
-		await handleToolCall(bash("npx vitest run", "c1"), stubCtx("1", log), state);
+		await handleToolCall(bash("npx vitest run", "c1"), stubCtx("session", log), state);
 		expect(grants.map((rule) => rule.pattern)).toEqual(["npx vitest run"]);
 
 		const updated = state.applied[0]!;
-		expect(await handleToolCall(bash("npx vitest run", "c2"), stubCtx("1", log), { ...state, policy: updated })).toBeUndefined();
+		expect(await handleToolCall(bash("npx vitest run", "c2"), stubCtx("session", log), { ...state, policy: updated })).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
 	});
 
@@ -336,7 +375,7 @@ describe("ask outcomes", () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const granted = withSessionGrants(policy, [{ surface: "bash", pattern: "ls", action: "allow" }]);
 		const log: UiLog = { titles: [], questions: [] };
-		const result = await handleToolCall(bash("ls"), stubCtx("0", log), stateFor(granted));
+		const result = await handleToolCall(bash("ls"), stubCtx("once", log), stateFor(granted));
 		expect(result).toBeUndefined();
 		expect(log.titles).toHaveLength(0);
 	});
