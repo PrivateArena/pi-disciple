@@ -90,7 +90,7 @@ describe("option labels", () => {
 	});
 
 	it("lists every surfaced fact, not the first four", () => {
-		const checks = Array.from({ length: 6 }, (_, i) => ({ surface: `surface${i}`, value: `/very/long/path/${"z".repeat(200)}/file${i}.ts`, action: "ask" as const }));
+		const checks = Array.from({ length: 6 }, (_, i) => ({ surface: `surface${i}`, value: `/very/long/path/${"z".repeat(200)}/file${i}.ts`, action: "ask" as const, specificity: 2 }));
 		const title = dialogTitle(decision({ checks }));
 		for (let i = 0; i < 6; i++) expect(title).toContain(`surface${i}`);
 		expect(title).toContain("z".repeat(200));
@@ -199,7 +199,7 @@ describe("dialog title", () => {
 	});
 
 	it("code-wraps the command and every surfaced value", () => {
-		const title = dialogTitle(decision({ checks: [{ surface: "external_directory", value: "/mnt/usb/_data_", action: "ask" }] }));
+		const title = dialogTitle(decision({ checks: [{ surface: "external_directory", value: "/mnt/usb/_data_", action: "ask", specificity: 2 }] }));
 		expect(title).toContain("`sudo rm -rf /`");
 		expect(title).toContain("`/mnt/usb/_data_`");
 	});

@@ -5,7 +5,7 @@
  * consumes its output and never re-parses bash.
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -123,9 +123,54 @@ export function isUnder(child: string, parent: string): boolean {
 	return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
-/** Path patterns also match the lowercased spelling, so `*.ENV` cannot dodge `*.env`. */
+/**
+ * Path patterns also match the lowercased spelling, so `*.ENV` cannot dodge `*.env`.
+ *
+ * A directory pattern (`/x/y/*`, what {@link directoryPattern} writes) also matches `/x/y` itself: the
+ * folder you allowed is the folder you can list, not only the files inside it.
+ */
 export function pathPatternMatches(pattern: string, spelling: string): boolean {
-	return wildcardMatch(pattern, spelling) || wildcardMatch(pattern, spelling.toLowerCase());
+	if (wildcardMatch(pattern, spelling) || wildcardMatch(pattern, spelling.toLowerCase())) return true;
+	const base = directoryOfPattern(expandHome(pattern));
+	return base !== undefined && base === spelling;
+}
+
+/** The directory a `…/*` pattern names, or `undefined` for any other pattern. */
+function directoryOfPattern(pattern: string): string | undefined {
+	const match = /[/\\]\*+$/.exec(pattern);
+	if (!match) return undefined;
+	return trimTrailingSlash(pattern.slice(0, match.index));
+}
+
+/**
+ * The folder-wide pattern for one path spelling: the directory that contains the file, plus `/*`.
+ *
+ * This is the unit a dialog grants for a file tool — the same granularity every other agent harness
+ * uses for a sandbox escape, because "let it read this one config file" is not a decision a human
+ * re-makes willingly for the next file in the same directory.
+ */
+export function directoryPattern(spelling: string): string {
+	const clean = trimTrailingSlash(spelling);
+	const dir = trimTrailingSlash(spelling.endsWith(sep) || isDirectory(clean) ? clean : dirname(clean));
+	return `${dir.endsWith(sep) ? dir : dir + sep}*`;
+}
+
+function isDirectory(p: string): boolean {
+	try {
+		return existsSync(p) && statSync(p).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * True when a rule names a specific class of things (`/secrets/*`, `git push *`) rather than a whole
+ * surface (`"*"`, or the tool-name wildcard). A scoped rule is a decision about *this* location or
+ * command class, which is what lets a folder grant answer an `external_directory` floor.
+ */
+export function isScopedRule(rule: { surface: string; pattern: string } | undefined): boolean {
+	if (!rule) return false;
+	return rule.surface !== "*" && rule.pattern !== "*" && rule.pattern !== "";
 }
 
 /**

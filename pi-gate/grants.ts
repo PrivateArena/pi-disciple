@@ -20,12 +20,19 @@ export function createSessionGrants(): GrantRule[] {
 	return [];
 }
 
-/** The rules a dialog choice creates: one per command segment, session scope wildcards, persisted scopes the exact call. */
+/**
+ * The rules a dialog choice creates: one per command segment, the same shape in every scope. An offer
+ * that also speaks on another surface (an outside path needs `external_directory`, not only the tool's
+ * own surface) gets one rule per surface, otherwise the click would not close its own dialog.
+ */
 export function toGrantRules(offer: GrantOffer, action: Action = "allow"): GrantRule[] {
+	const surfaces = [offer.surface, ...(offer.alsoSurfaces ?? [])];
 	const out: GrantRule[] = [];
-	for (const pattern of offer.patterns) {
-		if (out.some((rule) => rule.pattern === pattern)) continue;
-		out.push({ surface: offer.surface, pattern, action });
+	for (const surface of surfaces) {
+		for (const pattern of offer.patterns) {
+			if (out.some((rule) => rule.surface === surface && rule.pattern === pattern)) continue;
+			out.push({ surface, pattern, action });
+		}
 	}
 	return out;
 }

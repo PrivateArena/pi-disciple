@@ -11,6 +11,13 @@ let fixture: Fixture | undefined;
 const offer = (pattern: string, surface = "bash"): GrantOffer => ({ surface, patterns: [pattern], label: pattern });
 /** A multi-segment offer, exactly as a chained command produces one. */
 const multiOffer = (...patterns: string[]): GrantOffer => ({ surface: "bash", patterns, label: patterns.join(" && ") });
+/** A file outside the workspace: the tool's own surface plus the surface that actually asked. */
+const folderOffer = (pattern: string, surface = "edit"): GrantOffer => ({
+	surface,
+	patterns: [pattern],
+	alsoSurfaces: ["external_directory"],
+	label: pattern,
+});
 
 afterEach(() => {
 	fixture?.cleanup();
@@ -55,6 +62,15 @@ describe("session grants", () => {
 		appendSession(grants, multiOffer("cd *", "git status *"));
 		expect(appendSession(grants, multiOffer("cd *", "npm test *"))).toEqual([{ surface: "bash", pattern: "npm test *", action: "allow" }]);
 		expect(grants).toHaveLength(3);
+	});
+
+	it("writes a folder grant on every surface the offer names", () => {
+		const grants = createSessionGrants();
+		expect(appendSession(grants, folderOffer("/mnt/usb/data/*"))).toEqual([
+			{ surface: "edit", pattern: "/mnt/usb/data/*", action: "allow" },
+			{ surface: "external_directory", pattern: "/mnt/usb/data/*", action: "allow" },
+		]);
+		expect(appendSession(grants, folderOffer("/mnt/usb/data/*"))).toEqual([]);
 	});
 });
 

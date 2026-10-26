@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
 	BASH_ARITY,
+	directoryPattern,
 	displaySnippet,
 	expandHome,
 	hasUnparsedExpansion,
 	isExternalPath,
 	isProtectedPath,
+	isScopedRule,
 	isUnder,
+	pathPatternMatches,
 	pathSpellings,
 	peelEnvPrefix,
 	protectedPathGlobs,
@@ -65,6 +68,29 @@ describe("isUnder / external", () => {
 	it("flags paths with no spelling inside cwd", () => {
 		expect(isExternalPath(["/etc/hosts"], "/repo")).toBe(true);
 		expect(isExternalPath(["/repo/x"], "/repo")).toBe(false);
+	});
+});
+
+describe("folder grants", () => {
+	it("names the containing directory of a file, and the directory itself", () => {
+		expect(directoryPattern("/repo/src/a.ts")).toBe("/repo/src/*");
+		expect(directoryPattern("/repo/src/")).toBe("/repo/src/*");
+		expect(directoryPattern(process.cwd())).toBe(`${process.cwd()}/*`); // an existing directory: itself, not its parent
+	});
+
+	it("matches the directory as well as everything under it", () => {
+		expect(pathPatternMatches("/a/b/*", "/a/b/c.ts")).toBe(true);
+		expect(pathPatternMatches("/a/b/*", "/a/b/c/d.ts")).toBe(true);
+		expect(pathPatternMatches("/a/b/*", "/a/b")).toBe(true); // `ls <dir>` is covered by that dir's grant
+		expect(pathPatternMatches("/a/b/*", "/a/bb")).toBe(false);
+		expect(pathPatternMatches("/a/b", "/a/b")).toBe(true);
+	});
+
+	it("separates a scoped rule from a class-wide one", () => {
+		expect(isScopedRule({ surface: "path", pattern: "/a/*" })).toBe(true);
+		expect(isScopedRule({ surface: "path", pattern: "*" })).toBe(false);
+		expect(isScopedRule({ surface: "*", pattern: "*" })).toBe(false);
+		expect(isScopedRule(undefined)).toBe(false);
 	});
 });
 

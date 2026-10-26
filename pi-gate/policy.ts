@@ -27,10 +27,12 @@ import {
 import { getGlobalConfigFile, getProjectConfigFile, readConfigFile } from "./config-file.ts";
 import {
 	compoundPatternParts,
+	directoryPattern,
 	hasUnparsedExpansion,
 	isExactRule,
 	isExternalPath,
 	isProtectedPath,
+	isScopedRule,
 	matchesSegmentPattern,
 	pathPatternMatches,
 	protectedPathGlobs,
@@ -69,7 +71,27 @@ export interface FactCheck {
 	action: Action;
 	rule?: Rule;
 	floor?: "protected_path" | "protected_read" | "wrapper" | "external_directory" | "degraded_config";
+	/** How specifically the fact was decided — see {@link specificityOf}. */
+	specificity: number;
 }
+
+/**
+ * How specifically a rule talks about a fact. Two facts of one call can describe the *same thing*
+ * (the `edit` tool's value for `src/a.ts` and the `path` fact for `src/a.ts`), and a rule about the
+ * location is the more specific statement about it — that is what stops the tool-name wildcard
+ * `permission["*"]`, which is only a default action for tools nobody configured, from overriding the
+ * `path` rules that decide the workspace boundary.
+ */
+export const SPECIFICITY = {
+	/** No rule: the surface's documented fallback (`path` allow, `external_directory` ask). */
+	fallback: 0,
+	/** `permission["*"]` — the tool-name wildcard, a default for unconfigured tools. */
+	generic: 1,
+	/** A named surface with a class-wide rule (`read: "allow"`), or a cross-cutting path default. */
+	classWide: 2,
+	/** A named surface with a concrete pattern (`path: "/secrets/*"`, `bash: "git *"`, any grant). */
+	scoped: 3,
+} as const;
 
 export interface GrantOffer {
 	surface: string;
@@ -79,6 +101,12 @@ export interface GrantOffer {
 	 * the allowance would silently do nothing.
 	 */
 	patterns: string[];
+	/**
+	 * Extra surfaces the same patterns get written to. A file outside the workspace is decided by the
+	 * `external_directory` surface as well as by the tool's own, so a grant that only names the tool
+	 * would leave the outside-path question open and ask again forever.
+	 */
+	alsoSurfaces?: string[];
 	/** Single-line summary of `patterns`, for the dialog. */
 	label: string;
 }
@@ -262,7 +290,7 @@ function patternMatches(surface: string, pattern: string, value: string, segment
 		const parts = compoundPatternParts(pattern);
 		if (parts) return matchesSegmentPattern(parts, segments);
 	}
-	if (surface === "path") return pathPatternMatches(pattern, value);
+	if (surface === "path" || surface === "external_directory") return pathPatternMatches(pattern, value);
 	return wildcardMatch(pattern, value);
 }
 
@@ -280,6 +308,14 @@ function matchRule(surface: string, value: string, policy: Policy, isToolSurface
 		else if (rule.surface === "*" && isToolSurface) generic = rule;
 	}
 	return named ?? generic;
+}
+
+/** {@link matchRule} plus how specifically the winning rule talks about this value. */
+function matchFact(surface: string, value: string, policy: Policy, isToolSurface: boolean, segments?: readonly string[]): { rule?: Rule; specificity: number } {
+	const rule = matchRule(surface, value, policy, isToolSurface, segments);
+	if (!rule) return { specificity: SPECIFICITY.fallback };
+	if (rule.surface === "*") return { rule, specificity: SPECIFICITY.generic };
+	return { rule, specificity: rule.pattern === "*" ? SPECIFICITY.classWide : SPECIFICITY.scoped };
 }
 
 /** A tool is hidden from the model only when every rule for it denies it. */
@@ -315,11 +351,14 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 	const readOnly = READ_ONLY_TOOLS.includes(facts.toolName);
 	const checks: FactCheck[] = [];
 
-	const push = (surface: string, value: string, fallback: Action | undefined) => {
+	const push = (surface: string, value: string, fallback: Action | undefined, fallbackSpecificity: number = SPECIFICITY.fallback) => {
 		const segments = shell && surface === facts.toolName ? shellValues : undefined;
-		const rule = matchRule(surface, value, policy, surface === facts.toolName, segments);
-		let action = rule?.action ?? fallback;
-		if (action === undefined) return;
+		const matched = matchFact(surface, value, policy, surface === facts.toolName, segments);
+		const rule = matched.rule;
+		const resolved = rule?.action ?? fallback;
+		if (resolved === undefined) return;
+		let action = resolved;
+		const specificity = rule ? matched.specificity : fallbackSpecificity;
 		// Floors are facts about the call, not about whichever rule happened to speak last: an `ask` from
 		// `external_directory: "ask"` is the same external access as a defaulted one, and labelling only the
 		// latter made every floor of the shipped config invisible to "allow everything".
@@ -331,31 +370,29 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 		else if (shell && surface === facts.toolName && !named && (isWrappedSegment(value, inPipeline) || hasUnparsedExpansion(value)))
 			floor = "wrapper";
 		else if (policy.degraded) floor = "degraded_config";
-		// A floor escalates, never downgrades: `allow` on a guarded value is still an ask.
-		if (floor && action === "allow") action = "ask";
-		checks.push({ surface, value, action, rule, floor });
+		// A floor escalates, never downgrades: `allow` on a guarded value is still an ask — unless the rule
+		// that allowed it really speaks about this call (an exact command) or, for an outside path, about
+		// this location (a concrete `…/*` grant). Without that exception no click could ever allow a file
+		// outside the workspace, because the surface that asks is a class-wide one.
+		if (floor && action === "allow" && !answersFloor(floor, rule, surface, value, named)) action = "ask";
+		checks.push({ surface, value, action, rule, floor, specificity });
 	};
 
 	for (const [surface, values] of facts.surfaces) {
 		for (const value of values) push(surface, value, policy.defaultAction);
 	}
 	for (const spelling of facts.paths) {
-		push("path", spelling, "allow");
-		if (isExternalPath([spelling], facts.cwd)) push("external_directory", spelling, "ask");
+		// The cross-cutting surfaces are the gate's own statement about location, so their documented
+		// defaults outrank the tool-name wildcard: that is what makes an in-workspace file operation pass
+		// by default even in a config that only sets `permission["*"] = "ask"`.
+		push("path", spelling, "allow", SPECIFICITY.classWide);
+		if (isExternalPath([spelling], facts.cwd)) push("external_directory", spelling, "ask", SPECIFICITY.classWide);
 	}
 
-	let action: Action = "allow";
-	let decided = false;
-	for (const check of checks) {
-		if (!decided || severityOf(check.action) > severityOf(action)) {
-			action = check.action;
-			decided = true;
-		}
-	}
-	if (!decided) action = policy.defaultAction;
-	if (checks.length === 0) action = policy.defaultAction;
-
-	const matched = [...checks].reverse().find((check) => check.action === action)?.rule;
+	// Facts that name the *same thing* — a file tool's value for `/x/a.ts` and the `path` fact for that
+	// very spelling — are judged once, by the most specific rule about them. Facts that name different
+	// things (every segment of a shell call, every path it touches) still combine most-restrictive.
+	const { action, matched } = decide(checks, policy);
 	return {
 		action,
 		facts,
@@ -364,6 +401,50 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 		floors: [...new Set(checks.flatMap((check) => (check.floor ? [check.floor] : [])))],
 		grant: offerGrant(facts),
 	};
+}
+
+/** Can this rule answer this floor, or does the floor keep the call at `ask`? */
+function answersFloor(floor: NonNullable<FactCheck["floor"]>, rule: Rule | undefined, surface: string, value: string, exact: boolean): boolean {
+	if (!rule) return false;
+	// A config too broken to trust is not answerable by any rule.
+	if (floor === "degraded_config") return false;
+	// An exact rule is the human naming this call. A scoped one (`/dir/*`, not `"*"`) is the human
+	// naming this location — which is exactly what a folder grant for an outside path writes.
+	if (floor === "external_directory") return exact || (rule.surface === surface && isScopedRule(rule));
+	return exact;
+}
+
+/** The call's action, and the rule that decided it. */
+function decide(checks: FactCheck[], policy: Policy): { action: Action; matched?: Rule } {
+	const groups = new Map<string, FactCheck[]>();
+	for (const check of checks) {
+		const group = groups.get(check.value);
+		if (group) group.push(check);
+		else groups.set(check.value, [check]);
+	}
+	let action: Action = policy.defaultAction;
+	let matched: Rule | undefined;
+	let decided = false;
+	for (const group of groups.values()) {
+		const top = Math.max(...group.map((check) => check.specificity));
+		const winners = group.filter((check) => check.specificity === top);
+		// Within one value: the most restrictive of the most specific rules; ties resolve towards the
+		// later (higher-precedence) scope, as they do inside a single surface.
+		const winner = winners.reduce((best, check) => (severityOf(check.action) >= severityOf(best.action) ? check : best));
+		if (!decided) {
+			action = winner.action;
+			matched = winner.rule;
+			decided = true;
+			continue;
+		}
+		if (severityOf(winner.action) > severityOf(action)) {
+			action = winner.action;
+			matched = winner.rule;
+		} else if (severityOf(winner.action) === severityOf(action) && winner.rule) {
+			matched = winner.rule;
+		}
+	}
+	return decided ? { action, matched } : { action: policy.defaultAction };
 }
 
 function severityOf(action: Action): number {
@@ -375,13 +456,33 @@ function severityOf(action: Action): number {
  * scope. Persisted grants used to store the exact command while a session grant stored a wildcard, so
  * one click meant two different things — and an exact multi-argument command is useless as a rule.
  * `suggestBashPattern` keeps dangerous and wrapper segments exact, so the wildcard is not naive.
+ *
+ * For a file tool the offer is the **containing folder** (`/x/y/*`), not the one file: a human who
+ * allowed one file in a directory means "stop asking me about that directory", which is how every
+ * other harness scopes a sandbox grant. An outside path additionally lands on `external_directory`,
+ * the surface that actually asked.
  */
 export function offerGrant(facts: Facts): GrantOffer | undefined {
 	const values = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
 	if (values.length === 0) return undefined;
-	const shell = isShellTool(facts.toolName);
-	const patterns = shell ? values.map((seg) => suggestBashPattern(seg)) : [values[0]!];
-	return { surface: facts.toolName, patterns, label: patterns.join(shell ? " && " : "") };
+	if (isShellTool(facts.toolName)) {
+		const patterns = values.map((seg) => suggestBashPattern(seg));
+		return { surface: facts.toolName, patterns, label: patterns.join(" && ") };
+	}
+	const spellings = new Set(facts.paths);
+	const pathValued = values.every((value) => spellings.has(value));
+	if (!pathValued) {
+		const pattern = values[0]!;
+		return { surface: facts.toolName, patterns: [pattern], label: pattern };
+	}
+	const patterns = [...new Set(values.map((value) => directoryPattern(value)))];
+	const external = facts.paths.some((spelling) => isExternalPath([spelling], facts.cwd));
+	return {
+		surface: facts.toolName,
+		patterns,
+		label: patterns.join(" "),
+		...(external ? { alsoSurfaces: ["external_directory"] } : {}),
+	};
 }
 
 /** Convenience wrapper used by the extension entry point and by tests. */

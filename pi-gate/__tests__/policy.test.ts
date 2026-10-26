@@ -11,6 +11,7 @@ import {
 	withSessionGrants,
 } from "../policy.ts";
 import { extract } from "../inspect.ts";
+import { toGrantRules } from "../grants.ts";
 import { DEFAULT_GATE_CONFIG } from "../schema.ts";
 import { gateDoc, makeFixture, writeGlobalConfig, writeProjectConfig, type Fixture } from "./fixture.ts";
 
@@ -189,10 +190,62 @@ describe("grant offers", () => {
 		expect(decision.grant?.patterns).toEqual(["rm -rf build/out"]);
 	});
 
-	it("name the concrete value for a non-shell tool, since a path has no wildcard form", () => {
+	it("offers the containing folder for a file tool, so one click covers the directory", () => {
 		const { policy, cwd } = setup({ edit: "ask" });
 		const decision = evaluate(extract("edit", { path: `${cwd}/src/a.ts` }, cwd, { callId: "t" }), policy);
-		expect(decision.grant?.patterns).toEqual([`${cwd}/src/a.ts`]);
+		expect(decision.grant?.patterns).toEqual([`${cwd}/src/*`]);
+		// Inside the workspace nothing else has to be told: the `path` surface already decides it.
+		expect(decision.grant?.alsoSurfaces).toBeUndefined();
+	});
+});
+
+describe("the workspace boundary", () => {
+	it("lets file tools work inside the project on the path rules alone", () => {
+		// `permission["*"]` is a default for unconfigured tools, not a verdict about a location, so it
+		// must not out-rule the `path` surface: this is "internal files pass" as a default, not as config.
+		const { policy, cwd } = setup({ "*": "ask" });
+		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/src/a.ts` })).toBe("allow");
+		expect(actionOf(policy, cwd, "write", { path: `${cwd}/src/new.ts` })).toBe("allow");
+		expect(actionOf(policy, cwd, "read", { path: `${cwd}/src/a.ts` })).toBe("allow");
+		// An unknown tool's own surface is a rendering of its arguments, not a path, so it keeps asking:
+		// only tools whose fact value *is* the path (`read`/`write`/`edit`/`ls`) are decided by location.
+		expect(actionOf(policy, cwd, "mcp__fs__put", { path: `${cwd}/out/x.bin` })).toBe("ask");
+		// Shell is not a file operation, and the outside is still the outside.
+		expect(actionOf(policy, cwd, "bash", { command: `cat ${cwd}/src/a.ts` })).toBe("ask");
+		expect(actionOf(policy, cwd, "read", { path: "/etc/passwd" })).toBe("ask");
+	});
+
+	it("still honours an explicit per-tool ask inside the workspace", () => {
+		const { policy, cwd } = setup({ "*": "allow", edit: "ask", path: { "*": "allow" } });
+		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/src/a.ts` })).toBe("ask");
+	});
+
+	it("lets a specific path rule out-rule a class-wide one", () => {
+		const { policy, cwd } = setup({ "*": "allow", path: { "*": "allow", "/secrets/*": "ask" } });
+		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/src/a.ts` })).toBe("allow");
+		expect(actionOf(policy, cwd, "edit", { path: "/secrets/api_key" })).toBe("ask");
+	});
+
+	it("answers the external_directory floor with a folder grant — one click, then no more dialogs", () => {
+		const { policy, cwd } = setup({ "*": "ask", path: { "*": "allow" }, external_directory: "ask" });
+		const dir = "/mnt/usb/data";
+		const offer = evaluate(extract("edit", { path: `${dir}/a.ts` }, cwd, { callId: "t" }), policy).grant;
+		expect(offer?.patterns).toEqual([`${dir}/*`]);
+		expect(offer?.alsoSurfaces).toEqual(["external_directory"]);
+
+		const granted = withSessionGrants(policy, toGrantRules(offer!));
+		// A sibling file in the same folder, and the folder itself, are both covered now.
+		expect(evaluate(extract("edit", { path: `${dir}/b.ts` }, cwd, { callId: "t" }), granted).action).toBe("allow");
+		expect(evaluate(extract("ls", { path: dir }, cwd, { callId: "t" }), granted).action).toBe("allow");
+		// …and a folder nobody granted still asks.
+		expect(evaluate(extract("edit", { path: "/mnt/other/a.ts" }, cwd, { callId: "t" }), granted).action).toBe("ask");
+	});
+
+	it("never lets a folder grant walk past a deny rule on the path surface", () => {
+		const { policy, cwd } = setup({ "*": "allow", path: { "*": "allow", "*.env": "deny" } });
+		const granted = withSessionGrants(policy, [{ surface: "read", pattern: "/repo/*", action: "allow" }]);
+		expect(actionOf(granted, cwd, "read", { path: "/repo/config" })).toBe("allow");
+		expect(actionOf(granted, cwd, "read", { path: "/repo/.env" })).toBe("deny");
 	});
 });
 

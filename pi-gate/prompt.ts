@@ -37,9 +37,14 @@ function grantSummary(offer: Decision["grant"]): string {
 
 /** Every pattern of the offer, verbatim and uncapped — what the grant scopes really write. */
 function ruleLine(decision: Decision): string {
-	const patterns = decision.grant?.patterns;
+	const grant = decision.grant;
+	const patterns = grant?.patterns;
 	if (!patterns?.length) return "";
-	return `\nrule: ${patterns.map((pattern) => codeSpan(displaySnippet(pattern))).join("  ")}`;
+	const body = patterns.map((pattern) => codeSpan(displaySnippet(pattern))).join("  ");
+	const extra = grant?.alsoSurfaces?.length
+		? ` on ${codeSpan(grant.surface)} + ${grant.alsoSurfaces.map((surface) => codeSpan(surface)).join(" + ")}`
+		: "";
+	return `\nrule: ${body}${extra}`;
 }
 
 export function optionLabels(decision: Decision, cwd: string): string[] {
@@ -95,9 +100,11 @@ export function blockReason(decision: Decision, kind: "policy_deny" | "user_abor
 	}
 	if (kind === "no_ui") {
 		const fix = [...new Set(grant?.patterns ?? ["*"])].map((pattern) => codeSpan(pattern)).join(" and ");
+		const sections = [...new Set([grant?.surface ?? facts.toolName, ...(grant?.alsoSurfaces ?? [])])].map((surface) => codeSpan(surface));
+		const where = sections.length > 1 ? `${sections.slice(0, -1).join(", ")} and ${sections.at(-1)} sections` : `${sections[0]} section`;
 		return (
 			`Blocked: ${facts.toolName} ${codeSpan(displaySnippet(facts.preview))} needs approval and this session has no UI.\n` +
-			`Allow it by adding ${fix} = allow to the "${facts.toolName}" section of ${getGlobalConfigFile()}, or run pi interactively.`
+			`Allow it by adding ${fix} = allow to the ${where} of ${getGlobalConfigFile()}, or run pi interactively.`
 		);
 	}
 	const rule = matched ? ` (${matched.surface} ${codeSpan(matched.pattern)} = deny, ${matched.scope})` : "";

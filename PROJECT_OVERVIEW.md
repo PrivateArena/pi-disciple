@@ -25,7 +25,7 @@ nor collapse 256 sequential calls into one unreviewable batch.
 pi-gate/
   schema.ts        config parsing + defaults (GateConfig, SubagentLimits, GrantRule)      step 3
   config-file.ts   read/seed `<scope>/extensions/pi-gate/config.json`, JSONC tolerance    step 19
-  match.ts         pattern matching, shell segmentation, path spellings, protected globs   step 4
+  match.ts         pattern matching, shell segmentation, path spellings, folder grants, protected globs   step 4
   inspect.ts       Facts: surfaces + paths + call ids extracted from a tool call           step 5
   policy.ts        layered Policy (defaults→global→project→grants→session), floors, deny   steps 6, 7
   grants.ts        session (memory) + persisted (config file) grants, review log helpers   step 8
@@ -51,9 +51,22 @@ pi-subagent/
 `pi-gate/config.json` is the shipped default. Scopes, lowest precedence first: built-in defaults →
 global file → project file (only when the cwd is trusted) → `grants.global` → `grants.project` →
 session grants. Within a surface, the **last matching pattern wins**; across facts, most-restrictive wins.
+
+**Except when two facts name the same thing.** An `edit` of `/x/a.ts` and the `path` fact `/x/a.ts` are
+one location described twice, so they are judged once, by the most **specific** rule about them: a
+concrete pattern (`path: "/secrets/*"`) beats a named surface's `"*"` (`edit: "ask"`), which beats
+`permission["*"]` — the last of these is only the default action for tools nobody configured, never a
+verdict about a location. That is what makes an in-workspace file operation pass *by default*, even in a
+config whose whole `permission` map is `{"*": "ask"}`: the `path` surface is the gate's statement about
+where the workspace ends, and a tool-name wildcard cannot out-rule it. Facts that name *different*
+things (every shell segment, every redirect target) still combine most-restrictive.
+
 Floors escalate a value to at least `ask` no matter what any rule says: protected paths (the gate's own
 config and code, pi's config files, git hooks, the project's `.pi`), shell wrappers/expansion, external
-directories, and any unparseable config (`degraded`). Floors are **labels** and nothing more: they
+directories, and any unparseable config (`degraded`). A floor is answered only by a rule that really
+names the call — an exact rule for protected paths and wrappers, and for an outside path any *scoped*
+rule (a concrete `/dir/*` pattern, which is what a folder grant writes), so `"*": "allow"`-shaped
+shortcuts never walk past them. Floors are **labels** and nothing more: they
 explain an unusual call in the dialog title and in the review log, and they decide nothing once "allow
 everything" is on; see the dialog section.
 
@@ -91,7 +104,12 @@ Dialog choices, in list order: `Allow once` · `Allow with reason…` · `Allow 
 `Allow everything for this session` · `Allow everything for 5 minutes`. All three "Allow <rule>" choices
 write the **same** rule — one wildcard per command segment (`git status *`, `cd *`), stored per segment so a
 chained command actually matches later; destructive (`rm`, `sudo`, `chmod`, …) and wrapper segments stay
-exact. A dismissed or timed-out dialog aborts (never allows) — and Esc on a note input counts as dismissed,
+exact. For a **file tool the rule is the containing folder** (`/x/y/*`, which also matches `/x/y` itself),
+not the one file: the directory is the unit a human means when they allow a file, and it is what every
+other harness grants on a sandbox escape. A path outside the workspace writes that pattern on
+`external_directory` as well as on the tool's own surface, because `external_directory` is the surface
+that asked — a grant naming only the tool would leave the outside-path question open and ask again
+forever. A dismissed or timed-out dialog aborts (never allows) — and Esc on a note input counts as dismissed,
 so changing one's mind mid-note never grants. No UI (`pi -p`) blocks with the exact rule needed to allow it.
 
 The two note-taking choices are mirrors, and both texts the model sees are short markdown: `Blocked by user
@@ -181,11 +199,19 @@ tool event keeps reporting activity.
     keeps them clear of same-named prompt files and skills. `/subagentc` also grew from "is a child
     running?" into the config browser: the tool blocks, so by the time a human can look, there is never
     a running child to show.
+12. Rule matching carries a **specificity** (`policy.ts` `SPECIFICITY`), and facts are grouped by the
+    value they name before the call's action is combined. Without it `permission["*"] = "ask"` — a default
+    for unconfigured tools — silently outruled the `path` rules for every file tool that the config does
+    not name, so in-workspace `edit`/`write` prompted on machines whose config omitted those keys.
+13. Folder-wide grants (`match.ts` `directoryPattern` + `GrantOffer.alsoSurfaces`): one click on a file
+    allows its directory, and an outside directory gets the rule on `external_directory` too. Before
+    this, no grant of any shape could silence an outside path — the tool-surface grant let the
+    `external_directory` fact keep asking, so "Allow this file for all projects" changed nothing.
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 256 tests, no live provider needed
+npm test            # vitest run — 265 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```
