@@ -5,7 +5,6 @@ import {
 	evaluate,
 	isFullyDenied,
 	loadPolicy,
-	allowAllBypasses,
 	type Policy,
 	recomputeActive,
 	resolveConfigPaths,
@@ -205,35 +204,33 @@ describe("allow-everything mode", () => {
 		expect(allowAllActive({ until: 10 }, 10)).toBe(false);
 	});
 
-	it("silences a routine approval", () => {
-		const { policy, cwd } = setup({ bash: { "*": "ask" } });
-		const decision = evaluate(extract("bash", { command: "git status" }, cwd, { callId: "t" }), policy);
-		expect(decision.action).toBe("ask");
-		expect(decision.floors).toEqual([]);
-		expect(allowAllBypasses(decision)).toBe(true);
-	});
-
-	it("silences a file outside the workspace and a hidden argument — that is what the human clicked", () => {
-		const { policy, cwd } = setup({ bash: { "*": "allow" } });
-		const external = evaluate(extract("bash", { command: "cat /etc/hosts" }, cwd, { callId: "t" }), policy);
-		expect(external.floors).toEqual(["external_directory"]);
-		expect(allowAllBypasses(external)).toBe(true);
-
-		const wrapper = evaluate(extract("bash", { command: "bash -c 'rm -rf /'" }, cwd, { callId: "t" }), policy);
-		expect(wrapper.floors).toContain("wrapper");
-		expect(allowAllBypasses(wrapper)).toBe(true);
-	});
-
-	it("never silences a write to the gate's own config or to pi's config files", () => {
+	it("is judged by the switch alone: floors are labels for the audit log, never exceptions", () => {
+		// There used to be an `allowAllBypasses()` whitelist that let the soft floors through and kept the
+		// hard ones asking. It is gone, so these decisions must still carry their labels and must not be
+		// splittable into "silenceable" and "not silenceable" — the pass/fail decision lives in `handle.ts`.
 		const { policy, cwd, agentDir } = setup({ "*": "allow", path: { "*": "allow" } });
 		const gateConfig = evaluate(extract("write", { path: `${agentDir}/extensions/pi-gate/config.json` }, cwd, { callId: "t" }), policy);
 		expect(gateConfig.action).toBe("ask");
 		expect(gateConfig.floors).toContain("protected_path");
-		expect(allowAllBypasses(gateConfig)).toBe(false);
 
 		const piSettings = evaluate(extract("bash", { command: `echo x > ${agentDir}/settings.json` }, cwd, { callId: "t" }), policy);
 		expect(piSettings.floors).toContain("protected_path");
-		expect(allowAllBypasses(piSettings)).toBe(false);
+	});
+
+	it("silences the calls it used to except: an outside path, a hidden argument, the gate's own code", () => {
+		// Every one of these is an ask only because of a floor — a config that allows everything else.
+		const { policy, cwd, agentDir } = setup({ "*": "allow", path: { "*": "allow" } });
+		for (const [toolName, input] of [
+			["bash", { command: "cat /etc/hosts" }],
+			["bash", { command: "bash -c 'rm -rf /'" }],
+			["write", { path: `${agentDir}/extensions/pi-gate/config.json` }],
+			["edit", { path: `${agentDir}/extensions/pi-gate/policy.ts` }],
+		] as const) {
+			const decision = evaluate(extract(toolName, input, cwd, { callId: "t" }), policy);
+			expect(decision.action, `${toolName} ${JSON.stringify(input)}`).toBe("ask");
+			expect(decision.floors.length, `${toolName} ${JSON.stringify(input)}`).toBeGreaterThan(0);
+		}
+		// …and every one of those asks is what allow-everything now swallows (asserted end-to-end in handle.test.ts).
 	});
 
 	it("labels a floor even when a rule already asked for it", () => {
@@ -253,17 +250,26 @@ describe("allow-everything mode", () => {
 		expect(extensionCode.floors).toContain("protected_path");
 	});
 
-	it("lets allow-everything silence a protected read, never a protected write", () => {
+	it("still distinguishes a protected read from a protected write, for the log and the title", () => {
 		const { policy, cwd } = setup({ "*": "allow", path: { "*": "allow" } });
 		const gateConfig = `${cwd}/.pi/extensions/pi-gate/config.json`;
 		const read = evaluate(extract("read", { path: gateConfig }, cwd, { callId: "t" }), policy);
 		expect(read.action).toBe("ask");
 		expect(read.floors).toEqual(["protected_read"]);
-		expect(allowAllBypasses(read)).toBe(true);
 
 		const write = evaluate(extract("edit", { path: gateConfig }, cwd, { callId: "t" }), policy);
 		expect(write.floors).toEqual(["protected_path"]);
-		expect(allowAllBypasses(write)).toBe(false);
+	});
+
+	it("labels a config file it could not parse, so a silenced call is still traceable", () => {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, "{ this is not json");
+		clearPolicyCache();
+		const policy = loadPolicy(fixture.cwd, true, fixture.agentDir);
+		expect(policy.degraded).toBe(true);
+		const decision = evaluate(extract("read", { path: "a.ts" }, fixture.cwd, { callId: "t" }), policy);
+		expect(decision.action).toBe("ask");
+		expect(decision.floors).toContain("degraded_config");
 	});
 });
 

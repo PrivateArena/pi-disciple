@@ -53,8 +53,9 @@ global file → project file (only when the cwd is trusted) → `grants.global` 
 session grants. Within a surface, the **last matching pattern wins**; across facts, most-restrictive wins.
 Floors escalate a value to at least `ask` no matter what any rule says: protected paths (the gate's own
 config and code, pi's config files, git hooks, the project's `.pi`), shell wrappers/expansion, external
-directories, and any unparseable config (`degraded`). Only the hard ones — protected paths and
-`degraded` — outlive "allow everything"; see the dialog section.
+directories, and any unparseable config (`degraded`). Floors are **labels** and nothing more: they
+explain an unusual call in the dialog title and in the review log, and they decide nothing once "allow
+everything" is on; see the dialog section.
 
 ## Slash commands
 
@@ -99,14 +100,18 @@ them. pi's own limits are separate and not extension-configurable: the collapsed
 20 visual lines (`ctrl+o` toggles it), and the bash tool caps what the *model* sees at 2000 lines / 50KB
 while saving the full output to a temp file (`core/tools/truncate.js`).
 
-"Allow everything" (dialog, or `/gatec allow [off|5min|session]`) silences every approval in its scope:
-other commands, other tools — not just the call it was clicked on. It never overrides a `deny` rule, and
-it stops at the two **hard floors** — a write path to the gate's own config, pi's config files or git
-hooks, and a config file too broken to parse — because either one could switch the gate off from under
-the session. Those dialogs carry the reason in their title. Everything softer (a file outside the
-workspace, a hidden `$(…)` argument, an interpreter in a pipe, pi's own transcripts) is silenced, because
-a dialog that no choice can close is not a safeguard. Turning it on notifies, and the footer counts the
-window down; the 5-minute window closes on its own (status line + notify on expiry).
+"Allow everything" (dialog, or `/gatec allow [off|5min|session]`) is **absolute**: while it is active no
+`tool_call` reaches the dialog — other commands, other tools, a file outside the workspace, a hidden
+`$(…)` argument, the gate's own config, pi's `settings.json`/`auth.json`, a git hook, even a config file
+too broken to parse. That is the point: the choice is made by a human who is about to walk away (an
+overnight run), and a switch that keeps asking is not a switch. Two things stay above it, and neither
+can raise a dialog: a `deny` rule blocks (an explicit instruction outranks a mode), and the mode is
+never inferable — not from a config file, not from the model, never across a restart.
+
+The trade-off, stated plainly: with the mode on the agent can rewrite the gate's own config, and that
+edit outlives the session. Floors stay as labels, so a `reviewLog` entry still names why a call looked
+unusual (`floors: ["protected_path"]`). Turning it on notifies, and the footer counts the window down;
+the 5-minute window closes on its own (status line + notify on expiry).
 
 A floor labels what is really there: it is computed from the call, not from whether some rule happened to
 be silent. And a rule whose pattern *is* the command — what "Allow this exact command" writes for a
@@ -153,14 +158,15 @@ tool event keeps reporting activity.
    file supplies `permission` — otherwise a machine with no config would prompt for every call, reads
    included. A config that sets `permission` fully owns that layer, so its own `"*"` default still applies.
 8. `FactCheck.floor` is set for the `external_directory` fallback too (the type always had the variant, the
-   evaluator never assigned it) — an unlabelled floor would be invisible to "allow everything". Floors are
-   now computed from the call itself: `HARD_FLOORS` survive allow-everything (`protected_path`,
-   `degraded_config`), `SOFT_FLOORS` do not (`protected_read`, `wrapper`, `external_directory`), and
-   `allowAllBypasses()` replaced `noSafetyFloor()`.
+   evaluator never assigned it) — an unlabelled floor would be invisible in a dialog title. Floors are
+   computed from the call itself (`protected_path`, `protected_read`, `wrapper`, `external_directory`,
+   `degraded_config`). They used to be split into `HARD_FLOORS`/`SOFT_FLOORS` and consulted by
+   `allowAllBypasses()`, which made protected paths and a broken config un-silenceable; that split is
+   gone (see the dialog section) — a floor now labels, it never overrules the mode.
 9. `protectedPathGlobs` guards the agent dir's *code and config* (`extensions/*`, `bin`, `npm`, `git`,
    `settings.json`, `auth.json`, `models.json`, `SYSTEM.md`, …) rather than `~/.pi/agent/*` — flooring the
-   whole dir made every transcript or log read an un-silenceable dialog. A protected path reached by a
-   read-only tool floors as `protected_read`, by anything that can write as `protected_path`.
+   whole dir made every transcript or log read look like a threat. A protected path reached by a read-only
+   tool floors as `protected_read`, by anything that can write as `protected_path`; both are labels now.
 10. `@earendil-works/pi-tui` is a peer dependency: `render.ts` needs pi's `Text` component to return a
     `Component` from `renderCall`/`renderResult`.
 11. The slash commands are `/gatec` and `/subagentc` (the plan had `/gate` and `/subagents`) — the `c`

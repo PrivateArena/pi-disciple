@@ -186,8 +186,8 @@ export default function piGate(pi: ExtensionAPI) {
 				applyAllowAll(ctx, next);
 				ctx.ui.notify(
 					next.until === null
-						? "[gate] allow-everything on for this session (only the gate's own config, pi's config files and git hooks still ask)"
-						: `[gate] allow-everything on for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes (only the gate's own config, pi's config files and git hooks still ask)`,
+						? "[gate] allow-everything on for this session — nothing will ask again, protected paths and pi's own config included"
+						: `[gate] allow-everything on for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — nothing will ask again, protected paths and pi's own config included`,
 					"warning",
 				);
 				return;
@@ -223,7 +223,7 @@ export default function piGate(pi: ExtensionAPI) {
 				`config files: ${current.files.length ? current.files.join(", ") : "none (built-in defaults)"}`,
 				`trusted project dir: ${ctx.isProjectTrusted() ? "yes" : "no (project config ignored)"}`,
 				`session grants: ${sessionGrants.map((g) => `${g.surface} "${g.pattern}"`).join(", ") || "none"}`,
-				`allow-everything: ${!allowAll ? "off" : allowAll.until === null ? "on for this session" : `on for ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`} (hard floors: the gate's own config, pi's config files, git hooks, a broken config)`,
+				`allow-everything: ${!allowAll ? "off" : allowAll.until === null ? "on for this session" : `on for ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`} (absolute: no call reaches the dialog; only a \`deny\` rule still blocks)`,
 				`hidden tools: ${[...hiddenByGate].join(", ") || "none"}`,
 				`rules: ${current.rules.length} · visible tools: ${recomputeActive(tools, current).length}/${tools.length}`,
 				`bash surface: ${JSON.stringify(current.config.permission.bash ?? DEFAULT_GATE_CONFIG.permission.bash)}`,

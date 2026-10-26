@@ -98,26 +98,19 @@ export interface Decision {
 
 /**
  * "Allow everything" mode. `until === null` runs until the session ends; a timestamp closes the window
- * then. It silences every approval except the ones behind {@link HARD_FLOORS}.
+ * then.
+ *
+ * It is absolute: while it is active no `tool_call` reaches the dialog — not a protected path, not
+ * pi's own config, not a config file too broken to parse. That is the point: it is chosen by a human
+ * who is about to walk away (an overnight run), and a switch that keeps asking is not a switch.
+ * Floors stay as *labels* on a decision, so an audit log still says why a call looked unusual.
+ *
+ * Two things still hold, and neither can produce a dialog: a `deny` rule blocks (an explicit
+ * instruction outranks a mode), and the mode is never inferable from config or from the model.
  */
 export interface AllowAll {
 	until: number | null;
 }
-
-/**
- * The floors that survive "allow everything": a write to the gate's own config, pi's config files or
- * git hooks, and a config file too broken to read. Everything else — an unusual command, a file
- * outside the workspace, a hidden argument — is silenced for the scope the human just chose, because a
- * dialog that no choice can silence is not a dialog, it is an outage.
- *
- * `protected_read` is the same path reached by a read-only tool (`read`/`grep`/`find`/`ls`): still
- * asked by default, but "allow everything" may silence it — reading a transcript cannot reprogram the
- * gate. `deny` rules are never a floor and are never overridden: they are an explicit instruction.
- */
-export const HARD_FLOORS: readonly string[] = ["protected_path", "degraded_config"];
-
-/** Floors "allow everything" walks straight past. */
-export const SOFT_FLOORS: readonly string[] = ["protected_read", "wrapper", "external_directory"];
 
 /** Length of the "Allow everything for 5 minutes" window. */
 export const ALLOW_ALL_WINDOW_MS = 5 * 60 * 1000;
@@ -128,14 +121,6 @@ export const READ_ONLY_TOOLS: readonly string[] = ["read", "grep", "find", "ls"]
 export function allowAllActive(allowAll: AllowAll | undefined, now: number): boolean {
 	if (!allowAll) return false;
 	return allowAll.until === null || now < allowAll.until;
-}
-
-/**
- * True when "allow everything" may let this call through. Written as a whitelist of the floors it may
- * walk past, so a floor added later is hard by default rather than silently bypassed.
- */
-export function allowAllBypasses(decision: Decision): boolean {
-	return decision.floors.every((floor) => SOFT_FLOORS.includes(floor));
 }
 
 export function resolveConfigPaths(cwd: string, trusted: boolean, agentDir: string = getAgentDir()): { globalFile: string; projectFile: string | null } {

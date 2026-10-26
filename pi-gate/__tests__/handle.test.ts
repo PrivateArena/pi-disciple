@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
-import { handleToolCall, type GateState } from "../handle.ts";
+import { allowAllNote, handleToolCall, type GateState } from "../handle.ts";
 import { clearPolicyCache, loadPolicy, type Policy, withSessionGrants } from "../policy.ts";
 import { gateDoc, makeFixture, writeGlobalConfig, type Fixture } from "./fixture.ts";
 import type { GrantRule } from "../schema.ts";
@@ -53,6 +53,9 @@ function stateFor(policy: Policy, grants: GrantRule[] = []): GateState & { appli
 
 const bash = (command: string, callId = "c1"): ToolCallEvent =>
 	({ type: "tool_call", toolCallId: callId, toolName: "bash", input: { command } }) as ToolCallEvent;
+
+const tool = (toolName: string, input: Record<string, unknown>, callId = "c1"): ToolCallEvent =>
+	({ type: "tool_call", toolCallId: callId, toolName, input }) as ToolCallEvent;
 
 afterEach(() => {
 	fixture?.cleanup();
@@ -201,7 +204,7 @@ describe("ask outcomes", () => {
 		expect(written).toEqual([["project", "npm run *", "git status *"]]);
 	});
 
-	it("re-asks nothing after \"allow everything for this session\" (floors excepted)", async () => {
+	it("re-asks nothing after \"allow everything for this session\"", async () => {
 		const policy = policyWith({ bash: { "*": "ask" } });
 		const state = stateFor(policy);
 		const log: UiLog = { titles: [], questions: [] };
@@ -252,16 +255,58 @@ describe("ask outcomes", () => {
 		expect(log.titles).toHaveLength(0);
 	});
 
-	it("\"allow everything\" still asks for the gate's own config and says why in the title", async () => {
+	it("\"allow everything\" now covers the calls it used to except — the point of clicking it and walking away", async () => {
 		const policy = policyWith({ "*": "allow", path: { "*": "allow" } });
 		const state = stateFor(policy);
 		state.allowAll = { until: null };
 		const log: UiLog = { titles: [], questions: [] };
-		const result = await handleToolCall(bash(`cat ${fixture?.agentDir}/extensions/pi-gate/config.json`), stubCtx("0", log), state);
-		expect(result).toBeUndefined();
+
+		const calls: ToolCallEvent[] = [
+			bash(`cat ${fixture?.agentDir}/extensions/pi-gate/config.json`, "c1"), // the gate's own config
+			tool("edit", { path: `${fixture?.agentDir}/extensions/pi-gate/policy.ts` }, "c2"), // the gate's own code
+			bash(`echo x > ${fixture?.agentDir}/settings.json`, "c3"), // pi's settings
+			tool("write", { path: `${fixture?.cwd}/.pi/extensions/pi-gate/config.json` }, "c4"), // project gate config
+			bash(`echo x > ${fixture?.cwd}/.git/hooks/pre-commit`, "c5"), // code that runs as the user
+		];
+		for (const call of calls) {
+			expect(await handleToolCall(call, stubCtx("0", log), state)).toBeUndefined();
+		}
+		expect(log.titles).toHaveLength(0);
+	});
+
+	it("\"allow everything\" holds even when no config file can be parsed", async () => {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, "{ this is not json");
+		clearPolicyCache();
+		const degraded = loadPolicy(fixture.cwd, true, fixture.agentDir);
+		expect(degraded.degraded).toBe(true);
+
+		const state = stateFor(degraded);
+		const log: UiLog = { titles: [], questions: [] };
+		// off: a config that cannot be read escalates every allow, so the call is asked about
+		expect(await handleToolCall(bash("cat a.ts"), stubCtx("0", log), state)).toBeUndefined();
 		expect(log.titles).toHaveLength(1);
-		expect(log.titles[0]).toContain("protected_path");
-		expect(log.titles[0]).toContain("allow-everything is ON");
+
+		state.allowAll = { until: null };
+		expect(await handleToolCall(bash("cat b.ts", "c2"), stubCtx("0", log), state)).toBeUndefined();
+		expect(log.titles).toHaveLength(1);
+	});
+
+	it("\"allow everything\" needs no UI to be honoured — an overnight `pi -p` run must not stall", async () => {
+		const policy = policyWith({ "*": "ask", path: { "*": "allow" }, external_directory: "ask", bash: { "*": "ask" } });
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		const headless = { ...stubCtx("0", log), hasUI: false } as ExtensionContext;
+		expect(await handleToolCall(bash(`echo x > ${fixture?.agentDir}/settings.json`), headless, state)).toBeUndefined();
+		expect(log.titles).toHaveLength(0);
+	});
+
+	it("the dialog note says what the mode actually does: nothing is excepted", () => {
+		const note = allowAllNote({ until: null }, 0) ?? "";
+		expect(note).toContain("nothing is asked about any more");
+		expect(note).not.toMatch(/still ask/);
+		expect(allowAllNote({ until: 10 }, 20)).toBeUndefined();
 	});
 
 	it("\"allow everything\" silences a protected read, which cannot reprogram the gate", async () => {

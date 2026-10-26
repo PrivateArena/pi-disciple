@@ -119,18 +119,49 @@ describe("extension wiring keeps the switch it was given", () => {
 		expect(stub.statuses.at(-1)).toContain("allow-everything: session");
 	});
 
-	it("still asks for the gate's own config, and says why, while everything else is silenced", async () => {
+	it("silences even the gate's own config while everything is allowed, and asks again once it is off", async () => {
 		const { stub, log } = await boot();
 		await answer(stub, log, ALL_SESSION, call("bash", { command: "ls" }, "c1"));
 		expect(log.titles).toHaveLength(1);
 
-		// reading pi's config is silenced; editing the gate's own config is not
-		expect(await answer(stub, log, ONCE, call("read", { path: `${fixture?.agentDir}/settings.json` }, "c2"))).toBeUndefined();
+		for (const [id, command] of [
+			["c2", `cat ${fixture?.agentDir}/settings.json`],
+			["c3", `echo x > ${fixture?.agentDir}/extensions/pi-gate/config.json`],
+			["c4", `echo x > ${fixture?.cwd}/.git/hooks/pre-commit`],
+			["c5", "cat /etc/hosts"],
+		] as const) {
+			expect(await answer(stub, log, ONCE, call("bash", { command }, id))).toBeUndefined();
+		}
 		expect(log.titles).toHaveLength(1);
-		expect(await answer(stub, log, ONCE, call("edit", { path: `${fixture?.agentDir}/extensions/pi-gate/config.json` }, "c3"))).toBeUndefined();
+		expect(stub.statuses.at(-1)).toContain("allow-everything: session");
+
+		await stub.commands.get("gatec")?.handler("allow off", stubCtx(ONCE, log, stub));
+		await answer(stub, log, ONCE, call("bash", { command: "git status" }, "c6"));
 		expect(log.titles).toHaveLength(2);
-		expect(log.titles[1]).toContain("protected_path");
-		expect(log.titles[1]).toContain("allow-everything is ON");
+	});
+
+	it("never lets a protected path end the mode: one click, then a whole overnight run without a dialog", async () => {
+		// The reported failure: "after Allow everything for this session, a few tool calls later the dialog
+		// comes back" — a protected path forced a second dialog, whose only choices looked like the fix.
+		const { stub, log } = await boot();
+		await answer(stub, log, ALL_SESSION, call("bash", { command: "npm test" }, "c0"));
+		expect(log.titles).toHaveLength(1);
+
+		const calls: Array<[string, string]> = [
+			["p1", `cat ${fixture?.agentDir}/extensions/pi-gate/config.json`],
+			["p2", `sed -n 1,20p ${fixture?.agentDir}/git/github.com/PrivateArena/pi-disciple/package.json`],
+			["p3", "git status"],
+			["p4", `find ${fixture?.agentDir}/extensions -maxdepth 2`],
+			["p5", "npx vitest run"],
+			["p6", `echo x > ${fixture?.agentDir}/settings.json`],
+			["p7", "ls ~/.pi/agent/bin"],
+			["p8", `cat ${fixture?.agentDir}/auth.json`],
+		];
+		for (const [id, command] of calls) {
+			expect(await answer(stub, log, ONCE, call("bash", { command }, id)), command).toBeUndefined();
+		}
+		expect(log.titles).toHaveLength(1);
+		expect(stub.notices.filter((n) => n.includes("allow-everything is ON"))).toHaveLength(1);
 	});
 
 	it("closes the timed window on its own", async () => {

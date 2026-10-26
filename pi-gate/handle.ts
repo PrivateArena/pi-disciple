@@ -11,7 +11,6 @@ import { extract, type Facts } from "./inspect.ts";
 import {
 	ALLOW_ALL_WINDOW_MS,
 	allowAllActive,
-	allowAllBypasses,
 	blockReason,
 	evaluate,
 	type AllowAll,
@@ -101,10 +100,11 @@ export async function handleToolCall(
 			return { block: true, reason: blockReason(decision, "policy_deny") };
 		}
 
-		// "Allow everything" silences every approval but the hard ones — the gate's own config, pi's config
-		// files, git hooks, and a config too broken to read. Those reach the dialog with the reason in the title.
-		const bypassing = allowAllActive(state.allowAll, now()) && allowAllBypasses(decision);
-		if (bypassing) {
+		// "Allow everything" is absolute: while it is on, nothing reaches the dialog — not the gate's own
+		// config, not pi's config files, not a broken config. A human clicked it to stop being asked, and a
+		// dialog that no choice can close is not a safeguard, it is an outage. Only a `deny` rule, which is an
+		// explicit instruction and blocks without asking anyway, is above it (handled above).
+		if (allowAllActive(state.allowAll, now())) {
 			await logit(appendLog, logPath, policy, decision, "allow_all", sub);
 			return;
 		}
@@ -143,11 +143,11 @@ export async function handleToolCall(
 			}
 			case "all_session":
 				setAllowAll(state, { until: null });
-				ctx.ui.notify("[gate] allow-everything is ON for this session — the footer shows it, /gatec allow off stops it", "warning");
+				ctx.ui.notify("[gate] allow-everything is ON for this session — nothing will ask again, footer shows it, /gatec allow off stops it", "warning");
 				return;
 			case "all_timed":
 				setAllowAll(state, { until: now() + ALLOW_ALL_WINDOW_MS });
-				ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — /gatec allow off stops it sooner`, "warning");
+				ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — nothing will ask again, /gatec allow off stops it sooner`, "warning");
 				return;
 			case "abort_reason":
 				return { block: true, reason: blockReason(decision, "user_abort", redact(answer.reason ?? "")) };
@@ -166,15 +166,20 @@ export function setAllowAll(state: GateState, allowAll: AllowAll): void {
 	state.allowAllChanged?.(allowAll);
 }
 
-/** Tells the human, inside the dialog, why they are still being asked while "allow everything" is on. */
+/**
+ * Tells the human, inside a dialog, that the mode is on. With allow-everything absolute this cannot
+ * normally happen (no call reaches the dialog while it is active) — it is here for the case where a
+ * dialog was already open when the switch flipped, and it must then state the truth: everything,
+ * protected paths included, goes through now.
+ */
 export function allowAllNote(allowAll: AllowAll | undefined, now: number): string | undefined {
 	if (!allowAll || !allowAllActive(allowAll, now)) return undefined;
 	const scope = allowAll.until === null ? "for this session" : "until this window ends";
 	return (
 		"[gate] allow-everything is ON " +
 		scope +
-		": only the gate's own config, pi's config files and git hooks still ask, because those could switch the gate off. " +
-		"`/gatec off` silences the gate itself for this run."
+		": nothing is asked about any more — protected paths, pi's config files, git hooks and a broken config included. " +
+		"Only a `deny` rule still blocks. `/gatec allow off` (or `off` for the whole gate) stops it."
 	);
 }
 
