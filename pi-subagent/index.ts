@@ -18,7 +18,12 @@ import { buildShims, NESTED_CALL_CEILING, type ShimHost } from "./shims.ts";
 import { childSessionDir, pruneTranscripts, runChild } from "./child.ts";
 import { loadSubagentLimits } from "./config-file.ts";
 import { childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
-import { claimGuard, composeResult, currentGuard, formatProgress, releaseGuard, type SubagentDetails } from "./run.ts";
+import { claimGuard, composeResult, currentGuard, formatProgress, progressDetails, releaseGuard } from "./run.ts";
+import { renderSubagentCall, renderSubagentResult } from "./render.ts";
+import type { RunProgress } from "./child.ts";
+
+/** How often a running child re-announces itself, even when it emitted no event. */
+const PROGRESS_TICK_MS = 2000;
 
 const parameters = Type.Object({
 	role: StringEnum([...ROLE_ORDER], {
@@ -41,6 +46,10 @@ export default function piSubagent(pi: ExtensionAPI) {
 		],
 		parameters,
 		executionMode: "sequential",
+		// The tool draws its own call title and result block, so the report is rendered instead of
+		// falling back to the raw result text (see render.ts).
+		renderCall: (args, theme) => renderSubagentCall(args, theme),
+		renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
 
 		async execute(toolCallId, args, signal, onUpdate, ctx) {
 			const role = resolveRole(args.role);
@@ -86,8 +95,25 @@ export default function piSubagent(pi: ExtensionAPI) {
 				},
 			};
 			const shims = buildShims(ctx.tools, roleForRun, host, limits);
+			const shimNames = shims.map((shim) => shim.name);
+			const childModel = modelLabel(model, overridden);
 			const startedAt = Date.now();
+			let latest: RunProgress = { turns: 0, toolCalls: 0, elapsedMs: 0 };
 			let lastEmitAt = 0;
+			const emitProgress = (force = false) => {
+				if (!onUpdate) return;
+				const now = Date.now();
+				if (!force && now - lastEmitAt < PROGRESS_TICK_MS) return;
+				lastEmitAt = now;
+				onUpdate({
+					content: [{ type: "text", text: formatProgress(latest, shims.length) }],
+					details: progressDetails(latest, { role: role.name, task: args.task, model: childModel, shimTools: shimNames, nestedCalls: tally.calls }),
+				});
+			};
+			// A child that thinks for minutes without a tool event must still be heard from, or its card
+			// sits on a "no activity" placeholder for the whole run.
+			const heartbeat = setInterval(() => emitProgress(true), PROGRESS_TICK_MS);
+			heartbeat.unref?.();
 
 			try {
 				const result = await runChild({
@@ -101,20 +127,20 @@ export default function piSubagent(pi: ExtensionAPI) {
 					sessionDir: ctx.sessionManager.getSessionDir(),
 					signal: controller.signal,
 					onProgress: (progress) => {
-						const now = Date.now();
-						if (now - lastEmitAt < 1000) return;
-						lastEmitAt = now;
-						onUpdate?.({ content: [{ type: "text", text: formatProgress(progress, shims.length) }], details: {} as SubagentDetails });
+						latest = progress;
+						emitProgress();
 					},
 				});
 				const removed = await pruneTranscripts(childSessionDir(ctx.sessionManager.getSessionDir()), limits.keepTranscripts);
 				return composeResult(result, role.name, limits.maxResultBytes, Date.now() - startedAt, {
 					removedTranscripts: removed,
 					nestedCalls: tally.calls,
-					shimTools: shims.map((shim) => shim.name),
-					model: modelLabel(model, overridden),
+					shimTools: shimNames,
+					model: childModel,
+					task: args.task,
 				});
 			} finally {
+				clearInterval(heartbeat);
 				releaseGuard(toolCallId);
 			}
 		},

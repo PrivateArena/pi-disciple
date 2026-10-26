@@ -41,6 +41,7 @@ pi-subagent/
   child.ts         runChild(): assembly, timeouts, steering, transcripts, usage            steps 13, 14
   config-file.ts   own copy of the config reader (import-free of pi-gate)                 step 20
   run.ts           globalThis run guard + result mapping (status header, truncation)      steps 15, 16
+  render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
   index.ts         the single `subagent` tool + /subagents                                steps 15, 16
 ```
 
@@ -93,6 +94,19 @@ be silent. And a rule whose pattern *is* the command — what "Allow this exact 
 wrapper or destructive segment — is a decision about that command and is honoured; otherwise a grant for
 `npx vitest run` would be re-asked forever. Floors over coarse wildcards (`npx *`) still bite.
 
+## The tool card
+
+The `subagent` tool renders itself (`pi-subagent/render.ts` — `renderCall`/`renderResult`), because pi's
+fallback keys off the *result text*: while a child runs there is none, so a frontend shows its
+"no activity reported yet" placeholder for the whole run and, at the end, repeats the model-facing
+`[subagent …]` header. The card instead leads with one sentence — `Agent completed in 21.0s (4 turns,
+7 tool uses, 4.2k token).` — then `role · model · Agent ID`, the transcript path, and the child's report
+(10 lines collapsed, 50 expanded, with a "more lines" hint built from the expand keybinding, never a
+hardcoded `ctrl+o`). Every `onUpdate` carries a complete `SubagentDetails` (`status: "running"`, turns,
+tool uses, activity, model) and a 2s heartbeat re-emits it, so a child that thinks for minutes without a
+tool event still reports activity. `details.report` holds the child's answer on its own, so the card never
+has to re-parse the model-facing text.
+
 ## Deviations from the plan (all verified against pi 1.4.0 types)
 
 1. `typebox@1.3.27` instead of `@sinclair/typebox` — pi aliases both; `StringEnum` comes from `@earendil-works/pi-ai`.
@@ -116,6 +130,8 @@ wrapper or destructive segment — is a decision about that command and is honou
    `settings.json`, `auth.json`, `models.json`, `SYSTEM.md`, …) rather than `~/.pi/agent/*` — flooring the
    whole dir made every transcript or log read an un-silenceable dialog. A protected path reached by a
    read-only tool floors as `protected_read`, by anything that can write as `protected_path`.
+10. `@earendil-works/pi-tui` is a peer dependency: `render.ts` needs pi's `Text` component to return a
+    `Component` from `renderCall`/`renderResult`.
 
 ## Commands
 

@@ -42,9 +42,14 @@ export function releaseGuard(callId: string): void {
 	if (currentGuard()?.callId === callId) delete (globalThis as GuardStore)[RUN_GUARD_KEY];
 }
 
+/** `running` while the child works, then the exit that ended it. Drives the tool card's colour. */
+export type SubagentStatus = "running" | ChildResult["exit"];
+
 export interface SubagentDetails {
+	status: SubagentStatus;
 	role: RoleName;
-	exit: ChildResult["exit"];
+	/** The settled exit; absent while the child is still running. */
+	exit?: ChildResult["exit"];
 	turns: number;
 	toolCalls: number;
 	childSessionFile?: string;
@@ -57,6 +62,15 @@ export interface SubagentDetails {
 	/** Which model the child actually ran on, e.g. `local/qwen3.8-flash-next (inherited)`. */
 	model?: string;
 	error?: string;
+	/** The task, so a running card can say what the child is doing. */
+	task?: string;
+	/** What the child was last seen doing (`bash`, `read`, …) — only while running. */
+	activity?: string;
+	/**
+	 * The child's report on its own, without the model-facing header. The tool card renders this
+	 * (`render.ts`); the model gets the same text inside `content`.
+	 */
+	report?: string;
 }
 
 export function formatProgress(progress: RunProgress, toolCount: number): string {
@@ -64,6 +78,35 @@ export function formatProgress(progress: RunProgress, toolCount: number): string
 		`subagent running · turn ${progress.turns} · ${progress.toolCalls} calls · ` +
 		`${progress.lastTool ?? "thinking"} · ${Math.round(progress.elapsedMs / 1000)}s · ${toolCount} tools`
 	);
+}
+
+/** The parts of a run that do not change between progress updates. */
+export interface ProgressContext {
+	role: RoleName;
+	task: string;
+	model?: string;
+	shimTools: string[];
+	nestedCalls: number;
+}
+
+/**
+ * A complete `details` for a progress update. An update that carries an empty object is not a
+ * status the UI can draw — that is what left the tool card on its "no activity" placeholder.
+ */
+export function progressDetails(progress: RunProgress, host: ProgressContext): SubagentDetails {
+	return {
+		status: "running",
+		role: host.role,
+		turns: progress.turns,
+		toolCalls: progress.toolCalls,
+		truncated: false,
+		elapsedMs: progress.elapsedMs,
+		activity: progress.lastTool ?? "thinking",
+		task: host.task,
+		model: host.model,
+		shimTools: host.shimTools,
+		nestedCalls: host.nestedCalls,
+	};
 }
 
 /**
@@ -94,6 +137,7 @@ export function composeResult(
 	return {
 		content: [{ type: "text", text: `${header}\n\n${answer}${footer}` }],
 		details: {
+			status: result.exit,
 			role,
 			exit: result.exit,
 			turns: result.turns,
@@ -102,6 +146,8 @@ export function composeResult(
 			childSessionId: result.childSessionId,
 			truncated: truncated.truncated,
 			elapsedMs,
+			task: extra.task,
+			report: body,
 			...extra,
 		},
 		usage: result.usage,

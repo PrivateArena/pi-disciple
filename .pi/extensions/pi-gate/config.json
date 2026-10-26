@@ -1,0 +1,43 @@
+{
+  "gate": {
+    "grants": {
+      "project": [
+        {
+          "surface": "bash",
+          "pattern": "cd *",
+          "action": "allow"
+        },
+        {
+          "surface": "bash",
+          "pattern": "ls *",
+          "action": "allow"
+        },
+        {
+          "surface": "bash",
+          "pattern": "wc *",
+          "action": "allow"
+        },
+        {
+          "surface": "bash",
+          "pattern": "echo *",
+          "action": "allow"
+        },
+        {
+          "surface": "bash",
+          "pattern": "find *",
+          "action": "allow"
+        },
+        {
+          "surface": "bash",
+          "pattern": "head *",
+          "action": "allow"
+        },
+        {
+          "surface": "bash",
+          "pattern": "cat *",
+          "action": "allow"
+        }
+      ]
+    }
+  }
+}
