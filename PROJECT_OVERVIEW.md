@@ -40,7 +40,7 @@ pi-subagent/
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
   child.ts         runChild(): assembly, timeouts, steering, transcripts, usage            steps 13, 14
   config-file.ts   own copy of the config reader (import-free of pi-gate)                 step 20
-  run.ts           globalThis run guard + result mapping (status header, truncation)      steps 15, 16
+  run.ts           globalThis run guard + result mapping (status header, truncation, card contract)  steps 15, 16
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
   index.ts         the single `subagent` tool + /subagents                                steps 15, 16
 ```
@@ -96,16 +96,28 @@ wrapper or destructive segment — is a decision about that command and is honou
 
 ## The tool card
 
-The `subagent` tool renders itself (`pi-subagent/render.ts` — `renderCall`/`renderResult`), because pi's
-fallback keys off the *result text*: while a child runs there is none, so a frontend shows its
-"no activity reported yet" placeholder for the whole run and, at the end, repeats the model-facing
-`[subagent …]` header. The card instead leads with one sentence — `Agent completed in 21.0s (4 turns,
-7 tool uses, 4.2k token).` — then `role · model · Agent ID`, the transcript path, and the child's report
-(10 lines collapsed, 50 expanded, with a "more lines" hint built from the expand keybinding, never a
-hardcoded `ctrl+o`). Every `onUpdate` carries a complete `SubagentDetails` (`status: "running"`, turns,
+Two separate mechanisms feed one card, and only one of them is ours.
+
+**pi's own renderer** (`pi-subagent/render.ts` — `renderCall`/`renderResult`) is what the terminal TUI and
+`/export` HTML use: a title line, one sentence about the run — `Agent completed in 21.0s (5 turns, 6 tool
+uses, 4.2k token).` — then `role · model · Agent ID`, the transcript path, and the child's report (10 lines
+collapsed, 50 expanded, with a "more lines" hint built from the expand keybinding, never a hardcoded
+`ctrl+o`). `details.report` holds the child's answer on its own, so the card never re-parses the
+model-facing text. pi calls a renderer with `{ content, details }` only — never `usage` — which is why the
+token total is also carried in `details.tokens`.
+
+**What a non-TUI frontend (Pendant) reads is `details`, not the renderers** — it never invokes them, so a
+correct `Text` component buys nothing there. It draws a subagent card off the field names and status
+vocabulary `@gotgenes/pi-subagents` established (`AgentDetails`/`GetResultDetails`): a `status` it has no
+branch for leaves the card in its activity list with `No activity reported yet` where the result belongs,
+which is exactly the bug. `run.ts` therefore emits both vocabularies: our own `exit`/`elapsedMs`/`toolCalls`
+plus `status` (`uiStatus`: `completed`/`running`/`stopped`/`aborted`/`error`), `displayName`,
+`subagentType`, `description`, `toolUses`, `durationMs`, `tokens`, `agentId`, `modelName`, `preview`.
+`verification/probe-subagent-render.mjs` prints both `details` shapes and drives the renderers through the
+real pi Theme and real pi-tui components, because the unit tests' fake theme cannot fail the way a
+frontend fails. Every `onUpdate` still carries a complete `SubagentDetails` (`status: "running"`, turns,
 tool uses, activity, model) and a 2s heartbeat re-emits it, so a child that thinks for minutes without a
-tool event still reports activity. `details.report` holds the child's answer on its own, so the card never
-has to re-parse the model-facing text.
+tool event keeps reporting activity.
 
 ## Deviations from the plan (all verified against pi 1.4.0 types)
 

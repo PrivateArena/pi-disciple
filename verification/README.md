@@ -16,6 +16,9 @@ node verification/rpc-gate-dialog.mjs timeout             /tmp/scratch          
 node verification/rpc-subagent-gate.mjs "Allow once" /tmp/scratch/project
 ```
 
+# the subagent card: what a frontend gets in `details`, and what the renderers draw (no provider, no quota)
+node verification/probe-subagent-render.mjs [width]
+
 They refuse to answer when no option matches the requested label: an earlier version fell back to
 "Allow once" silently and skewed the run. To keep the child `pi` out of your own config — and your
 `grants.global` out of the test — point it at a scratch agent dir holding only credentials:

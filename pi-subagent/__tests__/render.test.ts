@@ -15,7 +15,7 @@ import {
 	renderSubagentCall,
 	renderSubagentResult,
 } from "../render.ts";
-import { composeResult, progressDetails, type SubagentDetails } from "../run.ts";
+import { composeResult, progressDetails, uiStatus, cardFields, formatTokens, previewOf, clip, type SubagentDetails } from "../run.ts";
 import type { ChildResult } from "../child.ts";
 
 /** Plain-text theme: these tests assert the words, not the colours. */
@@ -23,7 +23,11 @@ const theme = { fg: (_color: string, text: string) => text, bold: (text: string)
 const usage = (totalTokens: number) => ({ totalTokens } as Usage);
 
 const details = (overrides: Partial<SubagentDetails> = {}): SubagentDetails => ({
-	status: "done",
+	...cardFields(
+		{ role: "explore", task: "survey the gate", model: "local/qwen3.8-flash-next (inherited)" },
+		{ toolCalls: 3, elapsedMs: 21_000, agentId: "01abc", report: "Findings: the gate lives in pi-gate/policy.ts." },
+	),
+	status: "completed",
 	role: "explore",
 	exit: "done",
 	turns: 2,
@@ -63,6 +67,12 @@ describe("duration and token formatting", () => {
 		expect(formatRunStats({ turns: 2, toolCalls: 1 }, usage(4200))).toBe(" (2 turns, 1 tool use, 4.2k token)");
 		expect(formatRunStats({ turns: 0, toolCalls: 0 }, undefined)).toBe("");
 	});
+
+	it("falls back to the details' own token total, since pi hands a renderer only content and details", () => {
+		expect(formatStatusLine(details(), undefined, theme)).toBe("Agent completed in 21.0s (2 turns, 3 tool uses).");
+		const counted = { ...details(), tokens: formatTokens(usage(4200)) };
+		expect(formatStatusLine(counted, undefined, theme)).toBe("Agent completed in 21.0s (2 turns, 3 tool uses, 4.2k token).");
+	});
 });
 
 describe("the status sentence", () => {
@@ -74,7 +84,7 @@ describe("the status sentence", () => {
 		expect(formatStatusLine(details({ status: "running", exit: undefined, elapsedMs: 5000 }), undefined, theme)).toBe(
 			"Agent running for 5.0s (2 turns, 3 tool uses)",
 		);
-		expect(formatStatusLine(details({ status: "timeout", exit: "timeout" }), undefined, theme)).toContain("Agent stopped after 21.0s (timeout)");
+		expect(formatStatusLine(details({ status: "stopped", exit: "timeout" }), undefined, theme)).toContain("Agent stopped after 21.0s (timeout)");
 		expect(formatStatusLine(details({ status: "error", exit: "error", error: "429 rate limited" }), undefined, theme)).toContain(
 			"Agent failed after 21.0s (2 turns, 3 tool uses): 429 rate limited",
 		);
@@ -178,5 +188,57 @@ describe("progress details", () => {
 	it("say the child is thinking before its first tool call", () => {
 		const update = progressDetails({ turns: 0, toolCalls: 0, elapsedMs: 0 }, { role: "explore", task: "t", shimTools: [], nestedCalls: 0 });
 		expect(update.activity).toBe("thinking");
+	});
+});
+
+describe("the frontend card contract", () => {
+	it("maps every exit onto a status a frontend has a branch for", () => {
+		expect(uiStatus("done")).toBe("completed");
+		expect(uiStatus("aborted")).toBe("stopped");
+		expect(uiStatus("timeout")).toBe("stopped");
+		expect(uiStatus("maxTurns")).toBe("aborted");
+		expect(uiStatus("callLimit")).toBe("aborted");
+		expect(uiStatus("overflow")).toBe("aborted");
+		expect(uiStatus("error")).toBe("error");
+	});
+
+	it("settles a result with the fields a card is drawn from", () => {
+		const result = composeResult(child(), "explore", 20_000, 21_000, {
+			task: "survey the gate",
+			model: "local/qwen3.8-flash-next (inherited)",
+			childSessionId: "01abc",
+		});
+		const card = result.details;
+		expect(card.status).toBe("completed");
+		expect(card.exit).toBe("done");
+		expect(card.displayName).toBe("Explore");
+		expect(card.subagentType).toBe("explore");
+		expect(card.description).toBe("survey the gate");
+		expect(card.toolUses).toBe(3);
+		expect(card.durationMs).toBe(21_000);
+		expect(card.agentId).toBe("01abc");
+		expect(card.modelName).toContain("inherited");
+		expect(card.preview).toBe("Findings: the gate lives in pi-gate/policy.ts.");
+	});
+
+	it("claims no field the run did not earn", () => {
+		const running = progressDetails(
+			{ turns: 0, toolCalls: 0, elapsedMs: 0 },
+			{ role: "review", task: "critique", shimTools: [], nestedCalls: 0 },
+		);
+		expect(running.status).toBe("running");
+		expect(running.displayName).toBe("Review");
+		expect(running.tokens).toBe("");
+		expect(running.agentId).toBeUndefined();
+		expect(running.preview).toBeUndefined();
+		expect(cardFields({ role: "explore", task: "t" }, { toolCalls: 1, elapsedMs: 1, usage: { totalTokens: 4200 } as Usage }).tokens).toBe("4.2k token");
+	});
+
+	it("formats and clips card rows without inflating them", () => {
+		expect(formatTokens(undefined)).toBe("");
+		expect(formatTokens({ totalTokens: 4200 } as Usage)).toBe("4.2k token");
+		expect(formatTokens({ totalTokens: 1_500_000 } as Usage)).toBe("1.5M token");
+		expect(previewOf("## Headline\nbody text", 40)).toBe("Headline");
+		expect(clip("abcdefghij", 5)).toBe("abcd…");
 	});
 });

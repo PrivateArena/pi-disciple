@@ -4,7 +4,8 @@
  */
 
 import { truncateHead, type AgentToolResult } from "@earendil-works/pi-coding-agent";
-import type { ChildResult, RunProgress } from "./child.ts";
+import type { Usage } from "@earendil-works/pi-ai";
+import type { ChildResult, Exit, RunProgress } from "./child.ts";
 import type { RoleName } from "./roles.ts";
 
 /**
@@ -42,13 +43,98 @@ export function releaseGuard(callId: string): void {
 	if (currentGuard()?.callId === callId) delete (globalThis as GuardStore)[RUN_GUARD_KEY];
 }
 
-/** `running` while the child works, then the exit that ended it. Drives the tool card's colour. */
-export type SubagentStatus = "running" | ChildResult["exit"];
+/**
+ * The run status a frontend understands.
+ *
+ * `@gotgenes/pi-subagents` put this vocabulary into the session JSONL first, so a frontend that draws a
+ * subagent card at all keys its branches off these strings — a status it has never seen matches no
+ * branch, and the card keeps showing the activity list instead of the result. Our own, finer exit
+ * stays in `details.exit`; `uiStatus` is the bridge.
+ */
+export type SubagentUiStatus = "queued" | "running" | "completed" | "stopped" | "aborted" | "error";
 
-export interface SubagentDetails {
-	status: SubagentStatus;
+/** Map our exit onto the frontend status vocabulary. */
+export function uiStatus(exit: Exit): SubagentUiStatus {
+	switch (exit) {
+		case "done":
+			return "completed";
+		case "aborted":
+		case "timeout":
+			return "stopped";
+		case "maxTurns":
+		case "callLimit":
+		case "overflow":
+			return "aborted";
+		case "error":
+			return "error";
+	}
+}
+
+/** Clip for a card row: a card gets a summary, never a whole field. */
+export function clip(text: string, maxChars: number): string {
+	return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
+}
+
+/** `4.2k token`, or "" when the run reported no usage — never a guessed count. */
+export function formatTokens(usage: Usage | undefined): string {
+	const total = usage?.totalTokens ?? 0;
+	if (total <= 0) return "";
+	if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M token`;
+	if (total >= 1000) return `${(total / 1000).toFixed(1)}k token`;
+	return `${total} token`;
+}
+
+/** First non-empty line of a report, stripped of heading marks and clipped. */
+export function previewOf(report: string, maxChars = 200): string {
+	const line = report.split("\n").map((candidate) => candidate.trim()).find(Boolean) ?? "";
+	return clip(line.replace(/^#+\s*/, ""), maxChars);
+}
+
+/**
+ * The fields a subagent card is drawn from, named the way `@gotgenes/pi-subagents` names them
+ * (`AgentDetails`, `GetResultDetails`) — that is the shape a frontend already knows how to read. They
+ * sit beside our own fields; our renderer keeps reading `exit`, `elapsedMs`, `toolCalls`.
+ */
+export interface SubagentCardFields {
+	/** Human-readable role, e.g. `Explore`. */
+	displayName: string;
+	/** The role id, e.g. `explore`. */
+	subagentType: RoleName;
+	/** What was asked of the child, clipped. */
+	description: string;
+	toolUses: number;
+	durationMs: number;
+	/** Pre-formatted token total; "" when the run reported none. */
+	tokens: string;
+	agentId?: string;
+	modelName?: string;
+	/** First line of the report, clipped — never the report itself, which `content` already carries. */
+	preview?: string;
+}
+
+/** The card fields for one state of a run. */
+export function cardFields(
+	host: { role: RoleName; task: string; model?: string },
+	run: { toolCalls: number; elapsedMs: number; agentId?: string; usage?: Usage; report?: string },
+): SubagentCardFields {
+	return {
+		displayName: host.role ? `${host.role[0].toUpperCase()}${host.role.slice(1)}` : "Subagent",
+		subagentType: host.role,
+		description: clip(host.task, 160),
+		toolUses: run.toolCalls,
+		durationMs: run.elapsedMs,
+		tokens: formatTokens(run.usage),
+		agentId: run.agentId,
+		modelName: host.model,
+		...(run.report ? { preview: previewOf(run.report) } : {}),
+	};
+}
+
+export interface SubagentDetails extends SubagentCardFields {
+	/** Frontend status vocabulary (see `uiStatus`); our own exit is in `exit`. */
+	status: SubagentUiStatus;
 	role: RoleName;
-	/** The settled exit; absent while the child is still running. */
+	/** The settled exit; absent while the child is still running. Drives our renderer's wording. */
 	exit?: ChildResult["exit"];
 	turns: number;
 	toolCalls: number;
@@ -106,6 +192,7 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
 		model: host.model,
 		shimTools: host.shimTools,
 		nestedCalls: host.nestedCalls,
+		...cardFields(host, { toolCalls: progress.toolCalls, elapsedMs: progress.elapsedMs }),
 	};
 }
 
@@ -124,6 +211,7 @@ export function composeResult(
 	const truncated = truncateHead(result.text, { maxBytes: maxResultBytes });
 	const body = (truncated.firstLineExceedsLimit ? result.text.slice(0, maxResultBytes) : truncated.content).trim();
 	const sessionFile = result.childSessionFile ?? extra.childSessionFile;
+	const childSessionId = result.childSessionId ?? extra.childSessionId;
 	const status = result.exit === "done" ? "DONE" : `INCOMPLETE (${result.exit})`;
 	const header =
 		`[subagent ${role} · ${status} · ${result.turns} turns · ${result.toolCalls} tool calls · ${(elapsedMs / 1000).toFixed(1)}s]` +
@@ -137,17 +225,21 @@ export function composeResult(
 	return {
 		content: [{ type: "text", text: `${header}\n\n${answer}${footer}` }],
 		details: {
-			status: result.exit,
+			status: uiStatus(result.exit),
 			role,
 			exit: result.exit,
 			turns: result.turns,
 			toolCalls: result.toolCalls,
 			childSessionFile: sessionFile,
-			childSessionId: result.childSessionId,
+			childSessionId,
 			truncated: truncated.truncated,
 			elapsedMs,
 			task: extra.task,
 			report: body,
+			...cardFields(
+				{ role, task: extra.task ?? "", model: extra.model },
+				{ toolCalls: result.toolCalls, elapsedMs, agentId: childSessionId, usage: result.usage, report: body },
+			),
 			...extra,
 		},
 		usage: result.usage,

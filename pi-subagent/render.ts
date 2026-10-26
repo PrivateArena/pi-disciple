@@ -15,6 +15,7 @@
 import { keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
+import type { Exit } from "./child.ts";
 import type { SubagentDetails } from "./run.ts";
 
 /** Glyph for the call title. pi's own tools have one per tool; this is ours. */
@@ -40,12 +41,21 @@ export function formatTokenCount(usage: Usage | undefined): string {
 	return total < 1000 ? `${total} token` : `${(total / 1000).toFixed(1)}k token`;
 }
 
-/** `(4 turns, 7 tool uses, 4.2k token)` — the parenthetical of the status sentence, "" when empty. */
-export function formatRunStats(details: Pick<SubagentDetails, "turns" | "toolCalls">, usage: Usage | undefined): string {
+/**
+ * `(4 turns, 7 tool uses, 4.2k token)` — the parenthetical of the status sentence, "" when empty.
+ *
+ * The token total comes from `result.usage` when the caller passes one, else from `details.tokens`:
+ * pi's `ToolExecutionComponent` hands a renderer only `{ content, details }`, so `usage` is there for
+ * the model and absent for the card.
+ */
+export function formatRunStats(
+	details: { turns: number; toolCalls: number; tokens?: string },
+	usage: Usage | undefined,
+): string {
 	const parts: string[] = [];
 	if (details.turns > 0) parts.push(`${details.turns} turn${details.turns === 1 ? "" : "s"}`);
 	if (details.toolCalls > 0) parts.push(`${details.toolCalls} tool use${details.toolCalls === 1 ? "" : "s"}`);
-	const tokens = formatTokenCount(usage);
+	const tokens = formatTokenCount(usage) || details.tokens || "";
 	if (tokens) parts.push(tokens);
 	return parts.length ? ` (${parts.join(", ")})` : "";
 }
@@ -56,16 +66,16 @@ export function formatRunStats(details: Pick<SubagentDetails, "turns" | "toolCal
  */
 export function formatStatusLine(details: SubagentDetails, usage: Usage | undefined, theme: Theme): string {
 	const stats = formatRunStats(details, usage);
-	const color = (status: SubagentDetails["status"]) => (status === "done" ? "success" : status === "error" ? "error" : "warning");
-	if (details.status === "running") {
+	const color = (exit: Exit) => (exit === "done" ? "success" : exit === "error" ? "error" : "warning");
+	if (!details.exit) {
 		const elapsed = details.elapsedMs > 0 ? ` for ${formatDuration(details.elapsedMs)}` : "";
 		return theme.fg("accent", `Agent running${elapsed}${stats}`);
 	}
-	if (details.status === "done") return theme.fg(color("done"), `Agent completed in ${formatDuration(details.elapsedMs)}${stats}.`);
-	if (details.status === "error") {
+	if (details.exit === "done") return theme.fg(color("done"), `Agent completed in ${formatDuration(details.elapsedMs)}${stats}.`);
+	if (details.exit === "error") {
 		return theme.fg(color("error"), `Agent failed after ${formatDuration(details.elapsedMs)}${stats}: ${details.error ?? "the child returned an error"}`);
 	}
-	return theme.fg(color(details.status), `Agent stopped after ${formatDuration(details.elapsedMs)} (${details.status})${stats}.`);
+	return theme.fg(color(details.exit), `Agent stopped after ${formatDuration(details.elapsedMs)} (${details.exit})${stats}.`);
 }
 
 /** The identity line: what ran, on which model, and where to read the whole exchange. */
@@ -115,7 +125,7 @@ export function formatResultBlock(
 ): string {
 	const report = details.report ?? textOf(result);
 	const status = formatStatusLine(details, result.usage, theme);
-	if (details.status !== "running") return `${status}\n${formatIdentityLine(details, theme)}\n\n${formatReportBody(details, report, expanded, theme)}`;
+	if (details.exit) return `${status}\n${formatIdentityLine(details, theme)}\n\n${formatReportBody(details, report, expanded, theme)}`;
 	// Running: the activity line is the payload — a frontend with no update at all has nothing to say.
 	const activity = details.activity ? `\n${theme.fg("dim", `last call: ${details.activity}`)}` : "";
 	const task = details.task ? `\n${theme.fg("muted", `task: ${details.task}`)}` : "";

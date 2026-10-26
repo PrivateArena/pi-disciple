@@ -138,6 +138,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 					shimTools: shimNames,
 					model: childModel,
 					task: args.task,
+					activity: latest.lastTool ?? "reported",
 				});
 			} finally {
 				clearInterval(heartbeat);
