@@ -40,5 +40,9 @@ installed copy cannot double-gate the same run. They need a live provider, so th
   verbatim, `Allow with reason` lets the call run and puts `Allowed by user with note: <text>` on its result; a remembered
   allow makes an identical second command run without a dialog; `everything for this session` is followed by
   a *different* second command, which must also run without a dialog.
+  A command that touches a path outside the workspace raises **two** dialogs — `pi-gate: bash — …` then
+  `pi-gate: bash · location — … — question 2 of 2` — and answering only the first is not enough: check
+  that the second one's `rule:` line names the folder (`/that/dir/*` on `external_directory`) and that a
+  third, sibling call in the same folder after the grant raises no dialog at all.
 * `rpc-subagent-gate.mjs` — a dialog titled `… from subagent(explore): <task>` raised by the **child's**
   call, and a `logs/review.jsonl` line whose `parentCallId` is the `subagent` call id.

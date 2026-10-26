@@ -12,7 +12,7 @@
  */
 
 import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import type { Decision } from "./policy.ts";
+import type { Decision, GrantOffer } from "./policy.ts";
 import { ALLOW_ALL_WINDOW_MS } from "./policy.ts";
 import { getGlobalConfigFile } from "./config-file.ts";
 import { codeSpan, displaySnippet, shorten } from "./match.ts";
@@ -35,16 +35,16 @@ function grantSummary(offer: Decision["grant"]): string {
 	return codeSpan(shorten(displaySnippet(offer?.label ?? "*"), LABEL_PATTERN_CHARS));
 }
 
-/** Every pattern of the offer, verbatim and uncapped — what the grant scopes really write. */
+/** The whole rule, verbatim and uncapped — what the grant scopes really write, surface by surface. */
 function ruleLine(decision: Decision): string {
 	const grant = decision.grant;
 	const patterns = grant?.patterns;
 	if (!patterns?.length) return "";
-	const body = patterns.map((pattern) => codeSpan(displaySnippet(pattern))).join("  ");
-	const extra = grant?.alsoSurfaces?.length
-		? ` on ${codeSpan(grant.surface)} + ${grant.alsoSurfaces.map((surface) => codeSpan(surface)).join(" + ")}`
-		: "";
-	return `\nrule: ${body}${extra}`;
+	const surfaces = [grant!.surface, ...(grant!.alsoSurfaces ?? [])];
+	const body = (surface: string) =>
+		(grant!.surfacePatterns?.[surface] ?? patterns).map((pattern) => codeSpan(displaySnippet(pattern))).join("  ");
+	if (surfaces.length === 1) return `\nrule: ${body(surfaces[0]!)}`;
+	return `\nrule: ${surfaces.map((surface) => `${body(surface)} (on ${codeSpan(surface)})`).join("  \u00b7  ")}`;
 }
 
 export function optionLabels(decision: Decision, cwd: string): string[] {
@@ -63,10 +63,19 @@ export function optionLabels(decision: Decision, cwd: string): string[] {
 }
 
 export function dialogTitle(decision: Decision, sub?: { role: string; task: string }, note?: string): string {
+	const { facts } = decision;
 	const floors = decision.floors.length ? ` [floor: ${decision.floors.join(", ")}]` : "";
 	const origin = sub ? `\nfrom subagent(${sub.role}): ${displaySnippet(sub.task)}` : "";
 	const banner = note ? `\n${note}` : "";
-	return `pi-gate: ${decision.facts.toolName} — ${codeSpan(displaySnippet(decision.facts.preview))}${floors}${origin}${banner}${ruleLine(decision)}\n${surfaceSummary(decision)}`;
+	// One call can raise two questions (what it does / where it goes); say which one is being answered, so
+	// a second dialog is never mistaken for the first one coming back unanswered.
+	const question =
+		decision.question && decision.question.total > 1 ? ` \u2014 question ${decision.question.index} of ${decision.question.total}` : "";
+	const heading = decision.stage === "location" ? `${facts.toolName} \u00b7 location` : facts.toolName;
+	// A protected location has no grantable rule of its own (its answer is the exact command, which the
+	// command question already offered), and a dialog must not imply one that is not there.
+	const closable = decision.grant || decision.action !== "ask" ? "" : "\nno rule can close this question \u2014 \"Allow once\" lets this call through";
+	return `pi-gate: ${heading}${question} \u2014 ${codeSpan(displaySnippet(facts.preview))}${floors}${origin}${banner}${ruleLine(decision)}${closable}\n${surfaceSummary(decision)}`;
 }
 
 function surfaceSummary(decision: Decision): string {
@@ -92,16 +101,17 @@ export interface AskResult {
  * the only case where the model is the one who can carry it out (FM-12).
  */
 export function blockReason(decision: Decision, kind: "policy_deny" | "user_abort" | "no_ui", instruction?: string): string {
-	const { facts, matched, grant } = decision;
+	const { facts, matched } = decision;
 	if (kind === "user_abort") {
 		return instruction
 			? `Blocked by user with note: ${instruction}`
 			: `Blocked by user: ${codeSpan(displaySnippet(facts.preview))}`;
 	}
 	if (kind === "no_ui") {
-		const fix = [...new Set(grant?.patterns ?? ["*"])].map((pattern) => codeSpan(pattern)).join(" and ");
-		const sections = [...new Set([grant?.surface ?? facts.toolName, ...(grant?.alsoSurfaces ?? [])])].map((surface) => codeSpan(surface));
-		const where = sections.length > 1 ? `${sections.slice(0, -1).join(", ")} and ${sections.at(-1)} sections` : `${sections[0]} section`;
+		const offers = neededOffers(decision);
+		const fix = [...new Set(offers.flatMap((offer) => offer.patterns))].map((pattern) => codeSpan(pattern)).join(" and ") || codeSpan("*");
+		const sections = [...new Set(offers.flatMap((offer) => [offer.surface, ...(offer.alsoSurfaces ?? [])]))].map((surface) => codeSpan(surface));
+		const where = sections.length > 1 ? `${sections.slice(0, -1).join(", ")} and ${sections.at(-1)} sections` : `${sections[0] ?? codeSpan(facts.toolName)} section`;
 		return (
 			`Blocked: ${facts.toolName} ${codeSpan(displaySnippet(facts.preview))} needs approval and this session has no UI.\n` +
 			`Allow it by adding ${fix} = allow to the ${where} of ${getGlobalConfigFile()}, or run pi interactively.`
@@ -109,6 +119,19 @@ export function blockReason(decision: Decision, kind: "policy_deny" | "user_abor
 	}
 	const rule = matched ? ` (${matched.surface} ${codeSpan(matched.pattern)} = deny, ${matched.scope})` : "";
 	return `Blocked by policy${rule}: ${codeSpan(displaySnippet(facts.preview))}`;
+}
+
+/**
+ * The rules a headless run would need in its config file — one per question the call raises. The merged
+ * decision's own `grant` is not enough here: allowing the command is only half the fix for a call that
+ * also reaches outside the workspace.
+ */
+function neededOffers(decision: Decision): GrantOffer[] {
+	const fromStages = (decision.stages ?? [])
+		.filter((entry) => entry.action === "ask" && entry.grant)
+		.map((entry) => entry.grant!);
+	if (fromStages.length > 0) return fromStages;
+	return decision.grant ? [decision.grant] : [];
 }
 
 /** Input prompts, one per note-taking choice. */

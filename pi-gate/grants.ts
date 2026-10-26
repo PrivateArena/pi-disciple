@@ -29,7 +29,7 @@ export function toGrantRules(offer: GrantOffer, action: Action = "allow"): Grant
 	const surfaces = [offer.surface, ...(offer.alsoSurfaces ?? [])];
 	const out: GrantRule[] = [];
 	for (const surface of surfaces) {
-		for (const pattern of offer.patterns) {
+		for (const pattern of offer.surfacePatterns?.[surface] ?? offer.patterns) {
 			if (out.some((rule) => rule.surface === surface && rule.pattern === pattern)) continue;
 			out.push({ surface, pattern, action });
 		}

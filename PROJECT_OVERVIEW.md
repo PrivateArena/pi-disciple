@@ -99,6 +99,20 @@ registry knows it. A bad pin warns and the child stays on the session model; ove
 non-reasoning model also drops the child's thinking level to `off`. The pin is config, never a tool
 parameter - the model still cannot choose its own child model.
 
+**A call is two questions, and gets one dialog each.** *What it does* (its own surface: every shell
+segment, the tool name) and *where it goes* (`path`, `external_directory`) are decided separately and
+asked in that order — `pi-gate: bash · location — … — question 2 of 2`. The split exists because the two
+questions are answered by different rule shapes: `cat *` says nothing about a directory. One merged dialog
+could only ever offer the command rule, so a whitelisted `cat /media/…/config.json | head -200` had its
+command facts all allowed, its only `ask` coming from the boundary fact, and **no choice in the dialog
+could close it** — it asked again on every retry, whatever was clicked. Now the location dialog offers the
+**containing folder** on the surface that asked (`external_directory: /media/…/CraftGang/*`, which also
+covers the folder itself and every sibling file), and one click ends it. A question is asked at most once
+per call, so a grant that leaves a floor standing cannot loop the human through the same dialog twice:
+answer every question the call raised and the call runs. A file tool's fact *is* a path, so file tools keep
+raising one question; a call that touches a **protected path** is offered as the *exact* command or file
+(never a wildcard, never a cross-cutting `path` rule), which is the only shape that floor accepts.
+
 Dialog choices, in list order: `Allow once` · `Allow with reason…` · `Allow <rule> for this session` ·
 `Allow <rule> for this project (<cwd>)` · `Allow <rule> for all projects` · `Abort` · `Abort with reason…` ·
 `Allow everything for this session` · `Allow everything for 5 minutes`. All three "Allow <rule>" choices
@@ -207,11 +221,17 @@ tool event keeps reporting activity.
     allows its directory, and an outside directory gets the rule on `external_directory` too. Before
     this, no grant of any shape could silence an outside path — the tool-surface grant let the
     `external_directory` fact keep asking, so "Allow this file for all projects" changed nothing.
+14. The two-question evaluation (`policy.ts` `Stage`/`buildStages`/`offerLocationGrant`, the stage loop in
+    `handle.ts`, `GrantOffer.surfacePatterns`): a check joins the location stage when its value *is* a path
+    spelling, which is why file tools stay single-dialog while shell calls touching the outside get two.
+    `answersFloor` also accepts a call whose own rules are all exact ("the human named this call"), which
+    is what finally makes a protected-path call grantable from the dialog. The `degraded_config` floor is
+    raised only on the command stage — a broken config is one question, not one per fact.
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 265 tests, no live provider needed
+npm test            # vitest run — 275 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```

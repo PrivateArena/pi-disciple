@@ -1,11 +1,15 @@
 /**
  * Policy loading and evaluation: the single source of truth for a call's action (plan step 5).
  *
- * Two separate rules, never conflated:
+ * Three separate rules, never conflated:
  *  1. **within one fact** — rules of all layers concatenate in precedence order
  *     `builtin → global.permission → project.permission → grants.global → grants.project →
  *     grants.session` and the last matching pattern wins;
- *  2. **across the facts of one call** — most restrictive wins, `deny > ask > allow`.
+ *  2. **within one question** ({@link Stage}) — facts that name the *same thing* are judged once, by the
+ *     most specific rule about them, most restrictive among those;
+ *  3. **across the questions of one call** — `command` (what it does) and `location` (where it goes) are
+ *     decided separately and combined most-restrictive, `deny > ask > allow`, because each has its own
+ *     grantable rule and its own dialog.
  * Floors are applied per fact after rule matching and can only ever escalate.
  */
 
@@ -34,6 +38,8 @@ import {
 	isProtectedPath,
 	isScopedRule,
 	matchesSegmentPattern,
+
+	normaliseCommand,
 	pathPatternMatches,
 	protectedPathGlobs,
 	suggestBashPattern,
@@ -99,6 +105,8 @@ export interface GrantOffer {
 	 * One pattern per command segment. A compound command (`a && b | c`) is evaluated per segment, so
 	 * a grant has to be stored per segment too — a single chained pattern would match no segment and
 	 * the allowance would silently do nothing.
+	 *
+	 * Also the union across {@link surfacePatterns}, which is what the dialog labels show.
 	 */
 	patterns: string[];
 	/**
@@ -107,8 +115,38 @@ export interface GrantOffer {
 	 * would leave the outside-path question open and ask again forever.
 	 */
 	alsoSurfaces?: string[];
+	/**
+	 * Per-surface patterns, for an offer whose surfaces do not all want the same rule (a location
+	 * offer writes a folder pattern on `external_directory` and only the exact command on the tool's
+	 * own surface). Falls back to `patterns` for any surface not listed.
+	 */
+	surfacePatterns?: Record<string, string[]>;
 	/** Single-line summary of `patterns`, for the dialog. */
 	label: string;
+}
+
+/**
+ * The two questions one call can raise, asked one dialog at a time.
+ *
+ * `command` is *what the call does* (its own surface: the shell segments, the tool name), `location`
+ * is *where it touches* (`path`, `external_directory`). They are separate because the rules that
+ * answer them are different shapes: `cat *` says nothing about a directory, and a directory rule says
+ * nothing about `cat`. Merged into one dialog, the only offer available was the command rule — so a
+ * shell call that touched a path outside the workspace could not be granted by any click, and asked
+ * again on every retry.
+ */
+export type Stage = "command" | "location";
+
+export interface StageDecision {
+	stage: Stage;
+	action: Action;
+	matched?: Rule;
+	checks: FactCheck[];
+	floors: string[];
+	/** A rule that closes *this* question, or `undefined` when nothing grantable can (a protected path). */
+	grant?: GrantOffer;
+	/** Short human name of the question, used in the dialog title. */
+	heading: string;
 }
 
 export interface Decision {
@@ -122,6 +160,11 @@ export interface Decision {
 	grant?: GrantOffer;
 	floors: string[];
 	checks: FactCheck[];
+	/** Every question this call raises, in the order they get asked. */
+	stages: StageDecision[];
+	/** Set on the per-stage view the dialog shows (see {@link stageView}); absent on the raw decision. */
+	stage?: Stage;
+	question?: { index: number; total: number };
 }
 
 /**
@@ -349,6 +392,7 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 	const inPipeline = shell && shellValues.length > 1;
 	const protectedHit = isProtectedPath(facts.paths, policy.protectedGlobs);
 	const readOnly = READ_ONLY_TOOLS.includes(facts.toolName);
+	const callExact = exactCallRules(facts, policy, shell, shellValues);
 	const checks: FactCheck[] = [];
 
 	const push = (surface: string, value: string, fallback: Action | undefined, fallbackSpecificity: number = SPECIFICITY.fallback) => {
@@ -369,12 +413,14 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 			floor = readOnly ? "protected_read" : "protected_path";
 		else if (shell && surface === facts.toolName && !named && (isWrappedSegment(value, inPipeline) || hasUnparsedExpansion(value)))
 			floor = "wrapper";
-		else if (policy.degraded) floor = "degraded_config";
+		// A broken config is one question about the whole call, not one per fact: keeping it off the
+		// location surfaces stops a degraded config from opening a second dialog for the same call.
+		else if (policy.degraded && !isLocationSurface(surface)) floor = "degraded_config";
 		// A floor escalates, never downgrades: `allow` on a guarded value is still an ask — unless the rule
 		// that allowed it really speaks about this call (an exact command) or, for an outside path, about
 		// this location (a concrete `…/*` grant). Without that exception no click could ever allow a file
 		// outside the workspace, because the surface that asks is a class-wide one.
-		if (floor && action === "allow" && !answersFloor(floor, rule, surface, value, named)) action = "ask";
+		if (floor && action === "allow" && !answersFloor(floor, rule, surface, value, named, callExact)) action = "ask";
 		checks.push({ surface, value, action, rule, floor, specificity });
 	};
 
@@ -392,26 +438,114 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 	// Facts that name the *same thing* — a file tool's value for `/x/a.ts` and the `path` fact for that
 	// very spelling — are judged once, by the most specific rule about them. Facts that name different
 	// things (every segment of a shell call, every path it touches) still combine most-restrictive.
-	const { action, matched } = decide(checks, policy);
+	// That grouping happens *within* a stage, never across stages: what a command does and where it
+	// goes are separate questions, each answered by its own rules and its own dialog (see {@link Stage}).
+	const stages = buildStages(facts, policy, checks);
+	const { action, matched } = decideCall(stages, policy);
+	const asking = stages.filter((entry) => entry.action === "ask");
 	return {
 		action,
 		facts,
 		matched,
 		checks,
-		floors: [...new Set(checks.flatMap((check) => (check.floor ? [check.floor] : [])))],
-		grant: offerGrant(facts),
+		floors: floorsOf(checks),
+		stages,
+		// The rule a click would write: the first question that still needs answering, so the headless
+		// "add this rule" hint names what is actually blocking the call.
+		grant: (asking[0] ?? stages[0])?.grant,
 	};
 }
 
+function floorsOf(checks: readonly FactCheck[]): string[] {
+	return [...new Set(checks.flatMap((check) => (check.floor ? [check.floor] : [])))];
+}
+
+function buildStages(facts: Facts, policy: Policy, checks: FactCheck[]): StageDecision[] {
+	const stages: StageDecision[] = [];
+	// A file tool's own fact *is* the path, so its check and the `path` fact name the same thing and belong
+	// to the same question — that is the "internal files pass by default" rule, and it is why the split is
+	// by what a fact names, not by which surface it came from. Shell segments name a command, so they never
+	// join a location group and the two questions really do separate there.
+	const pathValues = new Set(facts.paths);
+	const isLocationCheck = (check: FactCheck) => isLocationSurface(check.surface) || pathValues.has(check.value);
+	const command = checks.filter((check) => !isLocationCheck(check));
+	const location = checks.filter(isLocationCheck);
+	if (command.length > 0) {
+		stages.push({
+			stage: "command",
+			heading: facts.toolName,
+			...decide(command, policy),
+			checks: command,
+			floors: floorsOf(command),
+			grant: offerGrant(facts, policy),
+		});
+	}
+	if (location.length > 0) {
+		stages.push({
+			stage: "location",
+			heading: `location for ${facts.toolName}`,
+			...decide(location, policy),
+			checks: location,
+			floors: floorsOf(location),
+			grant: offerLocationGrant(facts, policy, location),
+		});
+	}
+	return stages;
+}
+
+/** The call's action across its stages: most restrictive wins, `deny > ask > allow`.
+ */
+function decideCall(stages: StageDecision[], policy: Policy): { action: Action; matched?: Rule } {
+	if (stages.length === 0) return { action: policy.defaultAction };
+	let { action, matched } = stages[0]!;
+	for (const stage of stages.slice(1)) {
+		if (severityOf(stage.action) > severityOf(action)) ({ action, matched } = stage);
+		else if (severityOf(stage.action) === severityOf(action) && stage.matched) matched = stage.matched;
+	}
+	return { action, matched };
+}
+
+/**
+ * True when every fact on the tool's *own* surface is decided by a rule whose pattern *is* that fact:
+ * the human named this exact command, this exact path. That is the strongest thing a grant can say, and
+ * it is what lets a protected-path floor be closed by a rule that cannot be reused for anything else
+ * (`bash: cat /x/gate/config.json 2>&1`) instead of by a cross-cutting `path` allow — which would open
+ * the same file for writing, from a dialog the human answered to let one `cat` through.
+ */
+function exactCallRules(facts: Facts, policy: Policy, shell: boolean, shellValues: readonly string[]): boolean {
+	const surfaces = facts.surfaces.filter(([surface]) => !isLocationSurface(surface));
+	if (surfaces.length === 0) return false;
+	let seen = 0;
+	for (const [surface, values] of surfaces) {
+		const segments = shell && surface === facts.toolName ? shellValues : undefined;
+		for (const value of values) {
+			const rule = matchRule(surface, value, policy, surface === facts.toolName, segments);
+			if (!rule || !isExactRule(rule, value)) return false;
+			seen++;
+		}
+	}
+	return seen > 0;
+}
+
 /** Can this rule answer this floor, or does the floor keep the call at `ask`? */
-function answersFloor(floor: NonNullable<FactCheck["floor"]>, rule: Rule | undefined, surface: string, value: string, exact: boolean): boolean {
+function answersFloor(
+	floor: NonNullable<FactCheck["floor"]>,
+	rule: Rule | undefined,
+	surface: string,
+	value: string,
+	exact: boolean,
+	callExact: boolean,
+): boolean {
 	if (!rule) return false;
 	// A config too broken to trust is not answerable by any rule.
 	if (floor === "degraded_config") return false;
 	// An exact rule is the human naming this call. A scoped one (`/dir/*`, not `"*"`) is the human
-	// naming this location — which is exactly what a folder grant for an outside path writes.
+	// naming this location — which is exactly what a folder grant for an outside path writes. A coarse
+	// `bash: cat *` never does either job: it says nothing about this directory.
 	if (floor === "external_directory") return exact || (rule.surface === surface && isScopedRule(rule));
-	return exact;
+	// Protected paths: `exact` (a rule naming this very file) or a call whose own rules were all written
+	// about this exact call, which is the shape of a grant made from a protected-path dialog.
+	return exact || callExact;
 }
 
 /** The call's action, and the rule that decided it. */
@@ -451,22 +585,35 @@ function severityOf(action: Action): number {
 	return action === "deny" ? 2 : action === "ask" ? 1 : 0;
 }
 
+/** The `path` and `external_directory` facts: the gate's statement about *where*, not *what*. */
+export const LOCATION_SURFACES: readonly string[] = ["path", "external_directory"];
+
+export function isLocationSurface(surface: string): boolean {
+	return LOCATION_SURFACES.includes(surface);
+}
+
 /**
- * What the dialog offers to remember: one wildcard pattern per command segment, identical for every
+ * The rule the **command** question offers: one wildcard pattern per command segment, identical for every
  * scope. Persisted grants used to store the exact command while a session grant stored a wildcard, so
  * one click meant two different things — and an exact multi-argument command is useless as a rule.
  * `suggestBashPattern` keeps dangerous and wrapper segments exact, so the wildcard is not naive.
  *
- * For a file tool the offer is the **containing folder** (`/x/y/*`), not the one file: a human who
- * allowed one file in a directory means "stop asking me about that directory", which is how every
- * other harness scopes a sandbox grant. An outside path additionally lands on `external_directory`,
- * the surface that actually asked.
+ * This is the offer for a shell call (every command segment) and for a tool whose fact is not a path (an
+ * MCP tool's argument rendering). A file tool's fact *is* a path, so that call raises only the location
+ * question and {@link offerLocationGrant} is the one that speaks.
+ *
+ * A call that touches a **protected path** (the gate's own config, pi's settings, a git hook) is offered
+ * as the *exact* command or the *exact* file instead: a wildcard there would let the agent rewrite the
+ * rules that decide what runs, and a cross-cutting `path` allow would open the same file to every other
+ * tool. Exact is also the only shape the protected floor accepts, so this is what makes such a call
+ * grantable at all instead of something to abort or walk past.
  */
-export function offerGrant(facts: Facts): GrantOffer | undefined {
+export function offerGrant(facts: Facts, policy?: Policy): GrantOffer | undefined {
 	const values = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
 	if (values.length === 0) return undefined;
+	const guarded = !!policy && facts.paths.some((spelling) => isProtectedPath([spelling], policy.protectedGlobs));
 	if (isShellTool(facts.toolName)) {
-		const patterns = values.map((seg) => suggestBashPattern(seg));
+		const patterns = [...new Set(values.map((seg) => (guarded ? normaliseCommand(seg) : suggestBashPattern(seg))))];
 		return { surface: facts.toolName, patterns, label: patterns.join(" && ") };
 	}
 	const spellings = new Set(facts.paths);
@@ -475,13 +622,57 @@ export function offerGrant(facts: Facts): GrantOffer | undefined {
 		const pattern = values[0]!;
 		return { surface: facts.toolName, patterns: [pattern], label: pattern };
 	}
-	const patterns = [...new Set(values.map((value) => directoryPattern(value)))];
+	const patterns = [...new Set(guarded ? values : values.map((value) => directoryPattern(value)))];
 	const external = facts.paths.some((spelling) => isExternalPath([spelling], facts.cwd));
 	return {
 		surface: facts.toolName,
 		patterns,
 		label: patterns.join(" "),
 		...(external ? { alsoSurfaces: ["external_directory"] } : {}),
+	};
+}
+
+/**
+ * The rule that closes the **location** question: the folder the asked-about path sits in, written on
+ * every surface that is asking — the tool's own surface (a file tool's fact is the path), `path` for a
+ * rule the human wrote themselves (`path: "/secrets/*": "ask"`), and `external_directory` for the
+ * workspace boundary. The folder is the unit of the decision — a human who allowed one file in a
+ * directory means "stop asking me about that directory" — which is what makes an outside directory
+ * grantable in one click instead of file by file, forever.
+ *
+ * A **protected** path is the exception: there the offer is the exact file, never the folder, and never a
+ * `path` rule at all — `path` and `external_directory` are cross-cutting, so a folder grant made while
+ * approving one look would silently open every file that decides what runs, for every tool.
+ */
+export function offerLocationGrant(facts: Facts, policy: Policy, checks: readonly FactCheck[]): GrantOffer | undefined {
+	const perSurface = new Map<string, string[]>();
+	const add = (surface: string, pattern: string) => {
+		const list = perSurface.get(surface) ?? [];
+		if (!list.includes(pattern)) list.push(pattern);
+		perSurface.set(surface, list);
+	};
+	for (const check of checks) {
+		// Only what this stage is actually asking about, and never a `deny` (an explicit rule is edited in
+		// the config file, not negotiated away by a dialog click).
+		if (check.action !== "ask") continue;
+		const guarded = isProtectedPath([check.value], policy.protectedGlobs);
+		if (guarded && check.surface === "path") continue;
+		add(check.surface, guarded ? check.value : directoryPattern(check.value));
+	}
+	if (perSurface.size === 0) return undefined;
+	const surfaces = [...perSurface.keys()];
+	// The tool's own surface leads when it is the one asking (a file tool), otherwise the boundary surface
+	// that asked leads the label.
+	const preferred = [facts.toolName, "external_directory", "path"];
+	const primary = preferred.find((surface) => surfaces.includes(surface)) ?? surfaces[0]!;
+	const rest = surfaces.filter((surface) => surface !== primary);
+	const patterns = [...new Set(surfaces.flatMap((surface) => perSurface.get(surface)!))];
+	return {
+		surface: primary,
+		patterns,
+		...(rest.length > 0 ? { alsoSurfaces: rest } : {}),
+		surfacePatterns: Object.fromEntries(surfaces.map((surface) => [surface, perSurface.get(surface)!])),
+		label: patterns.join(" "),
 	};
 }
 

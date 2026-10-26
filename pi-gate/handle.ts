@@ -20,9 +20,11 @@ import {
 	type AllowAll,
 	type Decision,
 	type Policy,
+	type Stage,
+	type StageDecision,
 	withSessionGrants,
 } from "./policy.ts";
-import { appendPersisted, appendSession, type PersistedScope, type WriteResult } from "./grants.ts";
+import { appendPersisted, appendSession, toGrantRules, type PersistedScope, type WriteResult } from "./grants.ts";
 import { ask, blockReason, type AskResult } from "./prompt.ts";
 import { defaultLogPath, redact, reviewLog } from "./log.ts";
 import { displaySnippet } from "./match.ts";
@@ -130,7 +132,7 @@ export async function handleToolCall(
 			callId: event.toolCallId,
 			parentCallId: event.parentToolCallId,
 		});
-		const decision = evaluate(facts, policy);
+		let decision = evaluate(facts, policy);
 		const sub = subagentOwner(state, event.parentToolCallId);
 
 		if (decision.action === "allow") {
@@ -156,51 +158,91 @@ export async function handleToolCall(
 			return { block: true, reason: blockReason(decision, "no_ui") };
 		}
 
-		const answer: AskResult = await askFn(ctx, decision, {
-			cwd: ctx.cwd,
-			signal: ctx.signal,
-			timeoutMs: policy.config.promptTimeoutMs,
-			sub,
-			note: allowAllNote(state.allowAll, now()),
-		});
-		await logit(appendLog, logPath, policy, decision, answer.choice, sub);
+		// One call can ask two questions: *what* it does (the command / tool surface) and *where* it goes (a
+		// path outside the workspace, a guarded location). They get one dialog each, in that order, and every
+		// dialog offers only the rule that closes its own question: a `cat *` grant can never answer a location
+		// ask, so a merged dialog could leave the same call asking forever no matter what was clicked.
+		//
+		// A question is asked at most once per call, so a grant that narrows nothing cannot loop the human
+		// through the same dialog twice; once every question this call raised has its "yes", it runs.
+		let activePolicy = policy;
+		const persisted: GrantRule[] = [];
+		const asked = new Set<Stage>();
+		const questions = Math.max(1, decision.stages.filter((entry) => entry.action === "ask").length);
+		let note: string | undefined;
 
-		switch (answer.choice) {
-			case "once":
-				return;
-			case "allow_reason":
-				// The call runs; the note reaches the agent on this call's tool result.
-				rememberNote(state.pendingNotes, event.toolCallId, redact(answer.reason ?? ""));
-				return;
-			case "session": {
-				if (decision.grant) appendSession(state.sessionGrants, decision.grant);
-				state.policyChanged(withSessionGrants(policy, state.sessionGrants));
-				return;
-			}
-			case "project":
-			case "global": {
-				const scope: PersistedScope = answer.choice;
-				if (decision.grant) {
-					const written: WriteResult = await writePersisted(decision.grant, scope, ctx.cwd);
-					if (!written.ok) ctx.ui.notify(`[gate] could not save the grant to ${written.file}: ${written.error}`, "error");
+		for (;;) {
+			const stage = decision.stages.find((entry) => entry.action === "ask" && !asked.has(entry.stage));
+			if (!stage) break;
+			asked.add(stage.stage);
+			let changed = false;
+			const view = stageView(decision, stage, { index: asked.size, total: questions });
+			const answer: AskResult = await askFn(ctx, view, {
+				cwd: ctx.cwd,
+				signal: ctx.signal,
+				timeoutMs: policy.config.promptTimeoutMs,
+				sub,
+				note: allowAllNote(state.allowAll, now()),
+			});
+			await logit(appendLog, logPath, policy, view, answer.choice, sub);
+
+			switch (answer.choice) {
+				case "abort":
+				case "abort_reason":
+					return {
+						block: true,
+						reason:
+							answer.choice === "abort_reason"
+								? blockReason(view, "user_abort", redact(answer.reason ?? ""))
+								: blockReason(view, "user_abort"),
+					};
+				case "all_session":
+					setAllowAll(state, { until: null });
+					ctx.ui.notify("[gate] allow-everything is ON for this session — nothing will ask again, footer shows it, /gatec allow off stops it", "warning");
+					return;
+				case "all_timed":
+					setAllowAll(state, { until: now() + ALLOW_ALL_WINDOW_MS });
+					ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — nothing will ask again, /gatec allow off stops it sooner`, "warning");
+					return;
+				case "allow_reason":
+					// The call runs; the note reaches the agent on this call's tool result.
+					note = redact(answer.reason ?? "");
+					break;
+				case "session":
+					if (view.grant) {
+						appendSession(state.sessionGrants, view.grant);
+						changed = true;
+					}
+					break;
+				case "project":
+				case "global": {
+					const scope: PersistedScope = answer.choice;
+					if (view.grant) {
+						const written: WriteResult = await writePersisted(view.grant, scope, ctx.cwd);
+						if (!written.ok) ctx.ui.notify(`[gate] could not save the grant to ${written.file}: ${written.error}`, "error");
+						// Mirror the persisted rules into this call's own view: the second question of the same
+						// call must see the answer the human just gave, not re-ask it from a stale policy.
+						persisted.push(...toGrantRules(view.grant));
+						changed = true;
+					}
+					break;
 				}
-				state.policyChanged(withSessionGrants(policy, state.sessionGrants));
-				return;
+				case "once":
+				default:
+					break;
 			}
-			case "all_session":
-				setAllowAll(state, { until: null });
-				ctx.ui.notify("[gate] allow-everything is ON for this session — nothing will ask again, footer shows it, /gatec allow off stops it", "warning");
-				return;
-			case "all_timed":
-				setAllowAll(state, { until: now() + ALLOW_ALL_WINDOW_MS });
-				ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — nothing will ask again, /gatec allow off stops it sooner`, "warning");
-				return;
-			case "abort_reason":
-				return { block: true, reason: blockReason(decision, "user_abort", redact(answer.reason ?? "")) };
-			case "abort":
-			default:
-				return { block: true, reason: blockReason(decision, "user_abort") };
+
+			if (!changed) continue;
+			activePolicy = withSessionGrants(policy, [...state.sessionGrants, ...persisted]);
+			state.policyChanged(activePolicy);
+			decision = evaluate(facts, activePolicy);
+			// Fail closed even here: a call that ends on a deny rule after an answer is blocked, not run.
+			if (decision.action === "deny") return { block: true, reason: blockReason(decision, "policy_deny") };
+			if (decision.action === "allow") break;
 		}
+
+		if (note) rememberNote(state.pendingNotes, event.toolCallId, note);
+		return;
 	} catch (error) {
 		const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 		return { block: true, reason: `[gate] internal error: ${message}. The call was blocked (fail closed); run /gatec status.` };
@@ -210,6 +252,24 @@ export async function handleToolCall(
 export function setAllowAll(state: GateState, allowAll: AllowAll): void {
 	state.allowAll = allowAll;
 	state.allowAllChanged?.(allowAll);
+}
+
+/**
+ * The dialog's view of one question: the call narrowed to that stage's facts, floors and grant. The
+ * `facts` stay whole (the human decides on the complete call), only the rule and the explanation shown
+ * are the ones belonging to this question.
+ */
+export function stageView(decision: Decision, stage: StageDecision, question: { index: number; total: number }): Decision {
+	return {
+		...decision,
+		action: stage.action,
+		matched: stage.matched,
+		checks: stage.checks,
+		floors: stage.floors,
+		grant: stage.grant,
+		stage: stage.stage,
+		question,
+	};
 }
 
 /**
@@ -247,6 +307,7 @@ async function logit(
 		pattern: decision.matched?.pattern,
 		scope: decision.matched?.scope,
 		resolution,
+		stage: decision.stage,
 		preview: redact(displaySnippet(JSON.stringify({ surfaces: decision.facts.surfaces, paths: decision.facts.paths }))),
 		sub: sub ? { role: sub.role, taskExcerpt: displaySnippet(sub.task, 160) } : undefined,
 		floors: decision.floors,

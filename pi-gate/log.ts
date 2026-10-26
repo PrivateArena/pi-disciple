@@ -19,6 +19,8 @@ export interface LogEntry {
 	pattern?: string;
 	scope?: Scope;
 	resolution: string;
+	/** Which question of the call this line answers: `command` (what it does) or `location` (where it goes). */
+	stage?: string;
 	reason?: string;
 	sub?: { role: string; taskExcerpt: string };
 	/** The exact facts that were approved (FM-17 audit trail). */
