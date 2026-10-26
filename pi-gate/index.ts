@@ -125,7 +125,7 @@ export default function piGate(pi: ExtensionAPI) {
 			const seeded = seedConfig(resolveConfigPaths(ctx.cwd, true).globalFile);
 			ctx.ui.notify(
 				`[gate] no config file — using built-in defaults (${Object.keys(DEFAULT_GATE_CONFIG.permission).length} surfaces, bash = ask); wrote ${seeded}. ` +
-					`Edit it and run /gate reload.`,
+					`Edit it and run /gatec reload.`,
 				"info",
 			);
 			footer(ctx);
@@ -154,7 +154,7 @@ export default function piGate(pi: ExtensionAPI) {
 		applyToolVisibility(policy ?? refresh(ctx));
 	});
 
-	pi.registerCommand("gate", {
+	pi.registerCommand("gatec", {
 		description: "Permission gate: status | grants | reload | allow [off|5min|session] | reset grants [project|global] | off | on",
 		async handler(args: string, ctx: ExtensionContext) {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -218,7 +218,7 @@ export default function piGate(pi: ExtensionAPI) {
 			const current = policy ?? refresh(ctx);
 			const tools = pi.getAllTools().map((tool) => tool.name);
 			const body = [
-				`enabled: ${current.config.enabled && !disabled() ? "yes" : "no"}${pi.getFlag("no-gate") === true ? " (--no-gate)" : offForSession ? " (/gate off)" : ""}`,
+				`enabled: ${current.config.enabled && !disabled() ? "yes" : "no"}${pi.getFlag("no-gate") === true ? " (--no-gate)" : offForSession ? " (/gatec off)" : ""}`,
 				`review log: ${current.config.reviewLog ? "on" : "off"} · prompt timeout: ${current.config.promptTimeoutMs || "wait"}`,
 				`config files: ${current.files.length ? current.files.join(", ") : "none (built-in defaults)"}`,
 				`trusted project dir: ${ctx.isProjectTrusted() ? "yes" : "no (project config ignored)"}`,
@@ -229,7 +229,7 @@ export default function piGate(pi: ExtensionAPI) {
 				`bash surface: ${JSON.stringify(current.config.permission.bash ?? DEFAULT_GATE_CONFIG.permission.bash)}`,
 				current.errors.length ? `problems:\n${current.errors.map((e) => `  · ${e}`).join("\n")}` : "problems: none",
 			].join("\n");
-			await ctx.ui.editor("/gate status", body);
+			await ctx.ui.editor("/gatec status", body);
 		},
 	});
 }

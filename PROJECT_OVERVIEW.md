@@ -4,8 +4,8 @@ Two independent pi extensions, built to `ARCHITECTURE_PLAN_pi-sub-gate.md`:
 
 | Extension | One-line | Registered surface |
 | --- | --- | --- |
-| `pi-gate/` | Multi-scope permission gate for every `tool_call`, including nested subagent calls | `tool_call` handler, `/gate`, `--no-gate`, footer status |
-| `pi-subagent/` | One blocking `subagent(role, task)` tool; the child runs in-process with zero extensions | `subagent` tool, `/subagents` |
+| `pi-gate/` | Multi-scope permission gate for every `tool_call`, including nested subagent calls | `tool_call` handler, `/gatec`, `--no-gate`, footer status |
+| `pi-subagent/` | One blocking `subagent(role, task)` tool; the child runs in-process with zero extensions | `subagent` tool, `/subagentc` |
 
 They share exactly one artifact: `~/.pi/agent/extensions/pi-gate/config.json` (`gate` + `subagent` sections).
 They share no imports — `pi-subagent/config-file.ts` is a deliberate copy of `pi-gate/config-file.ts`.
@@ -32,7 +32,7 @@ pi-gate/
   prompt.ts        the 8-choice dialog → AskResult, titles, block text                     step 9
   log.ts           review.jsonl + redact()                                                step 18
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
-  index.ts         wiring: flags, footer, tool visibility, /gate                          steps 8, 9
+  index.ts         wiring: flags, footer, tool visibility, /gatec                          steps 8, 9
 pi-subagent/
   roles.ts         explore | general-purpose | review, hard-coded allowlists + budgets        step 10
   model-override.ts subagent.model pin: "provider/id" / "provider:id" / bare id -> Model     step 10
@@ -42,7 +42,8 @@ pi-subagent/
   config-file.ts   own copy of the config reader (import-free of pi-gate)                 step 20
   run.ts           globalThis run guard + result mapping (status header, truncation, card contract)  steps 15, 16
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
-  index.ts         the single `subagent` tool + /subagents                                steps 15, 16
+  config-view.ts   the /subagentc text: effective config, model resolution, roles, catalog  step 20
+  index.ts         the single `subagent` tool + /subagentc                                  steps 15, 16
 ```
 
 ## Config
@@ -55,10 +56,28 @@ config and code, pi's config files, git hooks, the project's `.pi`), shell wrapp
 directories, and any unparseable config (`degraded`). Only the hard ones — protected paths and
 `degraded` — outlive "allow everything"; see the dialog section.
 
+## Slash commands
+
+Both are suffixed `c` ("command") so they cannot collide with a prompt file or skill of the same name:
+
+| Command | Output |
+| --- | --- |
+| `/gatec [status\|grants\|reload\|allow [off\|5min\|session]\|reset grants [project\|global]\|off\|on]` | gate status editor, grant list, reload, allow-everything, clear grants, switch |
+| `/subagentc [model\|limits\|roles\|status\|models]` | the effective subagent config, or one section of it |
+
+`/subagentc` (was: "is a child running?") answers what the config actually does — the child model and
+whether it is inherited or pinned, each limit with the file that set it (`loadSubagentLimits` now records
+`origins`), the hard-coded roles with their budgets after the `subagent.maxTurns`/`timeoutMinutes` cap,
+transcript paths, the nested-call ceiling, the config files read (project vs global, trust state) and any
+parse errors. `models` lists what a `subagent.model` pin may name, flagging the session model, the
+current pin and models with no auth. `status` is the old one-line answer, which is only ever filled
+*during* a run — extension commands still run while a child blocks the session.
+
 ## Child model
 
 By default the child runs on **the model the session is on** (`ctx.model`), and the result header names
-it (`model: local/qwen3.8-flash-next (inherited)`), so the answer never depends on opening transcripts.
+it (`model: local/qwen3.8-flash-next (inherited)`), so the answer never depends on opening transcripts;
+`/subagentc model` shows the same thing before a run, including where the pin was set.
 `subagent.model` pins a different one: `"provider/id"` (pi's CLI form), `"provider:id"`, or a bare id
 (an ambiguous bare id resolves against the parent's provider, else the error names the candidates).
 Gateway ids contain slashes and colons themselves, so a prefix counts as a provider only when the
@@ -80,7 +99,7 @@ them. pi's own limits are separate and not extension-configurable: the collapsed
 20 visual lines (`ctrl+o` toggles it), and the bash tool caps what the *model* sees at 2000 lines / 50KB
 while saving the full output to a temp file (`core/tools/truncate.js`).
 
-"Allow everything" (dialog, or `/gate allow [off|5min|session]`) silences every approval in its scope:
+"Allow everything" (dialog, or `/gatec allow [off|5min|session]`) silences every approval in its scope:
 other commands, other tools — not just the call it was clicked on. It never overrides a `deny` rule, and
 it stops at the two **hard floors** — a write path to the gate's own config, pi's config files or git
 hooks, and a config file too broken to parse — because either one could switch the gate off from under
@@ -144,11 +163,15 @@ tool event keeps reporting activity.
    read-only tool floors as `protected_read`, by anything that can write as `protected_path`.
 10. `@earendil-works/pi-tui` is a peer dependency: `render.ts` needs pi's `Text` component to return a
     `Component` from `renderCall`/`renderResult`.
+11. The slash commands are `/gatec` and `/subagentc` (the plan had `/gate` and `/subagents`) — the `c`
+    keeps them clear of same-named prompt files and skills. `/subagentc` also grew from "is a child
+    running?" into the config browser: the tool blocks, so by the time a human can look, there is never
+    a running child to show.
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 203 tests, no live provider needed
+npm test            # vitest run — 243 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```

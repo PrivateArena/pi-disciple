@@ -143,11 +143,11 @@ export async function handleToolCall(
 			}
 			case "all_session":
 				setAllowAll(state, { until: null });
-				ctx.ui.notify("[gate] allow-everything is ON for this session — the footer shows it, /gate allow off stops it", "warning");
+				ctx.ui.notify("[gate] allow-everything is ON for this session — the footer shows it, /gatec allow off stops it", "warning");
 				return;
 			case "all_timed":
 				setAllowAll(state, { until: now() + ALLOW_ALL_WINDOW_MS });
-				ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — /gate allow off stops it sooner`, "warning");
+				ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — /gatec allow off stops it sooner`, "warning");
 				return;
 			case "abort_reason":
 				return { block: true, reason: blockReason(decision, "user_abort", redact(answer.reason ?? "")) };
@@ -157,7 +157,7 @@ export async function handleToolCall(
 		}
 	} catch (error) {
 		const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-		return { block: true, reason: `[gate] internal error: ${message}. The call was blocked (fail closed); run /gate status.` };
+		return { block: true, reason: `[gate] internal error: ${message}. The call was blocked (fail closed); run /gatec status.` };
 	}
 }
 
@@ -174,7 +174,7 @@ export function allowAllNote(allowAll: AllowAll | undefined, now: number): strin
 		"[gate] allow-everything is ON " +
 		scope +
 		": only the gate's own config, pi's config files and git hooks still ask, because those could switch the gate off. " +
-		"`/gate off` silences the gate itself for this run."
+		"`/gatec off` silences the gate itself for this run."
 	);
 }
 

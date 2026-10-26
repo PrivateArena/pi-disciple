@@ -151,11 +151,11 @@ describe("extension wiring keeps the switch it was given", () => {
 		expect(log.titles).toHaveLength(2);
 	});
 
-	it("turns the switch back off from /gate allow off", async () => {
+	it("turns the switch back off from /gatec allow off", async () => {
 		const { stub, log } = await boot();
 		await answer(stub, log, ALL_SESSION, call("bash", { command: "ls" }, "c1"));
 		expect(log.titles).toHaveLength(1);
-		await stub.commands.get("gate")?.handler("allow off", stubCtx(ONCE, log, stub));
+		await stub.commands.get("gatec")?.handler("allow off", stubCtx(ONCE, log, stub));
 		await answer(stub, log, ONCE, call("bash", { command: "pwd" }, "c2"));
 		expect(log.titles).toHaveLength(2);
 	});

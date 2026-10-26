@@ -143,7 +143,7 @@ export function resolveConfigPaths(cwd: string, trusted: boolean, agentDir: stri
 }
 
 // ---------------------------------------------------------------------------
-// loading (mtime-cached: step 9 and `/gate reload` see edits without a restart)
+// loading (mtime-cached: step 9 and `/gatec reload` see edits without a restart)
 // ---------------------------------------------------------------------------
 
 const cache = new Map<string, { stamp: string; policy: Policy }>();

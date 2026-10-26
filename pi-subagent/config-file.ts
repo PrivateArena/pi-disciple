@@ -17,6 +17,11 @@ export const DEFAULT_LIMITS: SubagentLimits = { enabled: true, maxTurns: 30, tim
 
 export interface LoadedLimits {
 	limits: SubagentLimits;
+	/**
+	 * Which file supplied each non-default value. `/subagentc` shows it, so a pinned model or a tightened
+	 * `maxTurns` can be traced to the global file or the project file without opening both.
+	 */
+	origins: Partial<Record<keyof SubagentLimits, string>>;
 	files: string[];
 	errors: string[];
 }
@@ -38,7 +43,7 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 	const hit = cache.get("limits");
 	if (hit && hit.stamp === stamp) return hit.loaded;
 
-	const loaded: LoadedLimits = { limits: { ...DEFAULT_LIMITS }, files: [], errors: [] };
+	const loaded: LoadedLimits = { limits: { ...DEFAULT_LIMITS }, origins: {}, files: [], errors: [] };
 	for (const file of paths) {
 		const section = readSubagentSection(file, loaded.errors);
 		if (section === undefined) continue;
@@ -51,14 +56,18 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 				continue;
 			}
 			loaded.limits = { ...loaded.limits, [key]: Math.floor(value) };
+			loaded.origins[key] = file;
 		}
 		if (section.enabled !== undefined) {
-			if (typeof section.enabled === "boolean") loaded.limits = { ...loaded.limits, enabled: section.enabled };
-			else loaded.errors.push(`${file}: subagent.enabled must be a boolean, ignored`);
+			if (typeof section.enabled === "boolean") {
+				loaded.limits = { ...loaded.limits, enabled: section.enabled };
+				loaded.origins.enabled = file;
+			} else loaded.errors.push(`${file}: subagent.enabled must be a boolean, ignored`);
 		}
 		if (section.model !== undefined) {
 			if (typeof section.model === "string" && section.model.trim()) {
 				loaded.limits = { ...loaded.limits, model: section.model.trim() };
+				loaded.origins.model = file;
 			} else loaded.errors.push(`${file}: subagent.model must be a non-empty string like "provider/id", ignored`);
 		}
 	}

@@ -12,12 +12,14 @@
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { Type } from "typebox";
 import { ROLE_ORDER, resolveRole } from "./roles.ts";
 import { buildShims, NESTED_CALL_CEILING, type ShimHost } from "./shims.ts";
 import { childSessionDir, pruneTranscripts, runChild } from "./child.ts";
 import { loadSubagentLimits } from "./config-file.ts";
 import { childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
+import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type SubagentCommandArg } from "./config-view.ts";
 import { claimGuard, composeResult, currentGuard, formatProgress, progressDetails, releaseGuard } from "./run.ts";
 import { renderSubagentCall, renderSubagentResult } from "./render.ts";
 import type { RunProgress } from "./child.ts";
@@ -163,15 +165,62 @@ export default function piSubagent(pi: ExtensionAPI) {
 		currentGuard()?.abort();
 	});
 
-	pi.registerCommand("subagents", {
-		description: "Show the running subagent, if any",
-		async handler(_args, ctx: ExtensionContext) {
-			const running = currentGuard();
-			ctx.ui.notify(
-				running
-					? `subagent: ${running.role} running for ${Math.round((Date.now() - running.startedAt) / 1000)}s (call ${running.callId})`
-					: "subagent: idle",
-				"info",
+	/**
+	 * `/subagentc` — the subagent config as it actually applies, because the interesting part of this
+	 * extension is invisible otherwise: which model a child runs on, and where that value was set.
+	 * `status` keeps the old "what is running" answer, which is only ever informative during a run.
+	 */
+	pi.registerCommand("subagentc", {
+		description: "Subagent config: (all) | model | limits | roles | status | models — the model a child runs on, effective limits, roles, pins",
+		getArgumentCompletions: (argumentPrefix: string) => {
+			if (argumentPrefix.includes(" ")) return null; // one argument only
+			return COMMAND_ARGS.filter((name) => name.startsWith(argumentPrefix)).map((value) => ({ value, label: value }));
+		},
+		async handler(args: string, ctx: ExtensionContext) {
+			const [raw = "all"] = args.trim().split(/\s+/).filter(Boolean);
+			const section = raw.toLowerCase() as SubagentCommandArg;
+			if (!COMMAND_ARGS.includes(section)) {
+				ctx.ui.notify(`[subagent] unknown section "${raw}" (expected ${COMMAND_ARGS.join(", ")})`, "warning");
+				return;
+			}
+			const loaded = loadSubagentLimits(ctx.cwd, ctx.isProjectTrusted());
+			if (section === "models") {
+				const pin = loaded.limits.model ? resolveChildModel(loaded.limits.model, ctx.modelRegistry, ctx.model) : undefined;
+				await ctx.ui.editor(
+					"pi-subagent models",
+					buildModelCatalog(ctx.modelRegistry.getAll(), {
+						sessionModel: ctx.model,
+						pinnedRef: pin?.status === "resolved" ? pin.ref : undefined,
+						available: new Set(ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`)),
+					}),
+				);
+				return;
+			}
+			if (section === "status") {
+				ctx.ui.notify(`[subagent] ${formatRunning(currentGuard())}`, "info");
+				return;
+			}
+			const reference = loaded.limits.model;
+			await ctx.ui.editor(
+				`pi-subagent ${section}`,
+				buildConfigView(
+					{
+						limits: loaded.limits,
+						origins: loaded.origins,
+						files: loaded.files,
+						defaultConfigFile: join(getAgentDir(), "extensions", "pi-gate", "config.json"),
+						errors: loaded.errors,
+						cwd: ctx.cwd,
+						trusted: ctx.isProjectTrusted(),
+						sessionModel: ctx.model,
+						thinkingLevel: ctx.thinkingLevel,
+						pin: reference ? { reference, resolution: resolveChildModel(reference, ctx.modelRegistry, ctx.model) } : undefined,
+						parentTools: pi.getActiveTools(),
+						sessionDir: ctx.sessionManager.getSessionDir(),
+						running: currentGuard(),
+					},
+					section,
+				),
 			);
 		},
 	});
