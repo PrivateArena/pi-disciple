@@ -29,6 +29,8 @@
   },
   "subagent": {
     "enabled": true,
+    "defaultRole": "general-purpose",
+    "delegationPrompt": true,
     "maxTurns": 30,
     "timeoutMinutes": 20,
     "maxResultBytes": 20000,

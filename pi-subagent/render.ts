@@ -16,6 +16,7 @@ import { keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions
 import type { Usage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import type { Exit } from "./child.ts";
+import { configuredDefaultRole, type RoleName } from "./roles.ts";
 import type { SubagentDetails } from "./run.ts";
 
 /** Glyph for the call title. pi's own tools have one per tool; this is ours. */
@@ -80,7 +81,7 @@ export function formatStatusLine(details: SubagentDetails, usage: Usage | undefi
 
 /** The identity line: what ran, on which model, and where to read the whole exchange. */
 export function formatIdentityLine(details: SubagentDetails, theme: Theme): string {
-	const parts = [`role: ${details.role}`];
+	const parts = [`role: ${details.role}${details.roleDefaulted ? " (default)" : ""}`];
 	if (details.model) parts.push(`model: ${details.model}`);
 	if (details.childSessionId) parts.push(`Agent ID: ${details.childSessionId}`);
 	if (details.nestedCalls) parts.push(`${details.nestedCalls} nested calls`);
@@ -132,9 +133,25 @@ export function formatResultBlock(
 	return `${status}${activity}${task}`;
 }
 
-/** The tool card's title line: what kind of call this is, and the task it was given. */
-export function formatCallBlock(args: { role?: string; task?: string }, theme: Theme): string {
-	const title = theme.fg("toolTitle", theme.bold(`Launch subagent${args.role ? ` · ${args.role}` : ""}`));
+/** What the call title needs beyond the args, because a title is drawn before the call is settled. */
+export interface CallTitleContext {
+	/** False while the model still streams the arguments: a role that is not there yet may still arrive. */
+	argsComplete?: boolean;
+	/** Role an unnamed call gets. Left out, the configured `subagent.defaultRole` is used. */
+	defaultRole?: RoleName;
+}
+
+/**
+ * The tool card's title line: what kind of call this is, and the task it was given.
+ *
+ * pi renders this repeatedly while the call streams in, so an absent role means two different things and
+ * says two different things here: *not yet* (arguments still arriving, so name no role the model may still
+ * choose) or *not at all* (arguments complete, so name the default that will actually run, marked as the
+ * human's choice rather than the model's).
+ */
+export function formatCallBlock(args: { role?: string; task?: string }, theme: Theme, context: CallTitleContext = {}): string {
+	const role = args.role ?? (context.argsComplete === false ? undefined : (context.defaultRole ?? configuredDefaultRole()));
+	const title = theme.fg("toolTitle", theme.bold(`Launch subagent${role ? ` · ${role}${args.role ? "" : " (default)"}` : ""}`));
 	return args.task ? `${title}\n${theme.fg("muted", args.task)}` : title;
 }
 
@@ -143,8 +160,8 @@ function textOf(result: AgentToolResult<unknown>): string {
 	return block && block.type === "text" ? block.text : "";
 }
 
-export function renderSubagentCall(args: { role?: string; task?: string }, theme: Theme): Text {
-	return new Text(formatCallBlock(args, theme), 0, 0);
+export function renderSubagentCall(args: { role?: string; task?: string }, theme: Theme, context: CallTitleContext = {}): Text {
+	return new Text(formatCallBlock(args, theme, context), 0, 0);
 }
 
 export function renderSubagentResult(

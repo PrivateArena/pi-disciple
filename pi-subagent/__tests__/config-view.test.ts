@@ -98,11 +98,23 @@ describe("/subagentc config view", () => {
 		expect(view).toContain("must be a positive number");
 	});
 
+	it("shows the default role and the delegation switch, since both change what the model gets", () => {
+		const view = buildConfigView(input({ limits: { ...DEFAULT_LIMITS, defaultRole: "explore", delegationPrompt: false } }));
+		expect(view).toContain("defaultRole");
+		expect(view).toContain("explore — what a call gets when the model names no role");
+		expect(view).toContain("delegationPrompt");
+		expect(view).toContain("off — subagent.delegationPrompt: false");
+		expect(buildConfigView(input())).toContain("delegation prompt: on");
+		// The roles list must mark the role an unnamed call actually gets.
+		expect(buildConfigView(input({ limits: { ...DEFAULT_LIMITS, defaultRole: "review" } }), "roles")).toContain("review · Critique of existing code, plans or diffs · the default for an unnamed call");
+	});
+
 	it("shows the running child, and says what \"none\" means", () => {
 		const view = buildConfigView(input({ running: { callId: "c1", role: "explore", startedAt: 1_000, abort: () => undefined }, now: 46_000 }));
 		expect(view).toContain("running: explore for 45s (call c1)");
 		expect(buildConfigView(input())).toContain("running: none");
 		expect(formatRunning(undefined)).toContain("only ever filled during a run");
+		expect(formatRunning({ callId: "c2", role: "general-purpose", defaulted: true, startedAt: 1_000, abort: () => undefined }, 2_000)).toContain("general-purpose (default role) for 1s");
 	});
 
 	it("prints one section on its own", () => {

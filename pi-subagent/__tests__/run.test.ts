@@ -52,6 +52,18 @@ describe("result mapping", () => {
 		expect(result.details.truncated).toBe(false);
 	});
 
+	it("records that the role came from the config and not from the model", () => {
+		const result = composeResult(child(), "general-purpose", 20_000, 1000, { roleDefaulted: true, task: "fix the flaky test" });
+		expect(result.details.roleDefaulted).toBe(true);
+		// A frontend switches on these, so a defaulted call must still look like a normal role.
+		expect(result.details.subagentType).toBe("general-purpose");
+		expect(result.details.displayName).toBe("General-purpose");
+		expect(result.details.status).toBe("completed");
+		// The model needs no lecture about which role it forgot to name.
+		expect((result.content[0] as { text: string }).text).not.toMatch(/default/);
+		expect(composeResult(child(), "explore", 20_000, 1000).details.roleDefaulted).toBeUndefined();
+	});
+
 	it("marks every non-done exit INCOMPLETE", () => {
 		const result = composeResult(child({ exit: "timeout", text: "partial" }), "review", 20_000, 1000);
 		expect((result.content[0] as { text: string }).text).toMatch(/INCOMPLETE \(timeout\)/);

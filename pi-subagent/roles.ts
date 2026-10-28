@@ -3,7 +3,9 @@
  * privilege-escalation primitive, and config-driven roles add a dynamic enum for no capability gain.
  */
 
-export type RoleName = "explore" | "general-purpose" | "review";
+import type { SubagentRoleName } from "../pi-gate/schema.ts";
+
+export type RoleName = SubagentRoleName;
 
 export interface Role {
 	name: RoleName;
@@ -50,6 +52,29 @@ export const ROLES: Record<RoleName, Role> = {
 
 export const ROLE_ORDER: readonly RoleName[] = ["explore", "general-purpose", "review"];
 
+/**
+ * The role an unnamed call gets (`subagent.defaultRole` decides; this is the built-in).
+ * `general-purpose` is not an escalation — its tool list is the parent's own, and the parent's gate still
+ * judges every nested call — whereas defaulting to a read-only role would silently refuse the edits a
+ * delegated task often turns out to need.
+ */
+export const DEFAULT_ROLE_NAME: RoleName = "general-purpose";
+
+let configuredDefault: RoleName = DEFAULT_ROLE_NAME;
+
+/**
+ * Remember the config's `defaultRole` for the renderers: `renderCall` gets args and a theme, never a
+ * session ctx, so it cannot read the config to say which role an unnamed call actually got. `index.ts`
+ * refreshes this where it already loads the config (`before_agent_start`, then each call).
+ */
+export function setConfiguredDefaultRole(name: RoleName): void {
+	configuredDefault = name;
+}
+
+export function configuredDefaultRole(): RoleName {
+	return configuredDefault;
+}
+
 const ALIASES: Record<string, RoleName> = {
 	general: "general-purpose",
 	generalpurpose: "general-purpose",
@@ -57,13 +82,33 @@ const ALIASES: Record<string, RoleName> = {
 	gp: "general-purpose",
 	survey: "explore",
 	critique: "review",
-	code: "review",
 };
+
+/**
+ * The canonical role a word names, or `undefined` when the word is not a role word at all (including
+ * "", a non-string, and an unknown name). The distinction is the point: an unknown name must stay
+ * untouched so the schema rejects it and the model is told the allowed values, while a missing one is what
+ * the configured default role is for.
+ */
+export function canonicalRole(input: unknown): RoleName | undefined {
+	if (typeof input !== "string") return undefined;
+	const key = input.trim().toLowerCase().replace(/[\s_-]+/g, "");
+	if (!key) return undefined;
+	return ROLE_ORDER.find((name) => name.replace(/[\s_-]+/g, "") === key) ?? ALIASES[key];
+}
 
 /** Case- and separator-tolerant role lookup; unknown names are an error, never a fallback. */
 export function resolveRole(input: string): Role | undefined {
-	const key = input.trim().toLowerCase().replace(/[\s_-]+/g, "");
-	const exact = ROLE_ORDER.find((name) => name.replace(/[\s_-]+/g, "") === key);
-	const name = exact ?? ALIASES[key];
+	const name = canonicalRole(input);
 	return name ? ROLES[name] : undefined;
+}
+
+/**
+ * The role one call actually runs: the model's word when it named a role, the human's configured default
+ * when it did not. Nothing here reads the task text — the model is the only party that knows the intent, so
+ * if it declined to choose, a keyword guess about capabilities would be a decision nobody made.
+ */
+export function resolveCallRole(input: unknown, fallback: RoleName): { role: Role; roleDefaulted: boolean } {
+	const name = canonicalRole(input);
+	return name ? { role: ROLES[name], roleDefaulted: false } : { role: ROLES[fallback], roleDefaulted: true };
 }

@@ -17,6 +17,8 @@ export const RUN_GUARD_KEY = Symbol.for("pi-subagent.run");
 export interface RunGuard {
 	callId: string;
 	role: RoleName;
+	/** The role came from `subagent.defaultRole`, not from the model. Only the UI cares. */
+	defaulted?: boolean;
 	startedAt: number;
 	abort: () => void;
 }
@@ -134,6 +136,11 @@ export interface SubagentDetails extends SubagentCardFields {
 	/** Frontend status vocabulary (see `uiStatus`); our own exit is in `exit`. */
 	status: SubagentUiStatus;
 	role: RoleName;
+	/**
+	 * The model did not name a role, so `subagent.defaultRole` decided. Carried so the card can say the
+	 * child ran on a role the human configured rather than one the model asked for.
+	 */
+	roleDefaulted?: boolean;
 	/** The settled exit; absent while the child is still running. Drives our renderer's wording. */
 	exit?: ChildResult["exit"];
 	turns: number;
@@ -169,6 +176,7 @@ export function formatProgress(progress: RunProgress, toolCount: number): string
 /** The parts of a run that do not change between progress updates. */
 export interface ProgressContext {
 	role: RoleName;
+	roleDefaulted?: boolean;
 	task: string;
 	model?: string;
 	shimTools: string[];
@@ -183,6 +191,7 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
 	return {
 		status: "running",
 		role: host.role,
+		roleDefaulted: host.roleDefaulted,
 		turns: progress.turns,
 		toolCalls: progress.toolCalls,
 		truncated: false,

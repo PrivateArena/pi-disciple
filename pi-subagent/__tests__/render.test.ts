@@ -151,10 +151,23 @@ describe("the result block", () => {
 		expect(rendered).toContain("task: survey the gate");
 	});
 
-	it("titles the call with its role", () => {
-		expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toContain("Launch subagent · explore");
-		expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toContain("survey the gate");
-		expect(formatCallBlock({}, theme)).toBe("Launch subagent");
+	it("titles the call with the role, and admits when the role is not the model's",
+		() => {
+			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toContain("Launch subagent · explore");
+			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toContain("survey the gate");
+			// pi renders this while the arguments stream in: a role that has not arrived may still arrive.
+			expect(formatCallBlock({}, theme, { argsComplete: false })).toBe("Launch subagent");
+			// Complete arguments and no role: name the role that will actually run, as the human's choice.
+			expect(formatCallBlock({}, theme, { argsComplete: true, defaultRole: "explore" })).toBe("Launch subagent · explore (default)");
+			expect(formatCallBlock({}, theme, { argsComplete: true })).toContain("(default)");
+			// A frontend that renders without a context is a settled call, not a streaming one.
+			expect(formatCallBlock({}, theme)).toContain("(default)");
+			expect(formatCallBlock({ role: "review" }, theme)).not.toContain("default");
+		});
+
+	it("marks a defaulted role on the identity line", () => {
+		expect(formatIdentityLine(details({ roleDefaulted: true }), theme)).toContain("role: explore (default)");
+		expect(formatIdentityLine(details(), theme)).not.toContain("(default)");
 	});
 
 	it("the component renders the block", () => {

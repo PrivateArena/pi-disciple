@@ -9,11 +9,20 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { canonicalRole, DEFAULT_ROLE_NAME } from "./roles.ts";
 import type { SubagentLimits } from "../pi-gate/schema.ts";
 
 export type { SubagentLimits };
 
-export const DEFAULT_LIMITS: SubagentLimits = { enabled: true, maxTurns: 30, timeoutMinutes: 20, maxResultBytes: 20000, keepTranscripts: 20 };
+export const DEFAULT_LIMITS: SubagentLimits = {
+	enabled: true,
+	defaultRole: DEFAULT_ROLE_NAME,
+	delegationPrompt: true,
+	maxTurns: 30,
+	timeoutMinutes: 20,
+	maxResultBytes: 20000,
+	keepTranscripts: 20,
+};
 
 export interface LoadedLimits {
 	limits: SubagentLimits;
@@ -29,8 +38,8 @@ export interface LoadedLimits {
 const KEYS: readonly (keyof SubagentLimits)[] = ["maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts"];
 
 /**
- * Read the numeric limits, the `enabled` switch and the `model` pin; anything else in the section is
- * ignored. A malformed value contributes an error and leaves that field at its previous value, so a
+ * Read the numeric limits, the `enabled` switch, the `model` pin, the default role and the delegation
+ * prompt switch; anything else in the section is ignored. A malformed value contributes an error and leaves that field at its previous value, so a
  * typo tightens nothing and cannot disable the tool.
  */
 
@@ -69,6 +78,20 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 				loaded.limits = { ...loaded.limits, model: section.model.trim() };
 				loaded.origins.model = file;
 			} else loaded.errors.push(`${file}: subagent.model must be a non-empty string like "provider/id", ignored`);
+		}
+		if (section.defaultRole !== undefined) {
+			// Human-authored, so alias spellings count ("gp", "survey"); an unknown word is an error, never a guess.
+			const name = canonicalRole(section.defaultRole);
+			if (name) {
+				loaded.limits = { ...loaded.limits, defaultRole: name };
+				loaded.origins.defaultRole = file;
+			} else loaded.errors.push(`${file}: subagent.defaultRole must name a role (explore, general-purpose, review), ignored`);
+		}
+		if (section.delegationPrompt !== undefined) {
+			if (typeof section.delegationPrompt === "boolean") {
+				loaded.limits = { ...loaded.limits, delegationPrompt: section.delegationPrompt };
+				loaded.origins.delegationPrompt = file;
+			} else loaded.errors.push(`${file}: subagent.delegationPrompt must be a boolean, ignored`);
 		}
 	}
 	cache.set("limits", { stamp, loaded });

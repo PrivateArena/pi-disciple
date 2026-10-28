@@ -126,6 +126,8 @@ function limitsSection(input: ConfigViewInput): string[] {
 	const limits = input.limits;
 	const rows: [key: keyof SubagentLimits, value: string][] = [
 		["enabled", limits.enabled ? "yes" : "no (the subagent tool is hidden and calls fail)"],
+		["defaultRole", `${limits.defaultRole} — what a call gets when the model names no role`],
+		["delegationPrompt", limits.delegationPrompt ? "yes (a <delegation> section tells the model when to delegate)" : "no (only the tool description guides delegation)"],
 		["maxTurns", String(limits.maxTurns)],
 		["timeoutMinutes", `${limits.timeoutMinutes}`],
 		["maxResultBytes", `${limits.maxResultBytes} (${formatBytes(limits.maxResultBytes)})`],
@@ -145,7 +147,7 @@ function rolesSection(input: ConfigViewInput): string[] {
 		const role = ROLES[name];
 		const budget = effectiveBudget(role, input.limits);
 		const capped = role.maxTurns > budget.turns || role.timeoutMinutes > budget.minutes;
-		lines.push(`  ${name} · ${role.description}`);
+		lines.push(`  ${name} · ${role.description}${name === input.limits.defaultRole ? " · the default for an unnamed call" : ""}`);
 		lines.push(`    tools: ${role.allowTools.includes("*") ? `* → ${describeParentTools(input.parentTools)}` : role.allowTools.join(", ")}`);
 		lines.push(
 			`    budget: ${role.maxTurns} turns · ${role.timeoutMinutes} min` +
@@ -161,6 +163,7 @@ function runtimeSection(input: ConfigViewInput): string[] {
 		`transcripts: ${childSessionDir(input.sessionDir)} · keeps the newest ${input.limits.keepTranscripts} per role dir`,
 		`nested calls: ${NESTED_CALL_CEILING} per child (further calls are rejected) · forbidden in children: ${FORBIDDEN_CHILD_TOOLS.join(", ")}`,
 		`one child at a time: a second subagent call fails while one runs (globalThis guard, run.ts)`,
+		`delegation prompt: ${input.limits.delegationPrompt ? "on — a <delegation> system prompt section states when to hand work to a child (subagent.delegationPrompt)" : "off — subagent.delegationPrompt: false"}`,
 	];
 }
 
@@ -172,7 +175,8 @@ function statusSection(input: ConfigViewInput): string[] {
 export function formatRunning(running: RunGuard | undefined, now: number = Date.now()): string {
 	if (!running) return "running: none (the tool is blocking, so this line is only ever filled during a run)";
 	const seconds = Math.max(0, Math.round((now - running.startedAt) / 1000));
-	return `running: ${running.role} for ${seconds}s (call ${running.callId}) · abort with Esc/Ctrl-C, which stops the child too`;
+	const role = `${running.role}${running.defaulted ? " (default role)" : ""}`;
+	return `running: ${role} for ${seconds}s (call ${running.callId}) · abort with Esc/Ctrl-C, which stops the child too`;
 }
 
 function filesSection(input: ConfigViewInput): string[] {

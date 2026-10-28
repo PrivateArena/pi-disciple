@@ -34,9 +34,10 @@ pi-gate/
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
   index.ts         wiring: flags, footer, tool visibility, /gatec                          steps 8, 9
 pi-subagent/
-  roles.ts         explore | general-purpose | review, hard-coded allowlists + budgets        step 10
+  roles.ts         explore | general-purpose | review, hard-coded allowlists + budgets, role words and the default    step 10
   model-override.ts subagent.model pin: "provider/id" / "provider:id" / bare id -> Model     step 10
   prompt.ts        child system prompt + task wrapper                                     step 11
+  delegation.ts    the `<delegation>` system prompt section: when to delegate, when not to    step 15
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
   child.ts         runChild(): assembly, timeouts, steering, transcripts, usage            steps 13, 14
   config-file.ts   own copy of the config reader (import-free of pi-gate)                 step 20
@@ -158,6 +159,43 @@ be silent. And a rule whose pattern *is* the command — what "Allow this exact 
 wrapper or destructive segment — is a decision about that command and is honoured; otherwise a grant for
 `npx vitest run` would be re-asked forever. Floors over coarse wildcards (`npx *`) still bite.
 
+## Role defaulting, and why the tool gets used at all
+
+`role` is **optional**; an unnamed call runs `subagent.defaultRole` (built in: `general-purpose`). Both earlier
+shapes cost usage: a *required* role made every omitted role a validation failure inside pi, which a model
+remembers as "this tool breaks", and *inferring* a role from the task text would let a regex decide
+capabilities that only the caller knows — the model is the one party holding the intent, and it just declined
+to name one. `general-purpose` is not an escalation: its tool list is the parent's own, and the parent's gate
+still judges each nested call, so a forgotten role adds no permission. `"defaultRole": "explore"` makes
+unnamed delegations read-only instead. Role words are canonicalized in `prepareArguments` (pi's pre-validation
+shim), so `Explore`, `General Purpose` and `gp` run rather than fail; a word that names no role (`browse`) is
+left untouched so the schema error teaches the model the enum. The old `code: "review"` alias is gone: "code"
+reads as "write code", and mapping it to the read-only role would have handed back a child that cannot do
+the task. Whatever role ran is shown as the human's decision, not the model's: `Launch subagent ·
+general-purpose (default)` on the card and `role: general-purpose (default)` in the result block — and
+`renderCall` tells "the arguments are still streaming" (`context.argsComplete`) apart from "no role arrived",
+which is what used to render a bare title.
+
+`subagent.delegationPrompt` (default `true`) adds a `<delegation>` system prompt section to each run
+(`delegation.ts`; `applyDelegationSection` in `index.ts`). It exists because the tool's own `description` is
+otherwise the only place the *reason* to delegate can live: pi renders `promptGuidelines` as flat bullets at
+the tail of `<rules>`, next to the bash and read tool mechanics — enough to say what a tool is, never enough
+to make a model reach for it. The section states when to delegate (more than about three reads or greps,
+bulky output where only a verdict matters, a bounded change described completely, a second opinion on work
+just done), when not to (one known read or edit, work the user asked to watch, the answer given to the
+user), and what a child needs (every path in `task`, because it sees none of this conversation). It is
+dropped when the tool or the switch is off, and when a handler forced the exact prompt text for the turn.
+**A `customPrompt` does not drop it** — measured with the `pi-system-prompt` package installed, which is what
+most pi setups run: pi renders a custom prompt as the `preamble` section and still appends the addendum,
+project context, skills and cwd, so a prompt package replaces pi's preamble rather than asking for silence
+from everything else. Dropping the section on `customPrompt` had it arriving nowhere at all. The text is
+stable per config, so pi's section diff sends it once and re-sends only on change.
+
+**Known structural limit, unchanged here:** one blocking child. OpenCode/Kilo-style fan-out (several explores
+at once, or background children with a result poll) is the other reason those harnesses delegate more; our
+`globalThis` guard and `executionMode: "sequential"` are load-bearing today — the shims run nested calls
+through the parent's pipeline, where the gate answers one dialog at a time.
+
 ## The tool card
 
 Two separate mechanisms feed one card, and only one of them is ours.
@@ -168,7 +206,9 @@ uses, 4.2k token).` — then `role · model · Agent ID`, the transcript path, a
 collapsed, 50 expanded, with a "more lines" hint built from the expand keybinding, never a hardcoded
 `ctrl+o`). `details.report` holds the child's answer on its own, so the card never re-parses the
 model-facing text. pi calls a renderer with `{ content, details }` only — never `usage` — which is why the
-token total is also carried in `details.tokens`.
+token total is also carried in `details.tokens`. The title has three states, because pi renders it while the
+arguments stream: role named, role not yet arrived (`Launch subagent`, nothing invented), and role not sent at
+all (`Launch subagent · general-purpose (default)`).
 
 **What a non-TUI frontend (Pendant) reads is `details`, not the renderers** — it never invokes them, so a
 correct `Text` component buys nothing there. It draws a subagent card off the field names and status
@@ -227,11 +267,20 @@ tool event keeps reporting activity.
     `answersFloor` also accepts a call whose own rules are all exact ("the human named this call"), which
     is what finally makes a protected-path call grantable from the dialog. The `degraded_config` floor is
     raised only on the command stage — a broken config is one question, not one per fact.
+15. `subagent.role` is optional, with `subagent.defaultRole` (built in: `general-purpose`) filling an unnamed
+    call, and `resolveCallRole` never reads the task text. The plan's step 15 had the parameter required.
+16. `prepareArguments` canonicalizes role spellings. pi exposes it as the compatibility hook run before
+    validation, so it is where an alias belongs — not in a widened enum the model could abuse.
+17. A `delegation` system prompt section (`subagent.delegationPrompt`), injected from `before_agent_start` by
+    mutating `event.systemPromptOptions.sections`. The plan kept pi-subagent silent on the parent's prompt;
+    without it the whole delegation policy is two `<rules>` bullets.
+18. `promptGuidelines` is three bullets, not the plan's two under 160 characters in total (each bullet is
+    under 160). The role list, the self-contained-task rule and the context argument do not fit in two.
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 275 tests, no live provider needed
+npm test            # vitest run — 299 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```

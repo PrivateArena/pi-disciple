@@ -51,6 +51,23 @@ describe("parseSubagentConfig", () => {
 		expect(bad.limits.model).toBeUndefined();
 		expect(bad.errors.join(" ")).toContain("subagent.model");
 	});
+
+	it("parses the default role and the delegation prompt switch", () => {
+		expect(parseSubagentConfig({ defaultRole: " Explore ", delegationPrompt: false }, "test").limits).toEqual({
+			defaultRole: "explore",
+			delegationPrompt: false,
+		});
+		const bad = parseSubagentConfig({ defaultRole: "browse", delegationPrompt: "yes" }, "test");
+		expect(bad.limits.defaultRole).toBeUndefined();
+		expect(bad.limits.delegationPrompt).toBeUndefined();
+		expect(bad.errors).toHaveLength(2);
+	});
+
+	it("defaults an unnamed call to general-purpose and delegates the prompt decision to config", () => {
+		// general-purpose is the parent's own tool set, so a role the model forgot adds no permission.
+		expect(DEFAULT_SUBAGENT_LIMITS.defaultRole).toBe("general-purpose");
+		expect(DEFAULT_SUBAGENT_LIMITS.delegationPrompt).toBe(true);
+	});
 });
 
 describe("defaults", () => {

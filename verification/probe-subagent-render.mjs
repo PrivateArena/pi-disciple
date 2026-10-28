@@ -88,6 +88,27 @@ attempt("renderCall(explore, task)", () => {
 	return c.render(width);
 });
 
+// pi renders the call while its arguments stream in, so a title must distinguish "role not yet sent"
+// from "role not sent at all", and name the default the run actually got in the second case.
+const titleCases = {
+	"args still streaming": { argsComplete: false },
+	"role omitted (default applies)": { argsComplete: true },
+};
+for (const [label, context] of Object.entries(titleCases)) {
+	attempt(`renderCall(${label})`, () => renderSubagentCall({ task: settledDetails.task }, theme, context).render(width));
+}
+
+const defaultedResult = composeResult(
+	{ text: "Changed 2 files.", exit: "done", turns: 6, toolCalls: 9, usage: { totalTokens: 3100 } },
+	"general-purpose",
+	64_000,
+	31_400,
+	{ task: "Rename the gate flag", model: "local/qwen3.8-flash-next (inherited)", roleDefaulted: true },
+);
+attempt("renderResult(role defaulted)", () =>
+	renderSubagentResult(asSeenByFrontend(defaultedResult), { expanded: false, isPartial: false }, theme).render(width),
+);
+
 for (const expanded of [false, true]) {
 	attempt(`renderResult(settled, expanded=${expanded})`, () =>
 		renderSubagentResult(asSeenByFrontend(settledResult), { expanded, isPartial: false }, theme).render(width),

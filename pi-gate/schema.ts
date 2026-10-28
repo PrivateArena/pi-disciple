@@ -59,6 +59,13 @@ export interface GateConfig {
 	permission: Record<string, Action | Record<string, Action>>;
 }
 
+/**
+ * Role names, as a literal union here so this file keeps importing nothing: `pi-subagent/roles.ts`
+ * makes this its `RoleName`, and a drift test in `roles.test.ts` pins the union to the roles that
+ * actually exist. A *human* writes these in the config; the model never chooses them from config.
+ */
+export type SubagentRoleName = "explore" | "general-purpose" | "review";
+
 export interface SubagentLimits {
 	/** Master switch for the `subagent` tool (`subagent.enabled`). */
 	enabled: boolean;
@@ -72,6 +79,20 @@ export interface SubagentLimits {
 	 * the tool itself still takes no model parameter.
 	 */
 	model?: string;
+	/**
+	 * The role a call gets when the model does not name one (`subagent.defaultRole`).
+	 *
+	 * `general-purpose` is the shipped default because it is not an escalation: its tool list is "whatever
+	 * the parent can call right now", and every nested call is gated by the parent's policy anyway. Set it
+	 * to `explore` to make unnamed delegations read-only, i.e. least privilege by default.
+	 */
+	defaultRole: SubagentRoleName;
+	/**
+	 * Add the `delegation` system prompt section ("when to hand work to a child") to runs of this session
+	 * (`subagent.delegationPrompt`). Without it the only guidance the model gets is the tool's own
+	 * description and two `<rules>` bullets, which is why the tool goes unused.
+	 */
+	delegationPrompt: boolean;
 }
 
 /** Matches the shipped default config block in the plan (step 17). */
@@ -108,6 +129,8 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 
 export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
 	enabled: true,
+	defaultRole: "general-purpose",
+	delegationPrompt: true,
 	maxTurns: 30,
 	timeoutMinutes: 20,
 	maxResultBytes: 20000,
@@ -227,6 +250,14 @@ export interface ParsedSubagentConfig {
 
 const SUBAGENT_NUMBER_KEYS = ["maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts"] as const satisfies readonly (keyof SubagentLimits)[];
 
+const SUBAGENT_ROLE_WORDS: readonly SubagentRoleName[] = ["explore", "general-purpose", "review"];
+
+/** Case- and separator-tolerant role lookup for config text (mirrors `pi-subagent/roles.ts`). */
+function normalizeRoleWord(input: string): SubagentRoleName | undefined {
+	const key = input.trim().toLowerCase().replace(/[\s_-]+/g, "");
+	return SUBAGENT_ROLE_WORDS.find((name) => name.replace(/[\s_-]+/g, "") === key);
+}
+
 /** Parse the `subagent` section of one config file. Never throws. */
 export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubagentConfig {
 	const errors: string[] = [];
@@ -252,6 +283,15 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 	if (raw.model !== undefined) {
 		if (typeof raw.model === "string" && raw.model.trim()) limits.model = raw.model.trim();
 		else errors.push(`${where}: subagent.model must be a non-empty string like "provider/id", ignored`);
+	}
+	if (raw.defaultRole !== undefined) {
+		const name = typeof raw.defaultRole === "string" ? normalizeRoleWord(raw.defaultRole) : undefined;
+		if (name) limits.defaultRole = name;
+		else errors.push(`${where}: subagent.defaultRole must name a role (${SUBAGENT_ROLE_WORDS.join(", ")}), ignored`);
+	}
+	if (raw.delegationPrompt !== undefined) {
+		if (typeof raw.delegationPrompt === "boolean") limits.delegationPrompt = raw.delegationPrompt;
+		else errors.push(`${where}: subagent.delegationPrompt must be a boolean, ignored`);
 	}
 	return { limits, errors };
 }

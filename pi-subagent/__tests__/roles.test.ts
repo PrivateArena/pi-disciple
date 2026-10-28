@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { resolveRole, ROLES, ROLE_ORDER } from "../roles.ts";
+import { canonicalRole, DEFAULT_ROLE_NAME, resolveCallRole, resolveRole, ROLES, ROLE_ORDER } from "../roles.ts";
 import { buildChildSystemPrompt, CHILD_TASK_WRAPPER } from "../prompt.ts";
-import { DEFAULT_SUBAGENT_LIMITS } from "../../pi-gate/schema.ts";
+import { DEFAULT_SUBAGENT_LIMITS, parseSubagentConfig } from "../../pi-gate/schema.ts";
 
 describe("roles", () => {
 	it("resolves case and separator variants", () => {
@@ -9,6 +9,41 @@ describe("roles", () => {
 		expect(resolveRole(" GENERAL-PURPOSE ")?.name).toBe("general-purpose");
 		expect(resolveRole("general purpose")?.name).toBe("general-purpose");
 		expect(resolveRole("nope")).toBeUndefined();
+	});
+
+	it("canonicalizes the words that name a role and nothing else", () => {
+		expect(canonicalRole("Explore")).toBe("explore");
+		expect(canonicalRole("general_purpose")).toBe("general-purpose");
+		expect(canonicalRole("gp")).toBe("general-purpose");
+		expect(canonicalRole("survey")).toBe("explore");
+		expect(canonicalRole("critique")).toBe("review");
+		// Not role words: they must stay untouched so the schema names the allowed values to the model.
+		expect(canonicalRole("browse")).toBeUndefined();
+		expect(canonicalRole("")).toBeUndefined();
+		expect(canonicalRole("   ")).toBeUndefined();
+		expect(canonicalRole(undefined)).toBeUndefined();
+		expect(canonicalRole(null)).toBeUndefined();
+		expect(canonicalRole(7)).toBeUndefined();
+		// "code" reads as "write code", which is general-purpose; mapping it to review would silently
+		// hand back a read-only child for a task that asked for edits.
+		expect(canonicalRole("code")).toBeUndefined();
+	});
+
+	it("gives an unnamed call the configured default role and says it did", () => {
+		expect(DEFAULT_ROLE_NAME).toBe("general-purpose");
+		expect(DEFAULT_SUBAGENT_LIMITS.defaultRole).toBe(DEFAULT_ROLE_NAME);
+		expect(resolveCallRole("explore", "general-purpose")).toEqual({ role: ROLES.explore, roleDefaulted: false });
+		expect(resolveCallRole(undefined, "explore")).toEqual({ role: ROLES.explore, roleDefaulted: true });
+		expect(resolveCallRole("  ", "review").role.name).toBe("review");
+		// The default is a role that exists, or every unnamed call would die inside runChild.
+		for (const name of ROLE_ORDER) expect(resolveCallRole(undefined, name).role.name).toBe(name);
+	});
+
+	it("keeps the gate's config vocabulary in step with the roles that exist", () => {
+		// The union lives in pi-gate/schema.ts and the roles live here; a name added to one and not the
+		// other would make `subagent.defaultRole` unspellable, so both directions are pinned.
+		for (const name of ROLE_ORDER) expect(parseSubagentConfig({ defaultRole: name }, "test").limits.defaultRole).toBe(name);
+		expect(Object.keys(ROLES).sort()).toEqual([...ROLE_ORDER].sort());
 	});
 
 	it("has the budgets the plan specifies", () => {
