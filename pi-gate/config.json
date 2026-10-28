@@ -25,10 +25,15 @@
         "*": "ask"
       },
       "subagent": "allow"
+    },
+    "grants": {
+      "global": [],
+      "project": []
     }
   },
   "subagent": {
     "enabled": true,
+    "model": "inherit",
     "defaultRole": "general-purpose",
     "delegationPrompt": true,
     "maxTurns": 30,

@@ -1,20 +1,19 @@
 /**
  * pi-subagent — one blocking `subagent(role, task)` tool (plan steps 15 and 16).
  *
- * Two parameters only: a model-chosen tool list or timeout would be a privilege-escalation
- * primitive, and roles are hard-coded (see the plan's key decisions). The call blocks until the child
- * finishes, returns its final message, and reports the child's token usage so pi folds it into the
- * footer and `/session` totals.
+ * Two parameters only: a model-chosen tool list or timeout would be a privilege-escalation primitive, and
+ * the role table — built-in plus `subagent.roles` — is human-authored, so the model still only names a role.
+ * The call blocks until the child finishes, returns its final message, and reports the child's token usage so
+ * pi folds it into the footer and `/session` totals.
  *
  * Permission checks are not implemented here at all: the child's tools are shims onto the parent's
  * `ctx.executeTool()`, so every nested call runs in the parent's tool pipeline, where pi-gate lives.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { type Static, Type } from "typebox";
-import { canonicalRole, type RoleName, resolveCallRole, ROLE_ORDER, setConfiguredDefaultRole } from "./roles.ts";
+import { canonicalRole, type RoleId, resolveCallRole, ROLE_ORDER, setConfiguredDefaultRole, type RoleTable } from "./roles.ts";
 import { buildShims, NESTED_CALL_CEILING, type ShimHost } from "./shims.ts";
 import { childSessionDir, pruneTranscripts, runChild } from "./child.ts";
 import { loadSubagentLimits } from "./config-file.ts";
@@ -33,13 +32,31 @@ type ToolArgs = Static<typeof parameters>;
 const parameters = Type.Object({
 	// Optional on purpose. A required role made every unnamed call a schema error, which teaches a model
 	// that this tool is fragile; an unnamed call now gets the configured default role, visibly, in the card.
+	//
+	// A string, not an enum: the legal names come from the config (`subagent.roles`), which is read per call,
+	// while a registered schema is fixed for the process — a stale enum would refuse a role the human had just
+	// added. `execute` refuses a name no role answers to and lists the ones that do. Built-ins stay in the
+	// description, which is where a model actually looks.
 	role: Type.Optional(
-		StringEnum([...ROLE_ORDER], {
-			description: "explore = read-only survey, general-purpose = the parent's own tool set, review = critique only. Omit it for general-purpose.",
+		Type.String({
+			description: `explore = read-only survey, general-purpose = the parent's own tool set, review = critique only${
+				extraRoleHint() ? `, and subagent.roles in the config adds ${extraRoleHint()}` : ", plus any role the config defines under subagent.roles"
+			}. Omit it for the configured default role. Any other name is refused, and the error lists the roles that exist.`,
 		}),
 	),
 	task: Type.String({ description: "Self-contained brief; the child sees no conversation history, so put every file path, symbol and constraint in the text" }),
 });
+
+/** Role names beyond the built-ins that the global config adds, for the parameter description. */
+function extraRoleHint(): string {
+	try {
+		return Object.keys(loadSubagentLimits(process.cwd(), false).effectiveRoles)
+			.filter((name) => !ROLE_ORDER.some((builtIn) => builtIn === name))
+			.join(", ");
+	} catch {
+		return "";
+	}
+}
 
 /**
  * Canonicalize a role the model spelled loosely ("Explore", "general purpose", "gp"). An unknown word is
@@ -77,13 +94,14 @@ interface PromptSectionsLike {
  */
 export function applyDelegationSection(
 	options: PromptSectionsLike,
-	limits: { enabled: boolean; delegationPrompt: boolean; defaultRole: RoleName },
+	limits: { enabled: boolean; delegationPrompt: boolean; defaultRole: RoleId },
+	roles?: RoleTable,
 ): string {
 	if (!limits.enabled || !limits.delegationPrompt || options.forceSystemPrompt) {
 		delete options.sections[DELEGATION_SECTION];
 		return "";
 	}
-	const text = buildDelegationSection({ defaultRole: limits.defaultRole });
+	const text = buildDelegationSection({ defaultRole: limits.defaultRole, roles });
 	options.sections[DELEGATION_SECTION] = text;
 	return text;
 }
@@ -123,7 +141,12 @@ export default function piSubagent(pi: ExtensionAPI) {
 
 			// An unnamed call gets the human's configured default, never a guess about the task text: only the
 			// model knows the intent, and it just declined to choose. `roleDefaulted` is carried so the card admits it.
-			const { role, roleDefaulted: defaulted } = resolveCallRole(args.role, limits.defaultRole);
+			// The table is the effective one, so a role added under `subagent.roles` is callable the same way.
+			const roles = loaded.effectiveRoles;
+			const { role, roleDefaulted: defaulted } = resolveCallRole(args.role, limits.defaultRole, roles);
+			if (!role) {
+				throw new Error(`pi-subagent: role "${String(args.role)}" names no role; use one of ${Object.keys(roles).join(", ")} (or omit it for "${limits.defaultRole}")`);
+			}
 			setConfiguredDefaultRole(limits.defaultRole);
 			const roleForRun = {
 				...role,
@@ -224,7 +247,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 			pi.setActiveTools([...active, "subagent"]);
 		}
 		setConfiguredDefaultRole(loaded.limits.defaultRole);
-		applyDelegationSection(event.systemPromptOptions, loaded.limits);
+		applyDelegationSection(event.systemPromptOptions, loaded.limits, loaded.effectiveRoles);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -273,6 +296,8 @@ export default function piSubagent(pi: ExtensionAPI) {
 					{
 						limits: loaded.limits,
 						origins: loaded.origins,
+						effectiveRoles: loaded.effectiveRoles,
+						roleOrigins: loaded.roleOrigins,
 						files: loaded.files,
 						defaultConfigFile: join(getAgentDir(), "extensions", "pi-gate", "config.json"),
 						errors: loaded.errors,

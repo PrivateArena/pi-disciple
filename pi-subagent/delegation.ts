@@ -11,7 +11,7 @@
  * Pure string building; `index.ts` decides whether to inject it.
  */
 
-import { ROLE_ORDER, ROLES, type RoleName } from "./roles.ts";
+import { ROLES, type RoleId, type RoleTable } from "./roles.ts";
 
 /** Section name in pi's structured system prompt (`^[a-z][a-z0-9_-]*$`). */
 export const DELEGATION_SECTION = "delegation";
@@ -21,19 +21,28 @@ export const DELEGATION_WORD_BUDGET = 260;
 
 export interface DelegationPromptInput {
 	/** The role an unnamed call gets, from config, so the section never contradicts the tool. */
-	defaultRole: RoleName;
+	defaultRole: RoleId;
+	/** The effective table, so a role added under `subagent.roles` is described to the model too. */
+	roles?: RoleTable;
 }
 
-/** One line per role, named the way the tool's enum names them. */
-function roleLines(defaultRole: RoleName): string[] {
-	return ROLE_ORDER.map((name) => {
-		const role = ROLES[name];
+/** Roles the section lists: the word budget is a real limit, and an unnamed role is unhelpful to list. */
+const MAX_LISTED_ROLES = 8;
+
+/** One line per role, named the way the tool accepts them. */
+function roleLines(defaultRole: RoleId, roles: RoleTable): string[] {
+	const names = Object.keys(roles).filter((name) => roles[name].description);
+	const listed = names.slice(0, MAX_LISTED_ROLES);
+	const lines = listed.map((name) => {
+		const role = roles[name];
 		const tools = role.allowTools.includes("*") ? "may edit" : "reads only";
 		return `- ${name}: ${role.description.toLowerCase()} (${tools})${name === defaultRole ? " — what an unnamed call gets" : ""}`;
 	});
+	if (names.length > listed.length) lines.push(`- ${names.length - listed.length} more role(s) defined by the config: ${names.slice(MAX_LISTED_ROLES).join(", ")}`);
+	return lines;
 }
 
-export function buildDelegationSection({ defaultRole }: DelegationPromptInput): string {
+export function buildDelegationSection({ defaultRole, roles = ROLES }: DelegationPromptInput): string {
 	return [
 		"Delegate the work you would otherwise do by filling your own context.",
 		"Reach for `subagent` when:",
@@ -48,7 +57,7 @@ export function buildDelegationSection({ defaultRole }: DelegationPromptInput): 
 		"- say what to report back: file:line, a verdict plus evidence, the exact changes made;",
 		"- the call blocks, and one runs at a time; the child's own calls go through this session's permission checks;",
 		"- roles:",
-		...roleLines(defaultRole).map((line) => `  ${line}`),
+		...roleLines(defaultRole, roles).map((line) => `  ${line}`),
 	].join("\n");
 }
 

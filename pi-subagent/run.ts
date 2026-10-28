@@ -6,7 +6,7 @@
 import { truncateHead, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ChildResult, Exit, RunProgress } from "./child.ts";
-import type { RoleName } from "./roles.ts";
+import type { RoleId } from "./roles.ts";
 
 /**
  * One child at a time, stored on `globalThis` under a well-known symbol so a `/reload` — which
@@ -16,7 +16,7 @@ export const RUN_GUARD_KEY = Symbol.for("pi-subagent.run");
 
 export interface RunGuard {
 	callId: string;
-	role: RoleName;
+	role: RoleId;
 	/** The role came from `subagent.defaultRole`, not from the model. Only the UI cares. */
 	defaulted?: boolean;
 	startedAt: number;
@@ -101,7 +101,7 @@ export interface SubagentCardFields {
 	/** Human-readable role, e.g. `Explore`. */
 	displayName: string;
 	/** The role id, e.g. `explore`. */
-	subagentType: RoleName;
+	subagentType: RoleId;
 	/** What was asked of the child, clipped. */
 	description: string;
 	toolUses: number;
@@ -116,7 +116,7 @@ export interface SubagentCardFields {
 
 /** The card fields for one state of a run. */
 export function cardFields(
-	host: { role: RoleName; task: string; model?: string },
+	host: { role: RoleId; task: string; model?: string },
 	run: { toolCalls: number; elapsedMs: number; agentId?: string; usage?: Usage; report?: string },
 ): SubagentCardFields {
 	return {
@@ -135,7 +135,7 @@ export function cardFields(
 export interface SubagentDetails extends SubagentCardFields {
 	/** Frontend status vocabulary (see `uiStatus`); our own exit is in `exit`. */
 	status: SubagentUiStatus;
-	role: RoleName;
+	role: RoleId;
 	/**
 	 * The model did not name a role, so `subagent.defaultRole` decided. Carried so the card can say the
 	 * child ran on a role the human configured rather than one the model asked for.
@@ -175,7 +175,7 @@ export function formatProgress(progress: RunProgress, toolCount: number): string
 
 /** The parts of a run that do not change between progress updates. */
 export interface ProgressContext {
-	role: RoleName;
+	role: RoleId;
 	roleDefaulted?: boolean;
 	task: string;
 	model?: string;
@@ -211,7 +211,7 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
  */
 export function composeResult(
 	result: ChildResult,
-	role: RoleName,
+	role: RoleId,
 	maxResultBytes: number,
 	elapsedMs: number,
 	extra: Partial<SubagentDetails> = {},

@@ -120,7 +120,7 @@ describe("/subagentc config view", () => {
 	it("prints one section on its own", () => {
 		const view = buildConfigView(input(), "model");
 		expect(view.startsWith("pi-subagent · model")).toBe(true);
-		expect(view).not.toContain("roles (hard-coded");
+		expect(view).not.toContain("roles (built-ins");
 		expect(view).toContain("config files read");
 	});
 

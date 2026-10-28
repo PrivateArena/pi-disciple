@@ -11,6 +11,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import piSubagent from "../index.ts";
+import { ROLES_SECTION_HEADER } from "../config-view.ts";
 import { claimGuard, releaseGuard } from "../run.ts";
 
 const model = (provider: string, id: string, reasoning = true): Model<any> =>
@@ -90,13 +91,13 @@ describe("/subagentc", () => {
 		expect(title).toBe("pi-subagent all");
 		expect(body).toContain("child model: kilo/kilo-auto/free (pinned by subagent.model)");
 		expect(body).toContain("maxTurns");
-		expect(body).toContain("roles (hard-coded in roles.ts");
+		expect(body).toContain(ROLES_SECTION_HEADER);
 		expect(body).toContain(join(where.agentDir, "extensions", "pi-gate", "config.json"));
 	});
 
 	it("routes each section to its own view", async () => {
 		const where = fixture({ subagent: { model: "kilo/kilo-auto/free" } });
-		expect((await run("model", where)).body).not.toContain("roles (hard-coded");
+		expect((await run("model", where)).body).not.toContain("roles (built-ins");
 		expect((await run("roles", where)).body).toContain("general-purpose");
 		expect((await run("limits", where)).body).toContain("maxResultBytes");
 	});

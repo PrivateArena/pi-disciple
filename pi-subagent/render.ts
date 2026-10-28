@@ -16,7 +16,7 @@ import { keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions
 import type { Usage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import type { Exit } from "./child.ts";
-import { configuredDefaultRole, type RoleName } from "./roles.ts";
+import { configuredDefaultRole, type RoleId } from "./roles.ts";
 import type { SubagentDetails } from "./run.ts";
 
 /** Glyph for the call title. pi's own tools have one per tool; this is ours. */
@@ -138,7 +138,7 @@ export interface CallTitleContext {
 	/** False while the model still streams the arguments: a role that is not there yet may still arrive. */
 	argsComplete?: boolean;
 	/** Role an unnamed call gets. Left out, the configured `subagent.defaultRole` is used. */
-	defaultRole?: RoleName;
+	defaultRole?: RoleId;
 }
 
 /**

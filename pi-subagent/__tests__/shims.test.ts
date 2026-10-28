@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
 import type { AgentToolCallOutcome } from "@earendil-works/pi-agent-core";
 import { buildShims, createQueue, FORBIDDEN_CHILD_TOOLS, isDeniedByLimit, NESTED_CALL_CEILING } from "../shims.ts";
-import { ROLES } from "../roles.ts";
+import { ROLES, applyRoleConfig } from "../roles.ts";
 import type { ShimHost } from "../shims.ts";
 
 const tool = (name: string, extra: Partial<AgentTool> = {}): AgentTool =>
@@ -45,6 +45,26 @@ describe("buildShims", () => {
 		const host: ShimHost = { parentCallId: "P", executeTool: async () => outcome("ok") };
 		const names = buildShims(parentTools, ROLES.explore, host).map((shim) => shim.name).sort();
 		expect(names).toEqual(["bash", "grep", "read"]);
+	});
+
+	it("builds the shims a config-defined role asked for, and only those", () => {
+		const host: ShimHost = { parentCallId: "P", executeTool: async () => outcome("ok") };
+		const roles = applyRoleConfig({ auditor: { tools: ["read", "grep", "subagent"] }, wildcard: { tools: ["*"] } });
+		expect(buildShims(parentTools, roles.roles.auditor!, host).map((shim) => shim.name).sort()).toEqual(["grep", "read"]);
+		// A config role may ask for "*", which still cannot reach an escape hatch.
+		const wide = buildShims(parentTools, roles.roles.wildcard!, host).map((shim) => shim.name);
+		for (const forbidden of FORBIDDEN_CHILD_TOOLS) expect(wide).not.toContain(forbidden);
+	});
+
+	it("builds the shims a config-defined role asked for, and only those", () => {
+		const host: ShimHost = { parentCallId: "P", executeTool: async () => outcome("ok") };
+		const roles = applyRoleConfig({ auditor: { tools: ["read", "grep", "subagent"] }, wide: { tools: ["*"] } });
+		// The forbidden name in the list is stripped, so a config role cannot hand the child a second subagent.
+		expect(buildShims(parentTools, roles.roles.auditor!, host).map((shim) => shim.name).sort()).toEqual(["grep", "read"]);
+		// A config role may ask for "*", which still stops at the escape hatches.
+		const wide = buildShims(parentTools, roles.roles.wide!, host).map((shim) => shim.name);
+		for (const forbidden of FORBIDDEN_CHILD_TOOLS) expect(wide).not.toContain(forbidden);
+		expect(wide).toContain("write");
 	});
 
 	it("throws rather than handing the child the real built-ins (FM-1)", () => {

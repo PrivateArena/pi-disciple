@@ -15,7 +15,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { childThinkingLevel } from "./model-override.ts";
 import type { ChildModelResolution } from "./model-override.ts";
 import { FORBIDDEN_CHILD_TOOLS, NESTED_CALL_CEILING } from "./shims.ts";
-import { ROLES, ROLE_ORDER, type Role } from "./roles.ts";
+import { ROLES, type Role, type RoleTable } from "./roles.ts";
 import { childSessionDir } from "./child.ts";
 import type { SubagentLimits } from "./config-file.ts";
 import type { RunGuard } from "./run.ts";
@@ -31,6 +31,10 @@ export interface ConfigViewInput {
 	limits: SubagentLimits;
 	/** Which file last set each value, straight from `loadSubagentLimits`; missing = built-in default. */
 	origins?: Partial<Record<keyof SubagentLimits, string>>;
+	/** The effective table: built-ins edited by `subagent.roles`, plus any new roles. */
+	effectiveRoles?: RoleTable;
+	/** Which config file defined or edited each role; missing = `roles.ts`. */
+	roleOrigins?: Record<string, string>;
 	files: string[];
 	/** Where the section would live if no file had it yet: `<agentDir>/extensions/pi-gate/config.json`. */
 	defaultConfigFile: string;
@@ -133,6 +137,7 @@ function limitsSection(input: ConfigViewInput): string[] {
 		["maxResultBytes", `${limits.maxResultBytes} (${formatBytes(limits.maxResultBytes)})`],
 		["keepTranscripts", `${limits.keepTranscripts} per role dir`],
 		["model", limits.model ? `"${limits.model}"` : "(unset — inherit the session model)"],
+		["roles", limits.roles ? `${Object.keys(limits.roles).join(", ")} — see the roles section below` : "(none — the three built-ins in roles.ts)"],
 	];
 	const width = Math.max(...rows.map(([key]) => key.length));
 	return [
@@ -141,13 +146,22 @@ function limitsSection(input: ConfigViewInput): string[] {
 	];
 }
 
+/** Stable marker for the roles block, shared with the command tests. */
+export const ROLES_SECTION_HEADER = "roles (built-ins in roles.ts, edited or extended by subagent.roles in the config):";
+
+function isBuiltInRole(name: string): boolean {
+	return Object.prototype.hasOwnProperty.call(ROLES, name);
+}
+
 function rolesSection(input: ConfigViewInput): string[] {
-	const lines: string[] = ["roles (hard-coded in roles.ts — not configurable):"];
-	for (const name of ROLE_ORDER) {
-		const role = ROLES[name];
+	const table: RoleTable = input.effectiveRoles ?? (ROLES as RoleTable);
+	const lines: string[] = [ROLES_SECTION_HEADER];
+	for (const name of Object.keys(table)) {
+		const role = table[name]!;
 		const budget = effectiveBudget(role, input.limits);
 		const capped = role.maxTurns > budget.turns || role.timeoutMinutes > budget.minutes;
-		lines.push(`  ${name} · ${role.description}${name === input.limits.defaultRole ? " · the default for an unnamed call" : ""}`);
+		const origin = input.roleOrigins?.[name] ?? (isBuiltInRole(name) ? "roles.ts" : "subagent.roles");
+		lines.push(`  ${name} · ${role.description}${name === input.limits.defaultRole ? " · the default for an unnamed call" : ""}  ·  from ${origin}`);
 		lines.push(`    tools: ${role.allowTools.includes("*") ? `* → ${describeParentTools(input.parentTools)}` : role.allowTools.join(", ")}`);
 		lines.push(
 			`    budget: ${role.maxTurns} turns · ${role.timeoutMinutes} min` +
@@ -155,6 +169,7 @@ function rolesSection(input: ConfigViewInput): string[] {
 		);
 		lines.push(`    prompt: ${role.prompt}`);
 	}
+	lines.push('  edit or add a role under "roles" in the config: { "tools": [...], "maxTurns": n, "timeoutMinutes": n, "description": "...", "prompt": "..." }');
 	return lines;
 }
 

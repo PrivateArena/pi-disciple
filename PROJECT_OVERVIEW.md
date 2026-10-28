@@ -34,13 +34,13 @@ pi-gate/
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
   index.ts         wiring: flags, footer, tool visibility, /gatec                          steps 8, 9
 pi-subagent/
-  roles.ts         explore | general-purpose | review, hard-coded allowlists + budgets, role words and the default    step 10
+  roles.ts         explore | general-purpose | review + applyRoleConfig: config edits them, new ones join the table    step 10
   model-override.ts subagent.model pin: "provider/id" / "provider:id" / bare id -> Model     step 10
   prompt.ts        child system prompt + task wrapper                                     step 11
   delegation.ts    the `<delegation>` system prompt section: when to delegate, when not to    step 15
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
   child.ts         runChild(): assembly, timeouts, steering, transcripts, usage            steps 13, 14
-  config-file.ts   own copy of the config reader (import-free of pi-gate)                 step 20
+  config-file.ts   own copy of the config reader: limits, model pin, `roles` table        step 20
   run.ts           globalThis run guard + result mapping (status header, truncation, card contract)  steps 15, 16
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
   config-view.ts   the /subagentc text: effective config, model resolution, roles, catalog  step 20
@@ -52,6 +52,25 @@ pi-subagent/
 `pi-gate/config.json` is the shipped default. Scopes, lowest precedence first: built-in defaults →
 global file → project file (only when the cwd is trusted) → `grants.global` → `grants.project` →
 session grants. Within a surface, the **last matching pattern wins**; across facts, most-restrictive wins.
+
+The `subagent` section is every knob the child has. `model` takes a `provider/id` pin, or one of the inherit
+words (`inherit`, `session`, `parent`, `default`) which mean "no pin" — that is how the shipped file shows
+the key without pinning anything. `maxTurns` / `timeoutMinutes` here are **ceilings**: a run gets
+`min(role, subagent)` turns and minutes, so the section can tighten a role and the shipped 30/20 caps the
+40-turn `general-purpose` role to 30 until you raise it.
+
+`subagent.roles` is the role table: an entry naming a built-in edits it field by field (`tools`, `maxTurns`,
+`timeoutMinutes`, `description`, `prompt`), and an entry naming anything else **adds a role** — which then
+appears in the `<delegation>` prompt section, in `/subagentc roles` with the file it came from, and is
+callable as `subagent(role: "that-name")`. A new role must declare `tools` (an implicit `"*"` would make
+adding a role an escalation by accident), and its list is filtered against `FORBIDDEN_CHILD_TOOLS` whatever
+it asks for. Names are `[a-z][a-z0-9_-]{0,31}` and matched case/separator-insensitively, so `Senior Reviewer`
+finds `senior_reviewer`; two ids that fold together are refused at the parse. Nothing shipped edits or adds a
+role, because a written `tools` list is live privilege rather than documentation — `/subagentc roles` prints
+the built-ins with the shape to copy.
+
+The model still never supplies a tool list: it names a role, and every name in the table is human-authored,
+after the parent's gate floored config edits to `ask`.
 
 **Except when two facts name the same thing.** An `edit` of `/x/a.ts` and the `path` fact `/x/a.ts` are
 one location described twice, so they are judged once, by the most **specific** rule about them: a

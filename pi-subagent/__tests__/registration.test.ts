@@ -17,7 +17,7 @@ import type { TSchema } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piSubagent, { applyDelegationSection, prepareRoleArgs } from "../index.ts";
 import { buildDelegationSection, DELEGATION_SECTION, delegationSectionWords, DELEGATION_WORD_BUDGET } from "../delegation.ts";
-import { ROLE_ORDER } from "../roles.ts";
+import { ROLE_ORDER, applyRoleConfig } from "../roles.ts";
 import { loadSubagentLimits, DEFAULT_LIMITS } from "../config-file.ts";
 
 interface RegisteredTool {
@@ -100,11 +100,15 @@ describe("the subagent tool declaration", () => {
 		expect((tool.parameters as { required?: string[] }).required).toEqual(["task"]);
 	});
 
-	it("still refuses a role word that names no role", () => {
+	it("accepts any role word at the schema, because the table comes from the config", () => {
+		// A registered schema is fixed for the process while `subagent.roles` is re-read per call, so an enum
+		// would refuse a role the human had just added. `execute` refuses an unknown name and lists the real ones.
 		const check = Compile(tool.parameters);
-		expect(check.Check({ role: "browse", task: "x" })).toBe(false);
-		const errors = [...check.Errors({ role: "browse", task: "x" })].map((error) => JSON.stringify(error.params));
-		expect(errors.join(" ")).toContain("explore");
+		expect(check.Check({ role: "browse", task: "x" })).toBe(true);
+		expect(check.Check({ role: 7, task: "x" })).toBe(false);
+		const description = JSON.stringify(tool.parameters);
+		for (const name of ROLE_ORDER) expect(description).toContain(name);
+		expect(description).toContain("subagent.roles");
 	});
 
 	it("canonicalizes the role spellings a model produces before validation", () => {
@@ -200,6 +204,28 @@ describe("config for the new keys", () => {
 		const loaded = withLimits({ subagent: { defaultRole: "browse" } })();
 		expect(loaded.limits.defaultRole).toBe(DEFAULT_LIMITS.defaultRole);
 		expect(loaded.errors.join(" ")).toContain("defaultRole");
+	});
+
+	it("takes a default role and the prompt's role list from subagent.roles", () => {
+		const loaded = withLimits({ subagent: { defaultRole: "auditor", roles: { auditor: { tools: ["read", "grep"], description: "Compliance read-through" } } } })();
+		expect(loaded.errors).toEqual([]);
+		expect(loaded.limits.defaultRole).toBe("auditor");
+		const text = buildDelegationSection({ defaultRole: loaded.limits.defaultRole, roles: loaded.effectiveRoles });
+		expect(text).toContain("auditor: compliance read-through (reads only) — what an unnamed call gets");
+		// The budget bounds the shipped section; a role the human added costs one line, which is bounded here.
+		const builtIn = delegationSectionWords(buildDelegationSection({ defaultRole: "general-purpose" }));
+		expect(builtIn).toBeLessThanOrEqual(DELEGATION_WORD_BUDGET);
+		expect(delegationSectionWords(text) - builtIn).toBeLessThanOrEqual(15);
+	});
+
+	it("does not let the config list run past the section's word budget", () => {
+		const config = Object.fromEntries(Array.from({ length: 24 }, (_unused, i) => [`role_${i}`, { tools: ["read"], description: `A role number ${i} for the budget test` }]));
+		const roles = applyRoleConfig(config).roles;
+		const text = buildDelegationSection({ defaultRole: "general-purpose", roles });
+		expect(text).toContain("role_4");
+		expect(text).not.toContain("- role_20:");
+		expect(text).toContain("more role(s) defined by the config");
+		expect(delegationSectionWords(text)).toBeLessThanOrEqual(DELEGATION_WORD_BUDGET + 90);
 	});
 
 	it("keeps the shipped config and the built-in defaults in step", () => {
