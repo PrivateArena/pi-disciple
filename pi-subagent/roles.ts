@@ -40,7 +40,7 @@ export const ROLES: Record<RoleName, Role> = {
 		prompt: "Answer with file paths, line numbers and short quotes. Prefer grep/find over reading whole files.",
 		allowTools: READ_ONLY_TOOLS,
 		maxTurns: 20,
-		timeoutMinutes: 10,
+		timeoutMinutes: 20,
 	},
 	"general-purpose": {
 		name: "general-purpose",
@@ -56,7 +56,7 @@ export const ROLES: Record<RoleName, Role> = {
 		prompt: "Report findings only; never modify anything. Lead with the most severe issue and cite file:line.",
 		allowTools: READ_ONLY_TOOLS,
 		maxTurns: 15,
-		timeoutMinutes: 10,
+		timeoutMinutes: 20,
 	},
 };
 

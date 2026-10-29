@@ -34,11 +34,25 @@
   "subagent": {
     "enabled": true,
     "model": "inherit",
-    "defaultRole": "general-purpose",
+    "defaultRole": "explore",
     "delegationPrompt": true,
     "maxTurns": 30,
     "timeoutMinutes": 20,
     "maxResultBytes": 20000,
-    "keepTranscripts": 20
+    "keepTranscripts": 20,
+    "roles": {
+      "general-purpose": {
+        "maxTurns": 40,
+        "timeoutMinutes": 20
+      },
+      "explore": {
+        "maxTurns": 30,
+        "timeoutMinutes": 20
+      },
+      "review": {
+        "maxTurns": 30,
+        "timeoutMinutes": 20
+      }
+    }
   }
 }
