@@ -128,7 +128,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 		executionMode: "sequential",
 		// The tool draws its own call title and result block, so the report is rendered instead of
 		// falling back to the raw result text (see render.ts).
-		renderCall: (args, theme, context) => renderSubagentCall(args, theme, { argsComplete: context?.argsComplete }),
+		renderCall: (args, theme, context) => renderSubagentCall(args, theme, { argsComplete: context?.argsComplete, expanded: context?.expanded }),
 		renderResult: (result, options, theme) => renderSubagentResult(result, options, theme),
 
 		async execute(toolCallId, args, signal, onUpdate, ctx) {

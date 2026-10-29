@@ -43,6 +43,7 @@ pi-subagent/
   config-file.ts   own copy of the config reader: limits, model pin, `roles` table        step 20
   run.ts           globalThis run guard + result mapping (status header, truncation, card contract)  steps 15, 16
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
+  labels.ts        the one-line strings a card is titled with: role display name, task summary (shared by render.ts and run.ts)
   config-view.ts   the /subagentc text: effective config, model resolution, roles, catalog  step 20
   index.ts         the single `subagent` tool + /subagentc                                  steps 15, 16
 ```
@@ -202,8 +203,8 @@ unnamed delegations read-only instead. Role words are canonicalized in `prepareA
 shim), so `Explore`, `General Purpose` and `gp` run rather than fail; a word that names no role (`browse`) is
 left untouched so the schema error teaches the model the enum. The old `code: "review"` alias is gone: "code"
 reads as "write code", and mapping it to the read-only role would have handed back a child that cannot do
-the task. Whatever role ran is shown as the human's decision, not the model's: `Launch subagent ·
-general-purpose (default)` on the card and `role: general-purpose (default)` in the result block — and
+the task. Whatever role ran is shown as the human's decision, not the model's: `General Purpose (default)`
+on the card and `role: general-purpose (default)` in the result block — and
 `renderCall` tells "the arguments are still streaming" (`context.argsComplete`) apart from "no role arrived",
 which is what used to render a bare title.
 
@@ -237,22 +238,45 @@ uses, 4.2k token).` — then `role · model · Agent ID`, the transcript path, a
 collapsed, 50 expanded, with a "more lines" hint built from the expand keybinding, never a hardcoded
 `ctrl+o`). `details.report` holds the child's answer on its own, so the card never re-parses the
 model-facing text. pi calls a renderer with `{ content, details }` only — never `usage` — which is why the
-token total is also carried in `details.tokens`. The title has three states, because pi renders it while the
-arguments stream: role named, role not yet arrived (`Launch subagent`, nothing invented), and role not sent at
-all (`Launch subagent · general-purpose (default)`).
+token total is also carried in `details.tokens`.
+
+**The title leads with the role, gotgenes-style** (`labels.ts` builds the strings, so the TUI and the
+frontend `details` cannot drift): `Explore  Read pi-gate/ and list its rule layers` — the role display name
+in bold (`explore` → `Explore`, `general-purpose` → `General Purpose`), two spaces, then the task summarized
+to one line (`taskSummary`: whitespace collapsed, leading `#` stripped, clipped at 72 characters with an
+ellipsis). The role is the *first* token because the title is drawn in whatever width the transcript
+indent leaves, and a tail is what wraps and what truncates; a title that began with a fixed phrase and
+appended the role (`Launch subagent · explore`) buried the only variable part of the line. The whole task is
+not lost: `renderCall` receives `context.expanded` (pi forwards it, `index.ts`), and an expanded card prints
+the role alone, then the complete task. The title still has three states, because pi renders it while the
+arguments stream: role named, role not yet arrived (`Launch subagent`, nothing invented), and role not sent
+at all (`General Purpose (default)`). The running result block no longer repeats the task — the call block
+above it carries it, summarized or whole.
 
 **What a non-TUI frontend (Pendant) reads is `details`, not the renderers** — it never invokes them, so a
-correct `Text` component buys nothing there. It draws a subagent card off the field names and status
-vocabulary `@gotgenes/pi-subagents` established (`AgentDetails`/`GetResultDetails`): a `status` it has no
-branch for leaves the card in its activity list with `No activity reported yet` where the result belongs,
-which is exactly the bug. `run.ts` therefore emits both vocabularies: our own `exit`/`elapsedMs`/`toolCalls`
-plus `status` (`uiStatus`: `completed`/`running`/`stopped`/`aborted`/`error`), `displayName`,
-`subagentType`, `description`, `toolUses`, `durationMs`, `tokens`, `agentId`, `modelName`, `preview`.
+correct `Text` component buys nothing there. Worse: Pendant *claims our tool by name* — its subagent panel
+recognizes a tool called `subagent`, gives it its own subagent card, and "its `renderCall` and `renderResult`
+renderers are not used" (verified against the Pendant user guide shipped in the VSIX, `12-subagents.md`).
+That card takes the agent's *name* from the launch **arguments** — `agent` or `name` for the recognized
+`subagent` tool — and the label from `task`/`description`/`prompt`; our schema is `{ role, task }`, so
+Pendant found no name and titled the card with its generic fallback. That is why no role appeared in the
+card no matter what `formatCallBlock` returned. Two documented levers fix it from our side: `agent` in
+`details` (the key the panel vocabulary uses for a step's agent), and `details.pendant = { title, subtitle }`,
+which replaces the tool's name and the muted text after it in the header — read when the call finishes, and
+ignored by pi's terminal. `run.ts` emits both, plus the field names and status vocabulary
+`@gotgenes/pi-subagents` established (`AgentDetails`/`GetResultDetails`: `displayName`, `subagentType`, one-line
+`description`, `toolUses`, `durationMs`, `tokens`, `agentId`, `modelName`, `preview`, `uiStatus`), our own
+`exit`/`elapsedMs`/`toolCalls`, and `status` (`completed`/`running`/`stopped`/`aborted`/`error`) — a `status`
+it has no branch for leaves the card in its activity list with `No activity reported yet` where the result
+belongs, which was the original bug. Making the *live* Pendant card name the role would need an argument
+named `agent` or `subagent_type`, which the tool does not have and `prepareArguments` cannot fake: pi renders
+the assistant message's own arguments, not the prepared ones.
 `verification/probe-subagent-render.mjs` prints both `details` shapes and drives the renderers through the
-real pi Theme and real pi-tui components, because the unit tests' fake theme cannot fail the way a
-frontend fails. Every `onUpdate` still carries a complete `SubagentDetails` (`status: "running"`, turns,
-tool uses, activity, model) and a 2s heartbeat re-emits it, so a child that thinks for minutes without a
-tool event keeps reporting activity.
+real pi Theme and real pi-tui components; `verification/tui-card.mjs` drives pi's real `ToolExecutionComponent`
+through streaming, running, finished and expanded, because the unit tests' fake theme cannot fail the way a
+frontend or a wrapping terminal does. Every `onUpdate` still carries a complete `SubagentDetails`
+(`status: "running"`, turns, tool uses, activity, model) and a 2s heartbeat re-emits it, so a child that thinks
+for minutes without a tool event keeps reporting activity.
 
 ## Deviations from the plan (all verified against pi 1.4.0 types)
 
@@ -313,6 +337,7 @@ tool event keeps reporting activity.
 ```bash
 npm test            # vitest run — 299 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
+node verification/tui-card.mjs            # the card as pi's own ToolExecutionComponent draws it
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 ```
 

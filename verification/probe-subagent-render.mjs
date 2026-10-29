@@ -80,6 +80,10 @@ console.log("=== settled details (what a frontend parses) ===");
 console.log(JSON.stringify(settledDetails, null, 1));
 console.log("\n=== running (partial) details ===");
 console.log(JSON.stringify(runningDetails, null, 1));
+// The header Pendant draws instead of our renderers. If this is missing, the card falls back to naming
+// the tool, and the role never appears: a recognized subagent tool's renderers are not used there.
+console.log("\n=== details.pendant (Pendant's card header; pi's terminal ignores this object) ===");
+console.log(JSON.stringify({ settled: settledDetails.pendant, running: runningDetails.pendant }));
 
 attempt("renderCall(explore, task)", () => {
 	const c = renderSubagentCall({ role: "explore", task: settledDetails.task }, theme);
@@ -97,6 +101,11 @@ const titleCases = {
 for (const [label, context] of Object.entries(titleCases)) {
 	attempt(`renderCall(${label})`, () => renderSubagentCall({ task: settledDetails.task }, theme, context).render(width));
 }
+
+// Collapsed, the title carries a one-line summary of the task; expanded, the whole task appears under it.
+attempt("renderCall(expanded card: role, then the whole task)", () =>
+	renderSubagentCall({ role: "explore", task: settledDetails.task }, theme, { argsComplete: true, expanded: true }).render(width),
+);
 
 const defaultedResult = composeResult(
 	{ text: "Changed 2 files.", exit: "done", turns: 6, toolCalls: 9, usage: { totalTokens: 3100 } },

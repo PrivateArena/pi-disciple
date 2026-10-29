@@ -6,7 +6,10 @@
 import { truncateHead, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ChildResult, Exit, RunProgress } from "./child.ts";
+import { clip, roleDisplayName, taskSummary } from "./labels.ts";
 import type { RoleId } from "./roles.ts";
+
+export { clip } from "./labels.ts";
 
 /**
  * One child at a time, stored on `globalThis` under a well-known symbol so a `/reload` — which
@@ -72,11 +75,6 @@ export function uiStatus(exit: Exit): SubagentUiStatus {
 	}
 }
 
-/** Clip for a card row: a card gets a summary, never a whole field. */
-export function clip(text: string, maxChars: number): string {
-	return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
-}
-
 /** `4.2k token`, or "" when the run reported no usage — never a guessed count. */
 export function formatTokens(usage: Usage | undefined): string {
 	const total = usage?.totalTokens ?? 0;
@@ -102,7 +100,9 @@ export interface SubagentCardFields {
 	displayName: string;
 	/** The role id, e.g. `explore`. */
 	subagentType: RoleId;
-	/** What was asked of the child, clipped. */
+	/** The role id again, under the key the frontend vocabulary uses for a step's agent name. */
+	agent: RoleId;
+	/** What was asked of the child, on one line, clipped. */
 	description: string;
 	toolUses: number;
 	durationMs: number;
@@ -112,6 +112,12 @@ export interface SubagentCardFields {
 	modelName?: string;
 	/** First line of the report, clipped — never the report itself, which `content` already carries. */
 	preview?: string;
+	/**
+	 * Header labels for the Pendant frontend, which draws its own subagent card and never calls our
+	 * renderers. It reads this object when the call finishes; pi's terminal ignores it. An empty string
+	 * counts as missing there, so a label that is not available is left out rather than sent blank.
+	 */
+	pendant: { title: string; subtitle?: string };
 }
 
 /** The card fields for one state of a run. */
@@ -120,16 +126,24 @@ export function cardFields(
 	run: { toolCalls: number; elapsedMs: number; agentId?: string; usage?: Usage; report?: string },
 ): SubagentCardFields {
 	return {
-		displayName: host.role ? `${host.role[0].toUpperCase()}${host.role.slice(1)}` : "Subagent",
+		displayName: roleDisplayName(host.role),
 		subagentType: host.role,
-		description: clip(host.task, 160),
+		agent: host.role,
+		description: taskSummary(host.task, 160),
 		toolUses: run.toolCalls,
 		durationMs: run.elapsedMs,
 		tokens: formatTokens(run.usage),
 		agentId: run.agentId,
 		modelName: host.model,
 		...(run.report ? { preview: previewOf(run.report) } : {}),
+		...pendantHeader(host),
 	};
+}
+
+/** The Pendant header: the role names the card, the task summarizes it. */
+function pendantHeader(host: { role: RoleId; task: string }): { pendant: SubagentCardFields["pendant"] } {
+	const subtitle = taskSummary(host.task);
+	return { pendant: { title: roleDisplayName(host.role), ...(subtitle ? { subtitle } : {}) } };
 }
 
 export interface SubagentDetails extends SubagentCardFields {

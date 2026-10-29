@@ -57,11 +57,23 @@ describe("result mapping", () => {
 		expect(result.details.roleDefaulted).toBe(true);
 		// A frontend switches on these, so a defaulted call must still look like a normal role.
 		expect(result.details.subagentType).toBe("general-purpose");
-		expect(result.details.displayName).toBe("General-purpose");
+		expect(result.details.displayName).toBe("General Purpose");
 		expect(result.details.status).toBe("completed");
+		// The header a non-TUI frontend draws its card title from.
+		expect(result.details.pendant.title).toBe("General Purpose");
+		expect(result.details.pendant.subtitle).toBe("fix the flaky test");
 		// The model needs no lecture about which role it forgot to name.
 		expect((result.content[0] as { text: string }).text).not.toMatch(/default/);
 		expect(composeResult(child(), "explore", 20_000, 1000).details.roleDefaulted).toBeUndefined();
+	});
+
+	it("titles the frontend header with the role and one line of task", () => {
+		const result = composeResult(child(), "explore", 20_000, 1000, { task: "# Survey\n\nread pi-gate/ and report the rule layers" });
+		expect(result.details.agent).toBe("explore");
+		expect(result.details.description).not.toContain("\n");
+		expect(result.details.pendant).toEqual({ title: "Explore", subtitle: "Survey read pi-gate/ and report the rule layers" });
+		// A call with no task gets a title only: an empty label counts as missing at the frontend.
+		expect(composeResult(child(), "explore", 20_000, 1000).details.pendant).toEqual({ title: "Explore" });
 	});
 
 	it("marks every non-done exit INCOMPLETE", () => {

@@ -54,7 +54,7 @@ describe("roles", () => {
 	it("has the budgets the plan specifies", () => {
 		expect(ROLES.explore.allowTools).toEqual(["read", "grep", "find", "ls", "bash"]);
 		expect(ROLES.explore.maxTurns).toBe(20);
-		expect(ROLES.explore.timeoutMinutes).toBe(10);
+		expect(ROLES.explore.timeoutMinutes).toBe(20);
 		expect(ROLES.review.maxTurns).toBe(15);
 		expect(ROLES["general-purpose"].allowTools).toEqual(["*"]);
 		expect(ROLES["general-purpose"].maxTurns).toBe(40);

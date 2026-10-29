@@ -148,22 +148,37 @@ describe("the result block", () => {
 		const rendered = formatResultBlock(running, { content: [{ type: "text", text: "subagent running" }], details: running }, false, theme);
 		expect(rendered).toContain("Agent running for 8.0s");
 		expect(rendered).toContain("last call: bash");
-		expect(rendered).toContain("task: survey the gate");
+		// The task belongs to the call block above the card, not to the status block: a running child
+		// would otherwise print it twice. Frontends still get `details.task`.
+		expect(rendered).not.toContain("survey the gate");
 	});
 
 	it("titles the call with the role, and admits when the role is not the model's",
 		() => {
-			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toContain("Launch subagent · explore");
+			// The role leads the title: it is the one part a narrow card must not lose to truncation.
+			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toBe("Explore  survey the gate");
+			expect(formatCallBlock({ role: "general-purpose", task: "fix the flaky test" }, theme)).toBe("General Purpose  fix the flaky test");
 			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toContain("survey the gate");
 			// pi renders this while the arguments stream in: a role that has not arrived may still arrive.
 			expect(formatCallBlock({}, theme, { argsComplete: false })).toBe("Launch subagent");
+			expect(formatCallBlock({ task: "survey the gate" }, theme, { argsComplete: false })).toBe("Launch subagent  survey the gate");
 			// Complete arguments and no role: name the role that will actually run, as the human's choice.
-			expect(formatCallBlock({}, theme, { argsComplete: true, defaultRole: "explore" })).toBe("Launch subagent · explore (default)");
+			expect(formatCallBlock({}, theme, { argsComplete: true, defaultRole: "explore" })).toBe("Explore (default)");
 			expect(formatCallBlock({}, theme, { argsComplete: true })).toContain("(default)");
 			// A frontend that renders without a context is a settled call, not a streaming one.
 			expect(formatCallBlock({}, theme)).toContain("(default)");
 			expect(formatCallBlock({ role: "review" }, theme)).not.toContain("default");
 		});
+
+	it("summarizes a long task on the title line and shows the whole thing when expanded", () => {
+		const long = "Read every file in pi-gate/ and describe\\nhow the policy layer resolves a grant,\\nthen list the ones that can loop.";
+		const collapsed = formatCallBlock({ role: "explore", task: long }, theme);
+		expect(collapsed).not.toContain("\n"); // the title stays one line whatever the task contains
+		expect(collapsed).toContain("…");
+		const expanded = formatCallBlock({ role: "explore", task: long }, theme, { expanded: true });
+		expect(expanded).toContain("how the policy layer resolves a grant");
+		expect(expanded.startsWith("Explore\n")).toBe(true);
+	});
 
 	it("marks a defaulted role on the identity line", () => {
 		expect(formatIdentityLine(details({ roleDefaulted: true }), theme)).toContain("role: explore (default)");
@@ -174,7 +189,7 @@ describe("the result block", () => {
 		const result = composeResult(child(), "explore", 20_000, 21_000);
 		const lines = renderSubagentResult(result, { expanded: false, isPartial: false }, theme).render(200).join("\n");
 		expect(lines).toContain("Agent completed in 21.0s");
-		expect(renderSubagentCall({ role: "explore", task: "survey" }, theme).render(200).join("\n")).toContain("Launch subagent · explore");
+		expect(renderSubagentCall({ role: "explore", task: "survey" }, theme).render(200).join("\n")).toContain("Explore  survey");
 	});
 
 	it("falls back to the raw text when there are no details", () => {

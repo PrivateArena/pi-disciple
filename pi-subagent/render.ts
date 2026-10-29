@@ -16,6 +16,7 @@ import { keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions
 import type { Usage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import type { Exit } from "./child.ts";
+import { roleDisplayName, taskSummary } from "./labels.ts";
 import { configuredDefaultRole, type RoleId } from "./roles.ts";
 import type { SubagentDetails } from "./run.ts";
 
@@ -128,9 +129,9 @@ export function formatResultBlock(
 	const status = formatStatusLine(details, result.usage, theme);
 	if (details.exit) return `${status}\n${formatIdentityLine(details, theme)}\n\n${formatReportBody(details, report, expanded, theme)}`;
 	// Running: the activity line is the payload — a frontend with no update at all has nothing to say.
+	// The task is not repeated here: the call block above the card carries it, summarized when collapsed.
 	const activity = details.activity ? `\n${theme.fg("dim", `last call: ${details.activity}`)}` : "";
-	const task = details.task ? `\n${theme.fg("muted", `task: ${details.task}`)}` : "";
-	return `${status}${activity}${task}`;
+	return `${status}${activity}`;
 }
 
 /** What the call title needs beyond the args, because a title is drawn before the call is settled. */
@@ -139,20 +140,31 @@ export interface CallTitleContext {
 	argsComplete?: boolean;
 	/** Role an unnamed call gets. Left out, the configured `subagent.defaultRole` is used. */
 	defaultRole?: RoleId;
+	/** The card is expanded: show the whole task under the title instead of the one-line summary. */
+	expanded?: boolean;
 }
 
 /**
  * The tool card's title line: what kind of call this is, and the task it was given.
  *
+ * The role *leads* the title, because that is the part a card must never lose: a title is drawn in the
+ * width left after the transcript's indent, and a tail is what gets truncated. `Explore  Read the gate
+ * config and list its keys` is the shape; the task is summarized to one line so a 500-character
+ * delegation does not turn the call card into a paragraph (the whole task is one keystroke away, below).
+ *
  * pi renders this repeatedly while the call streams in, so an absent role means two different things and
  * says two different things here: *not yet* (arguments still arriving, so name no role the model may still
- * choose) or *not at all* (arguments complete, so name the default that will actually run, marked as the
- * human's choice rather than the model's).
+ * choose — "Launch subagent" with the task summary after it) or *not at all* (arguments complete, so name
+ * the default that will actually run, marked as the human's choice rather than the model's).
  */
 export function formatCallBlock(args: { role?: string; task?: string }, theme: Theme, context: CallTitleContext = {}): string {
 	const role = args.role ?? (context.argsComplete === false ? undefined : (context.defaultRole ?? configuredDefaultRole()));
-	const title = theme.fg("toolTitle", theme.bold(`Launch subagent${role ? ` · ${role}${args.role ? "" : " (default)"}` : ""}`));
-	return args.task ? `${title}\n${theme.fg("muted", args.task)}` : title;
+	const name = role ? `${roleDisplayName(role)}${args.role ? "" : " (default)"}` : "Launch subagent";
+	const bold = theme.fg("toolTitle", theme.bold(name));
+	// Expanded: the task gets its own lines, so the title stays just the role.
+	if (context.expanded && args.task) return `${bold}\n${theme.fg("muted", args.task)}`;
+	const summary = taskSummary(args.task);
+	return summary ? `${bold}  ${theme.fg("muted", summary)}` : bold;
 }
 
 function textOf(result: AgentToolResult<unknown>): string {

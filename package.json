@@ -1,6 +1,6 @@
 {
   "name": "pi-sub-gate",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "pi-gate (multi-scope permission gate) and pi-subagent (single blocking delegation tool) for pi",
   "type": "module",
