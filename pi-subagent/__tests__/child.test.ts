@@ -24,6 +24,8 @@ interface Spy {
 	promptArgs?: string[];
 	steers: string[];
 	emit?: (event: Record<string, unknown>) => void;
+	/** Releases a "hang" prompt, i.e. the child's run finishing on its own. */
+	release?: () => void;
 }
 
 function stubSession(spy: Spy, behaviour: "answer" | "hang" | "throw" = "answer") {
@@ -50,7 +52,12 @@ function stubSession(spy: Spy, behaviour: "answer" | "hang" | "throw" = "answer"
 		async prompt(text: string) {
 			spy.promptArgs = [text];
 			if (behaviour === "throw") throw new Error("provider exploded");
-			if (behaviour === "hang") await new Promise<never>(() => undefined);
+			if (behaviour === "hang") await new Promise<void>((resolve) => {
+				spy.release = () => {
+					session.isStreaming = false;
+					resolve();
+				};
+			});
 		},
 		async abort() {
 			spy.aborted = true;
@@ -132,6 +139,70 @@ describe("runChild", () => {
 		expect(result.exit).toBe("timeout");
 		expect(spy.steers.join(" ")).toMatch(/Summarise your findings now/);
 		expect(spy.disposed).toBe(true);
+	});
+
+	it("lets a report that is still being written finish past the hard ceiling", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const started = Date.now();
+		const run = runChild({
+			...input(),
+			role: { ...ROLES.explore, timeoutMinutes: 0.01 },
+			hardSlackMs: 40,
+			reportGraceMs: 3_000,
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		// The child is streaming its final answer: text so far, no tool call.
+		spy.emit?.({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "the report" }] } });
+		await new Promise((resolve) => setTimeout(resolve, 700)); // past the ceiling, which the report outran
+		expect(spy.aborted).toBe(false); // the ceiling passed while the report was mid-sentence
+		spy.release?.();
+		const result = await run;
+		expect(result.exit).toBe("done");
+		expect(spy.aborted).toBe(false);
+		expect(Date.now() - started).toBeGreaterThan(200);
+	});
+
+	it("cuts a report at the report wall so a run still cannot run forever", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const started = Date.now();
+		const run = runChild({
+			...input(),
+			role: { ...ROLES.explore, timeoutMinutes: 0.01 },
+			hardSlackMs: 40,
+			reportGraceMs: 120,
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		spy.emit?.({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "still writing" }] } });
+		const result = await run;
+		expect(result.exit).toBe("timeout");
+		expect(spy.aborted).toBe(true);
+		expect(Date.now() - started).toBeGreaterThanOrEqual(720); // hard ceiling (640 ms) plus most of the 120 ms wall
+	});
+
+	it("gives an in-flight tool call the slack to land, then lets the report finish", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const run = runChild({
+			...input(),
+			role: { ...ROLES.explore, timeoutMinutes: 0.01 },
+			hardSlackMs: 200,
+			reportGraceMs: 3_000,
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		// A long tool call is why the "wrap up" steer was never delivered - the ceiling must not kill it.
+		spy.emit?.({ type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: {} });
+		await new Promise((resolve) => setTimeout(resolve, 780));
+		expect(spy.aborted).toBe(false);
+		spy.emit?.({ type: "tool_execution_end", toolCallId: "a", toolName: "bash", result: {}, isError: false });
+		spy.emit?.({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "conclusion" }] } });
+		await new Promise((resolve) => setTimeout(resolve, 260));
+		expect(spy.aborted).toBe(false);
+		spy.release?.();
+		const result = await run;
+		expect(result.exit).toBe("done");
+		expect(result.toolCalls).toBe(1);
 	});
 
 	it("reports an error result without throwing", async () => {

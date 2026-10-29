@@ -16,7 +16,7 @@ import { childThinkingLevel } from "./model-override.ts";
 import type { ChildModelResolution } from "./model-override.ts";
 import { FORBIDDEN_CHILD_TOOLS, NESTED_CALL_CEILING } from "./shims.ts";
 import { ROLES, type Role, type RoleTable } from "./roles.ts";
-import { childSessionDir } from "./child.ts";
+import { childSessionDir, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./child.ts";
 import type { SubagentLimits } from "./config-file.ts";
 import type { RunGuard } from "./run.ts";
 
@@ -132,8 +132,8 @@ function limitsSection(input: ConfigViewInput): string[] {
 		["enabled", limits.enabled ? "yes" : "no (the subagent tool is hidden and calls fail)"],
 		["defaultRole", `${limits.defaultRole} — what a call gets when the model names no role`],
 		["delegationPrompt", limits.delegationPrompt ? "yes (a <delegation> section tells the model when to delegate)" : "no (only the tool description guides delegation)"],
-		["maxTurns", String(limits.maxTurns)],
-		["timeoutMinutes", `${limits.timeoutMinutes}`],
+		["maxTurns", `${limits.maxTurns} (a ceiling: a role gets min(role.maxTurns, this))`],
+		["timeoutMinutes", `${limits.timeoutMinutes} (a ceiling: a role gets min(role.timeoutMinutes, this))`],
 		["maxResultBytes", `${limits.maxResultBytes} (${formatBytes(limits.maxResultBytes)})`],
 		["keepTranscripts", `${limits.keepTranscripts} per role dir`],
 		["model", limits.model ? `"${limits.model}"` : "(unset — inherit the session model)"],
@@ -143,6 +143,9 @@ function limitsSection(input: ConfigViewInput): string[] {
 	return [
 		"limits (subagent section of the config file, project overrides global):",
 		...rows.map(([key, value]) => `  ${key.padEnd(width)}  ${value}  ·  from ${input.origins?.[key] ?? DEFAULT_ORIGIN}`),
+		`  deadline: at the role's minutes the child is told to conclude; ${HARD_SETTLE_MS / 1000}s later the ceiling fires.`,
+		`  A run is never cut mid-report or mid-tool-call — the ceiling waits for that to land, up to`,
+		`  ${REPORT_GRACE_MS / 60_000} min past it. Longest possible run: budget + ${(HARD_SETTLE_MS + REPORT_GRACE_MS) / 60_000} min.`,
 	];
 }
 

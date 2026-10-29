@@ -73,8 +73,15 @@ describe("/subagentc config view", () => {
 
 	it("labels the source of every limit, default included", () => {
 		const view = buildConfigView(input({ limits: { ...DEFAULT_LIMITS, maxTurns: 4 }, origins: { maxTurns: "/repo/.pi/x.json" } }));
-		expect(view).toMatch(/maxTurns\s+4\s+·\s+from \/repo\/\.pi\/x\.json/);
-		expect(view).toMatch(/timeoutMinutes\s+20\s+·\s+from built-in default/);
+		expect(view).toMatch(/maxTurns\s+4 \(a ceiling[^·]*·\s+from \/repo\/\.pi\/x\.json/);
+		expect(view).toMatch(/timeoutMinutes\s+20 \(a ceiling[^·]*·\s+from built-in default/);
+	});
+
+	it("states the deadline model: ceiling, settle, and a report that is never cut", () => {
+		const view = buildConfigView(input());
+		expect(view).toContain("at the role's minutes the child is told to conclude; 60s later the ceiling fires");
+		expect(view).toContain("never cut mid-report or mid-tool-call");
+		expect(view).toContain("Longest possible run: budget + 4 min");
 	});
 
 	it("expands a role's \"*\" to the parent's callable tools and caps the budget", () => {

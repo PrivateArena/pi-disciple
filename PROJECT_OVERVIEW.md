@@ -39,7 +39,7 @@ pi-subagent/
   prompt.ts        child system prompt + task wrapper                                     step 11
   delegation.ts    the `<delegation>` system prompt section: when to delegate, when not to    step 15
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
-  child.ts         runChild(): assembly, timeouts, steering, transcripts, usage            steps 13, 14
+  child.ts         runChild(): assembly, timeouts (ceiling, report-safe deferral), steering, transcripts, usage  steps 13, 14
   config-file.ts   own copy of the config reader: limits, model pin, `roles` table        step 20
   run.ts           globalThis run guard + result mapping (status header, truncation, card contract)  steps 15, 16
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
@@ -53,11 +53,23 @@ pi-subagent/
 global file → project file (only when the cwd is trusted) → `grants.global` → `grants.project` →
 session grants. Within a surface, the **last matching pattern wins**; across facts, most-restrictive wins.
 
-The `subagent` section is every knob the child has. `model` takes a `provider/id` pin, or one of the inherit
-words (`inherit`, `session`, `parent`, `default`) which mean "no pin" — that is how the shipped file shows
+`subagent` section is every knob the child has. `model` takes a `provider/id` pin, or one of the inherit
+words (`inherit`, `session`, `parent`, `default`) which mean "no pin" - that is how the shipped file shows
 the key without pinning anything. `maxTurns` / `timeoutMinutes` here are **ceilings**: a run gets
 `min(role, subagent)` turns and minutes, so the section can tighten a role and the shipped 30/20 caps the
-40-turn `general-purpose` role to 30 until you raise it.
+40-turn `general-purpose` role to 30 until you raise it. It also means the section alone cannot *raise* a
+role - `timeoutMinutes: 20` with the built-in 10-minute `explore` budget cuts `explore` at 10 minutes, which
+is why `subagent.roles.<name>.timeoutMinutes` exists. `/subagentc limits` and `/subagentc roles` print the
+ceiling, the role budget and the effective number together so the arithmetic is never guesswork.
+
+**How a deadline is decided** (`child.ts`, `HARD_SETTLE_MS`, `REPORT_GRACE_MS`): at the role's minutes the
+child is *steered* to conclude (that is the whole point of the budget - a conclusion, not a kill); 60 s
+later the hard ceiling fires, and there the clock defers to the work: a run that is **streaming its report**
+(an assistant message with text and no tool call) or **mid tool call** (which means the steer has not even
+reached the model yet - the queue drains only between turns) is not cut - it gets until the report lands, or
+until the report wall (`ceiling + 3 min`) passes. So the longest possible run is `budget + 4 min`, and the
+artifact the delegation was paid for is never destroyed mid-sentence. `aborted` (human Esc) is immediate and
+unconditional; only time-based ceilings defer.
 
 `subagent.roles` is the role table: an entry naming a built-in edits it field by field (`tools`, `maxTurns`,
 `timeoutMinutes`, `description`, `prompt`), and an entry naming anything else **adds a role** — which then
@@ -249,7 +261,7 @@ tool event keeps reporting activity.
 3. Shipped defaults add `"subagent": "allow"`: the child's own calls are gated, so gating the delegation
    too would double-prompt for a call that is only a container.
 4. Child retry is **enabled but bounded** (`maxRetries: 2`, `maxAgentDelayMs: 5000`) instead of off: the
-   free upstream 503s routinely, and `HARD_SETTLE_MS` already bounds the run.
+   free upstream 503s routinely, and the hard ceiling (now deferrable for a report, see Config) bounds the run.
 5. `reviewLog` records allow decisions too, not only ask resolutions (FM-17 audit value).
 6. Two extra modules: `pi-gate/handle.ts` (testable pipeline seam) and `pi-subagent/run.ts` (guard + result
    mapping), so `index.ts` stays wiring only.

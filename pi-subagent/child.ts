@@ -63,6 +63,8 @@ export interface ChildRunInput {
 	onProgress: (progress: RunProgress) => void;
 	/** Seconds between the soft budget and the hard ceiling; a test seam (FM-2). */
 	hardSlackMs?: number;
+	/** How long past the hard ceiling a run may still take to finish writing its report; a test seam. */
+	reportGraceMs?: number;
 	/** The only test seam in this file: replaces `createAgentSession`. */
 	sessionFactory?: (options: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>;
 }
@@ -115,19 +117,35 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 	let lastTool: string | undefined;
 	let exit: Exit = "done";
 	let errorText: string | undefined;
-	let summariseSteers = 0;
+	const steeredOn = new Set<string>();
+	/** Content kinds seen so far in the assistant message that is streaming right now. */
+	let streaming: { text: boolean; toolCall: boolean } = { text: false, toolCall: false };
+	const runningTools = new Set<string>();
 
 	const emit = () => input.onProgress({ turns, toolCalls, lastTool, elapsedMs: Date.now() - startedAt });
 	const contextWindow = input.model?.contextWindow ?? 0;
+	// Each reason asks once — an earlier "conclude now" can be swallowed by the queue, and the timeout ask
+	// is the one that must land. Two asks is the most a child gets before the ceiling is enforced.
 	const steerForEnd = (why: string) => {
-		if (summariseSteers++ > 0) return;
+		if (steeredOn.size >= MAX_STEERS || steeredOn.has(why)) return;
+		steeredOn.add(why);
 		void session.steer(`${why}. Summarise your findings now, in the final message, with no more tool calls.`).catch(() => undefined);
 	};
 
+	/** The report is the artifact the run exists to produce; a turn asking for a tool is not. */
+	const isWritingReport = () => streaming.text && !streaming.toolCall;
+	const isExecutingTool = () => runningTools.size > 0 || (session.state?.pendingToolCalls?.size ?? 0) > 0;
+
 	const unsubscribe = session.subscribe((event) => {
 		switch (event.type) {
+			case "message_start":
+			case "message_update": {
+				if (event.message.role === "assistant") streaming = contentShape(event.message);
+				break;
+			}
 			case "message_end": {
 				if (event.message.role === "assistant") {
+					streaming = { text: false, toolCall: false };
 					turns++;
 					if (turns >= input.role.maxTurns) {
 						exit = pickEarlier(exit, "maxTurns");
@@ -140,8 +158,13 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 				emit();
 				break;
 			}
+			case "tool_execution_end": {
+				runningTools.delete(event.toolCallId);
+				break;
+			}
 			case "tool_execution_start": {
 				toolCalls++;
+				runningTools.add(event.toolCallId);
 				lastTool = event.toolName;
 				if (toolCalls >= NESTED_CALL_CEILING) {
 					exit = pickEarlier(exit, "callLimit");
@@ -158,15 +181,38 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 	let softTimer: ReturnType<typeof setTimeout> | undefined;
 	let hardTimer: ReturnType<typeof setTimeout> | undefined;
 	const softMs = input.role.timeoutMinutes * 60_000;
-	const hardMs = softMs + (input.hardSlackMs ?? HARD_SETTLE_MS);
+	const slackMs = input.hardSlackMs ?? HARD_SETTLE_MS;
+	// Absolute timestamps: a deferral re-arms the ceiling, so durations would drift with every grant.
+	const timerStart = Date.now();
+	const hardAt = timerStart + softMs + slackMs;
+	// The absolute wall: the hard ceiling plus a window reserved for the report. Past this, the clock wins
+	// whatever the child is doing, so a delegation cannot become unbounded.
+	const reportWallAt = hardAt + (input.reportGraceMs ?? REPORT_GRACE_MS);
 	const abortWait = new Promise<"aborted">((resolve) => {
 		if (input.signal.aborted) resolve("aborted");
 		else input.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
 	});
 	// The soft budget only asks for a conclusion; the hard ceiling is what guarantees we settle (FM-2).
+	// At the ceiling, though, the clock defers to the work: killing a run while it writes its report, or
+	// while a tool is still executing (so the steer never reached the model), destroys the result we paid
+	// for. The deferral is bounded by `reportWallAt`, so the guarantee survives.
 	const deadline = new Promise<"timeout">((resolve) => {
-		hardTimer = setTimeout(() => resolve("timeout"), hardMs);
-		hardTimer.unref?.();
+		let grantedToolGrace = false;
+		function arm(ms: number): void {
+			hardTimer = setTimeout(fire, ms);
+			hardTimer.unref?.();
+		}
+		function fire(): void {
+			const remaining = reportWallAt - Date.now();
+			if (remaining <= 0) return void resolve("timeout");
+			if (isWritingReport()) return void arm(remaining);
+			if (!grantedToolGrace && isExecutingTool()) {
+				grantedToolGrace = true;
+				return void arm(Math.min(slackMs, remaining));
+			}
+			resolve("timeout");
+		}
+		arm(softMs + slackMs);
 	});
 	softTimer = setTimeout(() => {
 		steerForEnd(`The ${input.role.name} role passed its ${input.role.timeoutMinutes} minute budget`);
@@ -237,6 +283,26 @@ export const OVERFLOW_RATIO = 0.9;
 
 /** Grace period after the soft timeout before the run is abandoned (FM-2). */
 export const HARD_SETTLE_MS = 60_000;
+
+/**
+ * How long past the hard ceiling a child may still take, reserved for the report. The ceiling asks for a
+ * conclusion; this is the wall that lets a conclusion finish instead of being cut mid-sentence.
+ */
+export const REPORT_GRACE_MS = 3 * 60_000;
+
+/** At most two "conclude now" asks per run: one per reason, and a reason never repeats. */
+export const MAX_STEERS = 2;
+
+/** Which content kinds an (possibly partial) assistant message carries. */
+function contentShape(message: AgentMessage): { text: boolean; toolCall: boolean } {
+	const shape = { text: false, toolCall: false };
+	if (message.role !== "assistant") return shape;
+	for (const part of message.content) {
+		if (part.type === "toolCall") shape.toolCall = true;
+		else if (part.type === "text" && part.text.trim()) shape.text = true;
+	}
+	return shape;
+}
 
 /** Provider retries inside a child: enough to ride out a transient 503; the ceiling still bounds the run. */
 export const CHILD_RETRIES = 2;
