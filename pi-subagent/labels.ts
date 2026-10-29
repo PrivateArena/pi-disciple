@@ -9,7 +9,7 @@
 import type { RoleId } from "./roles.ts";
 
 /** How much of the task fits in a card title before it becomes a paragraph. */
-export const CARD_SUMMARY_CHARS = 72;
+export const CARD_SUMMARY_CHARS = 512;
 
 /** Clip for a card row: a card gets a summary, never a whole field. */
 export function clip(text: string, maxChars: number): string {
