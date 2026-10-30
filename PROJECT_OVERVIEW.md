@@ -39,11 +39,13 @@ pi-subagent/
   prompt.ts        child system prompt + task wrapper                                     step 11
   delegation.ts    the `<delegation>` system prompt section: when to delegate, when not to    step 15
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
-  child.ts         runChild(): assembly, timeouts (ceiling, report-safe deferral), steering, transcripts, usage  steps 13, 14
+  ceiling.ts      the one-time "more rope?" dialog a spent budget asks: the ladder, the title, the answer rules    new
+  child.ts         runChild(): assembly, timeouts (ceiling, report-safe deferral, the held offer), steering, transcripts, usage  steps 13, 14
   config-file.ts   own copy of the config reader: limits, model pin, `roles` table        step 20
   run.ts           globalThis run guard + result mapping (status header, report budget + spill file, card contract)  steps 15, 16
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
-  labels.ts        the strings a card is titled with: role display name, task label, task body — never clipped (shared by render.ts and run.ts)
+  labels.ts        the strings a card is titled with: role display name, task label, task body — never clipped,
+                   and what the human answered about a spent budget (shared by render.ts and run.ts)
   config-view.ts   the /subagentc text: effective config, model resolution, roles, catalog  step 20
   index.ts         the single `subagent` tool + /subagentc                                  steps 15, 16
 ```
@@ -71,6 +73,28 @@ reached the model yet - the queue drains only between turns) is not cut - it get
 until the report wall (`ceiling + 3 min`) passes. So the longest possible run is `budget + 4 min`, and the
 artifact the delegation was paid for is never destroyed mid-sentence. `aborted` (human Esc) is immediate and
 unconditional; only time-based ceilings defer.
+
+**A spent budget is a question before it is a verdict** (`subagent.askToExtend`, `ceiling.ts`). When the turn
+limit or the time budget is reached, the run asks the human instead of steering to a conclusion: `Reject` (the
+old behaviour, verbatim) or one rung of `+20t/+5m · +40t/+10m · +60t/+15m · +100t/+25m`. The rungs are absolute
+additions, so one dialog means the same thing for a 10-turn `review` and a 200-turn custom role, and no rung
+exceeds what a config could have said anyway. The rule set is the gate's, because the risk is the same one:
+**only an explicit Extend choice extends** — Esc, a dismissed or timed-out dialog (5 min), or no UI at all
+enforces the ceiling unchanged (FM-11); one offer per run, whatever it was answered with, because a run that
+needs a second one was delegated the wrong size; and the title prints the whole task above the counters
+(`turns: 2/2 · tool calls: 1 · elapsed: 6.5s · last: bash`) the decision is actually made on.
+
+Nothing pauses while the question is open, because the SDK has no pause and a slow human should not be billed
+for a stalled run — and a run the human means to extend is a run whose work is worth continuing. The hard
+ceiling therefore *holds* while an offer is pending, up to `CEILING_OFFER_HOLD_MS` (6 min: the backstop behind
+the dialog's own 5-minute timeout, so a broker that never answers cannot make a run unbounded). A granted
+extension restarts **both** budgets from the moment of the answer — +N turns, and the minutes counted from
+now, tool grace included — and the child is told so, in a steer that is deliberately not one of its two
+"conclude now" asks. What happened is reported wherever a human or a model reads: `budget extended by the user
+at the turn limit: +40 turns / +10 min` in the result header and on the card (also on the *running* card, so a
+long borrowed run looks like one), `extension declined by the user at the turn limit` when it was refused, and
+`details.ceiling` for a frontend. An extension never rewrites the exit: a run that needed the human's yes to
+finish still says so.
 
 `subagent.roles` is the role table: an entry naming a built-in edits it field by field (`tools`, `maxTurns`,
 `timeoutMinutes`, `description`, `prompt`), and an entry naming anything else **adds a role** — which then
@@ -114,9 +138,9 @@ Both are suffixed `c` ("command") so they cannot collide with a prompt file or s
 
 `/subagentc` (was: "is a child running?") answers what the config actually does — the child model and
 whether it is inherited or pinned, each limit with the file that set it (`loadSubagentLimits` now records
-`origins`), the hard-coded roles with their budgets after the `subagent.maxTurns`/`timeoutMinutes` cap,
-transcript paths, the nested-call ceiling, the config files read (project vs global, trust state) and any
-parse errors. `models` lists what a `subagent.model` pin may name, flagging the session model, the
+`origins`), the hard-coded roles with their budgets after the `subagent.maxTurns`/`timeoutMinutes` cap, the
+extension ladder and the window the clock holds for that dialog, transcript paths, the nested-call ceiling, the
+config files read (project vs global, trust state) and any parse errors. `models` lists what a `subagent.model` pin may name, flagging the session model, the
 current pin and models with no auth. `status` is the old one-line answer, which is only ever filled
 *during* a run — extension commands still run while a child blocks the session.
 
@@ -368,14 +392,21 @@ output file); `/subagentc limits` prints the number, its source file and this co
     without it the whole delegation policy is two `<rules>` bullets.
 18. `promptGuidelines` is three bullets, not the plan's two under 160 characters in total (each bullet is
     under 160). The role list, the self-contained-task rule and the context argument do not fit in two.
+19. A spent budget asks the human for a one-time extension (`subagent.askToExtend`, `pi-subagent/ceiling.ts`,
+    `child.ts::onCeiling`), which the plan did not have: a ceiling was only ever a verdict there. The mechanism
+    lives in `child.ts` (mutable budget, a held ceiling, one offer) and the question in `ceiling.ts`, so the
+    child stays testable with no UI and the dialog stays testable with no session.
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 299 tests, no live provider needed
+npm test            # vitest run — 380 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/tui-card.mjs            # the card as pi's own ToolExecutionComponent draws it
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
+node verification/rpc-ceiling-dialog.mjs "Extend by 40 turns"     # the ceiling dialog, granted
+node verification/rpc-ceiling-dialog.mjs "Reject"                # …and refused: the old behaviour
+node verification/rpc-ceiling-dialog.mjs dismiss                 # …and unanswered: Esc enforces (FM-11)
 ```
 
 Live smoke (uses the configured provider, run from a scratch dir):

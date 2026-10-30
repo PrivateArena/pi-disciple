@@ -151,3 +151,18 @@ describe("/subagentc models", () => {
 		expect(catalog.indexOf("kilo/")).toBeLessThan(catalog.indexOf("local/"));
 	});
 });
+
+describe("the ceiling switch", () => {
+	it("shows the switch, the ladder it unlocks, and the window the clock holds", () => {
+		const view = buildConfigView(input({}));
+		expect(view).toContain("askToExtend");
+		expect(view).toContain("+20t/+5m · +40t/+10m · +60t/+15m · +100t/+25m");
+		expect(view).toContain("One dialog per run is allowed at a spent budget");
+	});
+
+	it("says so when the human turned it off", () => {
+		const view = buildConfigView(input({ limits: { ...DEFAULT_LIMITS, askToExtend: false } }));
+		expect(view).toContain("no — a spent budget ends the run as it always did");
+		expect(view).toContain("subagent.askToExtend is off");
+	});
+});

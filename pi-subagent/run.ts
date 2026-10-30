@@ -6,8 +6,8 @@
 import { formatSize, truncateHead, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { writeFileSync } from "node:fs";
 import type { Usage } from "@earendil-works/pi-ai";
-import { reportFileFor, type ChildResult, type Exit, type RunProgress } from "./child.ts";
-import { clip, roleDisplayName, taskLabel } from "./labels.ts";
+import { reportFileFor, type CeilingReport, type ChildResult, type Exit, type RunProgress } from "./child.ts";
+import { clip, formatCeiling, roleDisplayName, taskLabel } from "./labels.ts";
 import type { RoleId } from "./roles.ts";
 
 export { clip } from "./labels.ts";
@@ -177,6 +177,11 @@ export interface SubagentDetails extends SubagentCardFields {
 	/** What the child was last seen doing (`bash`, `read`, …) — only while running. */
 	activity?: string;
 	/**
+	 * The one budget-extension offer this run got, if a budget was ever spent: what the human was asked, and
+	 * what they answered. Absent means no ceiling was reached, which is the ordinary run.
+	 */
+	ceiling?: CeilingReport;
+	/**
 	 * The child's report on its own, without the model-facing header, and always the *whole* thing: the
 	 * `maxResultBytes` cap bounds what the *model* is sent, never what the human is shown (see
 	 * `composeResult`, which writes the omitted part to `reportFile`).
@@ -201,6 +206,8 @@ export interface ProgressContext {
 	model?: string;
 	shimTools: string[];
 	nestedCalls: number;
+	/** A granted extension, so a card that stays open for minutes says the run has more rope than it started with. */
+	ceiling?: CeilingReport;
 }
 
 /**
@@ -217,6 +224,7 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
 		truncated: false,
 		elapsedMs: progress.elapsedMs,
 		activity: progress.lastTool ?? "thinking",
+		ceiling: host.ceiling,
 		task: host.task,
 		model: host.model,
 		shimTools: host.shimTools,
@@ -291,9 +299,11 @@ export function composeResult(
 	const childSessionId = result.childSessionId ?? extra.childSessionId;
 	const spillFile = cut.truncated ? writeReport(sessionFile, report) : undefined;
 	const status = result.exit === "done" ? "DONE" : `INCOMPLETE (${result.exit})`;
+	const ceilingNote = formatCeiling(result.ceiling);
 	const header =
 		`[subagent ${role} · ${status} · ${result.turns} turns · ${result.toolCalls} tool calls · ${(elapsedMs / 1000).toFixed(1)}s]` +
 		(extra.model ? `\nmodel: ${extra.model}` : "") +
+		(ceilingNote ? `\n${ceilingNote}` : "") +
 		(sessionFile ? `\ntranscript: ${sessionFile}` : "") +
 		(result.error ? `\nerror: ${result.error}` : "");
 	const cutNote = `[… the report is ${formatSize(cut.totalBytes)} and only its first ${formatSize(Buffer.byteLength(answer))} is shown here, per subagent.maxResultBytes`;
@@ -308,6 +318,7 @@ export function composeResult(
 			status: uiStatus(result.exit),
 			role,
 			exit: result.exit,
+			ceiling: result.ceiling,
 			turns: result.turns,
 			toolCalls: result.toolCalls,
 			childSessionFile: sessionFile,

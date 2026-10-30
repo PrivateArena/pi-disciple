@@ -12,10 +12,40 @@
  */
 
 import type { RoleId } from "./roles.ts";
+import type { CeilingReport } from "./child.ts";
 
 /** Clip for a card row: a card gets a summary, never a whole field. */
 export function clip(text: string, maxChars: number): string {
 	return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
+}
+
+/** `21.0s` below a minute, then `13m 33s`, then `2h 3m`. */
+export function formatDuration(ms: number): string {
+	const seconds = Math.max(0, ms) / 1000;
+	if (seconds < 60) return `${seconds.toFixed(1)}s`;
+	const totalMinutes = Math.floor(seconds / 60);
+	if (totalMinutes < 60) return `${totalMinutes}m ${Math.round(seconds % 60)}s`;
+	return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+}
+
+/**
+ * What the human decided about a spent budget, as one clause — the same words on the card and in the
+ * model-facing header, so neither surface can make a granted extension look more or less generous than the other.
+ * "" when no budget was ever spent, which is the ordinary run.
+ */
+export function formatCeiling(report: CeilingReport | undefined): string {
+	if (!report) return "";
+	const where = report.reason === "maxTurns" ? "the turn limit" : "the time budget";
+	switch (report.outcome) {
+		case "granted":
+			return `budget extended by the user at ${where}: +${report.turns} turns / +${report.minutes} min`;
+		case "rejected":
+			return `extension declined by the user at ${where}`;
+		case "dismissed":
+			return `extension went unanswered at ${where} (Esc, or the dialog timed out) — the limit stood`;
+		case "no_ui":
+			return `no UI to ask for an extension at ${where} — the limit stood`;
+	}
 }
 
 /**

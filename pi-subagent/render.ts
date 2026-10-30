@@ -16,7 +16,7 @@ import { keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions
 import type { Usage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import type { Exit } from "./child.ts";
-import { roleDisplayName, taskBody } from "./labels.ts";
+import { formatCeiling, formatDuration, roleDisplayName, taskBody } from "./labels.ts";
 import { configuredDefaultRole, type RoleId } from "./roles.ts";
 import type { SubagentDetails } from "./run.ts";
 
@@ -30,14 +30,9 @@ export const SUBAGENT_GLYPH = "🤖";
  */
 export const COLLAPSED_REPORT_LINES = 10;
 
-/** `21.0s` below a minute, then `13m 33s`, then `2h 3m`. */
-export function formatDuration(ms: number): string {
-	const seconds = Math.max(0, ms) / 1000;
-	if (seconds < 60) return `${seconds.toFixed(1)}s`;
-	const totalMinutes = Math.floor(seconds / 60);
-	if (totalMinutes < 60) return `${totalMinutes}m ${Math.round(seconds % 60)}s`;
-	return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
-}
+// Re-exported: the duration formatter lives with the other card strings (`labels.ts`), and the ceiling
+// dialog uses it too.
+export { formatDuration } from "./labels.ts";
 
 /** `4.2k token`, or "" when the run reported no usage — the count is never guessed at. */
 export function formatTokenCount(usage: Usage | undefined): string {
@@ -74,13 +69,27 @@ export function formatStatusLine(details: SubagentDetails, usage: Usage | undefi
 	const color = (exit: Exit) => (exit === "done" ? "success" : exit === "error" ? "error" : "warning");
 	if (!details.exit) {
 		const elapsed = details.elapsedMs > 0 ? ` for ${formatDuration(details.elapsedMs)}` : "";
-		return theme.fg("accent", `Agent running${elapsed}${stats}`);
+		// An extension the human granted is part of "what the run is doing", and a card that stays open for
+		// another ten minutes should not look like it forgot it ever had a budget.
+		const note = details.ceiling?.outcome === "granted" ? formatCeiling(details.ceiling) : "";
+		return theme.fg("accent", `Agent running${elapsed}${stats}${note ? ` — ${note}` : ""}`);
 	}
-	if (details.exit === "done") return theme.fg(color("done"), `Agent completed in ${formatDuration(details.elapsedMs)}${stats}.`);
+	if (details.exit === "done") return theme.fg(color("done"), sentence(`Agent completed in ${formatDuration(details.elapsedMs)}${stats}.`, details));
 	if (details.exit === "error") {
-		return theme.fg(color("error"), `Agent failed after ${formatDuration(details.elapsedMs)}${stats}: ${details.error ?? "the child returned an error"}`);
+		return theme.fg(color("error"), sentence(`Agent failed after ${formatDuration(details.elapsedMs)}${stats}: ${details.error ?? "the child returned an error"}`, details, false));
 	}
-	return theme.fg(color(details.exit), `Agent stopped after ${formatDuration(details.elapsedMs)} (${details.exit})${stats}.`);
+	return theme.fg(color(details.exit), sentence(`Agent stopped after ${formatDuration(details.elapsedMs)} (${details.exit})${stats}.`, details));
+}
+
+/**
+ * The status sentence, with what the human answered about a spent budget appended.
+ * The period moves to the end of the note, so the line stays one sentence instead of gaining a stray dot.
+ */
+function sentence(line: string, details: SubagentDetails, period = true): string {
+	const note = formatCeiling(details.ceiling);
+	if (!note) return line;
+	const stem = period ? line.replace(/\.$/, "") : line;
+	return `${stem} — ${note}.`;
 }
 
 /** The identity line: what ran, on which model, and where to read the whole exchange. */

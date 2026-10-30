@@ -172,6 +172,13 @@ export interface SubagentLimits {
 	 * description and two `<rules>` bullets, which is why the tool goes unused.
 	 */
 	delegationPrompt: boolean;
+	/**
+	 * Ask the human, once per run, when a child reaches its turn or time budget (`subagent.askToExtend`).
+	 * The budgets are per-role guesses, and the common failure is a delegation that turns out bigger than the
+	 * role guessed: the dialog hands the run more turns and minutes, or ends it as it always was. Anything other
+	 * than an explicit "Extend" choice — Esc, a dialog nobody answered, no UI — enforces the ceiling unchanged.
+	 */
+	askToExtend: boolean;
 }
 
 /** Matches the shipped default config block in the plan (step 17). */
@@ -214,6 +221,7 @@ export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
 	timeoutMinutes: 20,
 	maxResultBytes: 65536,
 	keepTranscripts: 20,
+	askToExtend: true,
 };
 
 /** Ordered permission entries of a `gate.permission` map (insertion order is the rule order). */
@@ -436,6 +444,10 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 	if (raw.delegationPrompt !== undefined) {
 		if (typeof raw.delegationPrompt === "boolean") limits.delegationPrompt = raw.delegationPrompt;
 		else errors.push(`${where}: subagent.delegationPrompt must be a boolean, ignored`);
+	}
+	if (raw.askToExtend !== undefined) {
+		if (typeof raw.askToExtend === "boolean") limits.askToExtend = raw.askToExtend;
+		else errors.push(`${where}: subagent.askToExtend must be a boolean, ignored`);
 	}
 	return { limits, errors };
 }

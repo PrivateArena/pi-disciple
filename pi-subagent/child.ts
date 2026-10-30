@@ -34,6 +34,54 @@ export interface RunProgress {
 
 export type Exit = "done" | "aborted" | "timeout" | "maxTurns" | "callLimit" | "overflow" | "error";
 
+/** Which budget ran out. */
+export type CeilingReason = "maxTurns" | "timeout";
+
+/** The state of a run at the moment its budget is spent — what the human decides on. */
+export interface CeilingAsk {
+	reason: CeilingReason;
+	role: string;
+	/** What the child was told to do, whole — the human decides on this, not on a summary. */
+	task: string;
+	turns: number;
+	toolCalls: number;
+	lastTool?: string;
+	elapsedMs: number;
+	/** The turn budget that was reached (already the extended one, if this run was extended before). */
+	maxTurns: number;
+	timeoutMinutes: number;
+}
+
+/** More rope, as the human gave it: both figures are added to the budget that ran out. */
+export interface CeilingGrant {
+	turns: number;
+	minutes: number;
+}
+
+/** Only `granted` extends the run; every other outcome enforces the ceiling exactly as it always did. */
+export type CeilingOutcome = "granted" | "rejected" | "dismissed" | "no_ui";
+
+export interface CeilingAnswer {
+	outcome: CeilingOutcome;
+	grant?: CeilingGrant;
+}
+
+/** What the run did with its single offer, carried out to the card and the model-facing header. */
+export interface CeilingReport {
+	reason: CeilingReason;
+	outcome: CeilingOutcome;
+	/** Turns and minutes added by the grant; `0`/`0` when the ceiling was enforced instead. */
+	turns: number;
+	minutes: number;
+}
+
+/**
+ * The one question a ceiling may ask: "more rope?". Called at most once per run, before the ceiling is
+ * enforced; resolve `no_ui`/`dismissed` to have the ceiling enforced unchanged. See `pi-subagent/ceiling.ts`
+ * for who asks and how, and for the bound the answer must respect ({@link CEILING_OFFER_HOLD_MS}).
+ */
+export type CeilingAskHandler = (ask: CeilingAsk) => Promise<CeilingAnswer>;
+
 /** `aborted > timeout > callLimit > overflow > maxTurns > error > done` (red-team §7). */
 const EXIT_PRECEDENCE: readonly Exit[] = ["aborted", "timeout", "callLimit", "overflow", "maxTurns", "error", "done"];
 
@@ -46,6 +94,8 @@ export interface ChildResult {
 	childSessionId?: string;
 	usage?: Usage;
 	error?: string;
+	/** Absent when no budget was spent; present whenever the ceiling was reached, extended or not. */
+	ceiling?: CeilingReport;
 }
 
 export interface ChildRunInput {
@@ -65,8 +115,18 @@ export interface ChildRunInput {
 	hardSlackMs?: number;
 	/** How long past the hard ceiling a run may still take to finish writing its report; a test seam. */
 	reportGraceMs?: number;
+	/**
+	 * How long the hard ceiling waits for an answer to the extension question; a test seam. The real window is
+	 * the backstop behind the dialog's own timeout, so it must not shrink without the dialog's shrinking too.
+	 */
+	ceilingHoldMs?: number;
 	/** The only test seam in this file: replaces `createAgentSession`. */
 	sessionFactory?: (options: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>;
+	/**
+	 * Ask the human for an extension when a budget runs out (`pi-subagent/ceiling.ts`). Absent means a spent
+	 * budget is a spent budget: the child is steered to conclude, which is what always happened.
+	 */
+	onCeiling?: CeilingAskHandler;
 }
 
 /** Stub loader shaped exactly like `P/examples/sdk/12-full-control.ts`: no extensions, no skills. */
@@ -147,9 +207,10 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 				if (event.message.role === "assistant") {
 					streaming = { text: false, toolCall: false };
 					turns++;
-					if (turns >= input.role.maxTurns) {
-						exit = pickEarlier(exit, "maxTurns");
-						steerForEnd(`The ${input.role.name} role reached its limit of ${input.role.maxTurns} turns`);
+					if (turns >= budget.maxTurns) {
+						// A spent turn budget is a question before it is a verdict (`reachCeiling`): with a broker the
+						// human decides, without one this is exactly the steer this run always got.
+						void reachCeiling("maxTurns");
 					} else if (contextWindow > 0 && contextTokens(event.message) > contextWindow * OVERFLOW_RATIO) {
 						exit = pickEarlier(exit, "overflow");
 						steerForEnd("The context window is nearly full");
@@ -178,47 +239,166 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 		}
 	});
 
+	// --------------------------------------------------------------------------- the two budgets
+	// Mutable, because the human can hand out more of both mid-run (`pi-subagent/ceiling.ts`).
+	const budget = { maxTurns: input.role.maxTurns, timeoutMinutes: input.role.timeoutMinutes };
+
 	let softTimer: ReturnType<typeof setTimeout> | undefined;
 	let hardTimer: ReturnType<typeof setTimeout> | undefined;
-	const softMs = input.role.timeoutMinutes * 60_000;
 	const slackMs = input.hardSlackMs ?? HARD_SETTLE_MS;
-	// Absolute timestamps: a deferral re-arms the ceiling, so durations would drift with every grant.
-	const timerStart = Date.now();
-	const hardAt = timerStart + softMs + slackMs;
+	const reportGraceMs = input.reportGraceMs ?? REPORT_GRACE_MS;
+	// Absolute timestamps: a deferral re-arms the ceiling, and so does a granted extension, so durations
+	// would drift with every grant.
+	let softAt = Date.now() + budget.timeoutMinutes * 60_000;
+	let hardAt = softAt + slackMs;
 	// The absolute wall: the hard ceiling plus a window reserved for the report. Past this, the clock wins
 	// whatever the child is doing, so a delegation cannot become unbounded.
-	const reportWallAt = hardAt + (input.reportGraceMs ?? REPORT_GRACE_MS);
+	let reportWallAt = hardAt + reportGraceMs;
+	let grantedToolGrace = false;
+	let ceiling: CeilingReport | undefined;
+	/** The run gets one offer, whatever it answered: a second dialog would be the same question twice. */
+	let offerSettled = false;
+	let offerPending: Promise<void> | undefined;
+	/** Until when the hard ceiling waits for an answer, bounded so no run can outlive its own dialog. */
+	let offerHoldUntil = 0;
+	const offerHoldMs = input.ceilingHoldMs ?? CEILING_OFFER_HOLD_MS;
+	/** The race is over: an answer arriving now can no longer change what the run did. */
+	let settled = false;
 	const abortWait = new Promise<"aborted">((resolve) => {
 		if (input.signal.aborted) resolve("aborted");
 		else input.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
 	});
-	// The soft budget only asks for a conclusion; the hard ceiling is what guarantees we settle (FM-2).
-	// At the ceiling, though, the clock defers to the work: killing a run while it writes its report, or
-	// while a tool is still executing (so the steer never reached the model), destroys the result we paid
-	// for. The deferral is bounded by `reportWallAt`, so the guarantee survives.
+	// The soft budget only asks for a conclusion (or asks the human); the hard ceiling is what guarantees we
+	// settle (FM-2). At the ceiling, though, the clock defers to the work: killing a run while it writes its
+	// report, while a tool is still executing (so the steer never reached the model), or while the human is
+	// answering an extension question, destroys or outranks the result we paid for. Every deferral is bounded
+	// — by `reportWallAt`, or by `offerHoldUntil` — so the guarantee survives.
+	let resolveTimeout!: () => void;
 	const deadline = new Promise<"timeout">((resolve) => {
-		let grantedToolGrace = false;
-		function arm(ms: number): void {
-			hardTimer = setTimeout(fire, ms);
-			hardTimer.unref?.();
-		}
-		function fire(): void {
-			const remaining = reportWallAt - Date.now();
-			if (remaining <= 0) return void resolve("timeout");
-			if (isWritingReport()) return void arm(remaining);
-			if (!grantedToolGrace && isExecutingTool()) {
-				grantedToolGrace = true;
-				return void arm(Math.min(slackMs, remaining));
-			}
-			resolve("timeout");
-		}
-		arm(softMs + slackMs);
+		resolveTimeout = () => resolve("timeout");
 	});
-	softTimer = setTimeout(() => {
-		steerForEnd(`The ${input.role.name} role passed its ${input.role.timeoutMinutes} minute budget`);
-		emit();
-	}, softMs);
-	softTimer.unref?.();
+
+	/** Arm the hard ceiling for `target`, replacing whatever deferral was pending. */
+	function armHardAt(target: number): void {
+		clearTimeout(hardTimer);
+		hardTimer = setTimeout(fireHard, Math.max(0, target - Date.now()));
+		hardTimer.unref?.();
+	}
+
+	/** Re-decide when the ceiling next fires: the ceiling itself, or the hold for a pending answer. */
+	function armHard(): void {
+		armHardAt(Math.max(hardAt, offerHoldUntil));
+	}
+
+	function fireHard(): void {
+		if (offerHoldUntil > Date.now()) return void armHardAt(offerHoldUntil);
+		const remaining = reportWallAt - Date.now();
+		if (remaining <= 0) return void resolveTimeout();
+		if (isWritingReport()) return void armHardAt(reportWallAt);
+		if (!grantedToolGrace && isExecutingTool()) {
+			grantedToolGrace = true;
+			return void armHardAt(Math.min(hardAt + slackMs, reportWallAt));
+		}
+		// An answer that arrived after the ceiling, or an extension that moved it: re-decide, do not kill.
+		if (hardAt > Date.now()) return void armHard();
+		resolveTimeout();
+	}
+
+	function armSoft(): void {
+		clearTimeout(softTimer);
+		softTimer = setTimeout(() => {
+			void reachCeiling("timeout");
+			emit();
+		}, Math.max(0, softAt - Date.now()));
+		softTimer.unref?.();
+	}
+
+	armHardAt(hardAt);
+	armSoft();
+
+	// ------------------------------------------------------------------------ the ceiling question
+
+	/** The child is told to conclude, and a spent turn budget is what the exit will say. */
+	function enforceCeiling(reason: CeilingReason): void {
+		if (reason === "maxTurns") {
+			exit = pickEarlier(exit, "maxTurns");
+			steerForEnd(`The ${input.role.name} role reached its limit of ${budget.maxTurns} turns`);
+			return;
+		}
+		steerForEnd(`The ${input.role.name} role passed its ${budget.timeoutMinutes} minute budget`);
+	}
+
+	function applyCeilingGrant(reason: CeilingReason, grant: CeilingGrant): void {
+		budget.maxTurns += grant.turns;
+		budget.timeoutMinutes += grant.minutes;
+		ceiling = { reason, outcome: "granted", turns: grant.turns, minutes: grant.minutes };
+		// The new clock starts at the answer, not at the budget that just expired: "+5 minutes" means five
+		// more from now, and the tool grace is a fresh run's privilege, not this one's leftover.
+		softAt = Date.now() + grant.minutes * 60_000;
+		hardAt = softAt + slackMs;
+		reportWallAt = hardAt + reportGraceMs;
+		grantedToolGrace = false;
+		armSoft();
+		armHard();
+		// Not a `steerForEnd`: this is the opposite ask, and it must not spend the child's two "conclude now".
+		void session
+			.steer(
+				`The user extended this run by ${grant.turns} turns and ${grant.minutes} minutes — it now has ${budget.maxTurns} turns and ${budget.timeoutMinutes} minutes. Continue the task, and report before the new limit.`,
+			)
+			.catch(() => undefined);
+	}
+
+	async function askCeiling(reason: CeilingReason): Promise<CeilingAnswer> {
+		// Hold the ceiling first: an answer two minutes late must not arrive to a killed run. The dialog is
+		// expected to time out inside this window (`CEILING_DIALOG_TIMEOUT_MS`); this is the backstop.
+		offerHoldUntil = Date.now() + offerHoldMs;
+		armHard();
+		try {
+			const ask: CeilingAsk = {
+				reason,
+				role: input.role.name,
+				task: input.task,
+				turns,
+				toolCalls,
+				lastTool,
+				elapsedMs: Date.now() - startedAt,
+				maxTurns: budget.maxTurns,
+				timeoutMinutes: budget.timeoutMinutes,
+			};
+			return (await input.onCeiling?.(ask)) ?? { outcome: "no_ui" };
+		} catch {
+			// A broker that cannot ask is a broker that said no: the ceiling is enforced, never skipped.
+			return { outcome: "rejected" };
+		} finally {
+			offerHoldUntil = 0;
+			armHard();
+		}
+	}
+
+	/** A budget ran out: ask once, then enforce what the answer did not extend. */
+	function reachCeiling(reason: CeilingReason): Promise<void> {
+		if (offerPending) return offerPending;
+		if (offerSettled || !input.onCeiling) {
+			if (!settled) enforceCeiling(reason);
+			return Promise.resolve();
+		}
+		let done!: () => void;
+		offerPending = new Promise<void>((resolve) => {
+			done = resolve;
+		});
+		void askCeiling(reason).then((answer) => {
+			offerSettled = true;
+			offerPending = undefined;
+			if (settled) return void done();
+			if (answer.outcome === "granted" && answer.grant) applyCeilingGrant(reason, answer.grant);
+			else {
+				ceiling = { reason, outcome: answer.outcome, turns: 0, minutes: 0 };
+				enforceCeiling(reason);
+			}
+			done();
+		});
+		return offerPending;
+	}
 
 	try {
 		const raced = await Promise.race([
@@ -233,6 +413,10 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 		exit = pickEarlier(exit, "error");
 		errorText = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 	} finally {
+		// No answer after this point can change the run: the offer, if one is still open, has nothing left to
+		// extend, and enforcing the ceiling would stamp an exit onto a run that already ended.
+		settled = true;
+		offerHoldUntil = 0;
 		unsubscribe();
 		clearTimeout(softTimer);
 		clearTimeout(hardTimer);
@@ -253,6 +437,7 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 		childSessionId: session.sessionManager.getSessionId(),
 		usage: totalUsage(session.messages),
 		error: errorText ?? (finalExit === "error" ? providerError : undefined),
+		...(ceiling ? { ceiling } : {}),
 	};
 }
 
@@ -292,6 +477,13 @@ export const REPORT_GRACE_MS = 3 * 60_000;
 
 /** At most two "conclude now" asks per run: one per reason, and a reason never repeats. */
 export const MAX_STEERS = 2;
+
+/**
+ * How long the hard ceiling is held while the human answers the extension question. The dialog is the one
+ * that decides (see `ceiling.ts::CEILING_DIALOG_TIMEOUT_MS`, which must stay inside this window); this is the
+ * backstop that keeps a run bounded if a broker never answers at all.
+ */
+export const CEILING_OFFER_HOLD_MS = 6 * 60_000;
 
 /** Which content kinds an (possibly partial) assistant message carries. */
 function contentShape(message: AgentMessage): { text: boolean; toolCall: boolean } {

@@ -12,6 +12,8 @@ import {
 	runChild,
 	totalUsage,
 	type ChildRunInput,
+	type CeilingAnswer,
+	type CeilingAsk,
 } from "../child.ts";
 import { ROLES } from "../roles.ts";
 import { buildShims, type ShimHost } from "../shims.ts";
@@ -327,5 +329,125 @@ describe("child resilience", () => {
 		});
 		expect(result.exit).toBe("error");
 		expect(result.error).toContain("503");
+	});
+});
+
+describe("the ceiling offer (runChild.onCeiling)", () => {
+	const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+	it("asks at maxTurns, and a granted extension raises the limit instead of ending the run", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const asks: CeilingAsk[] = [];
+		const controller = new AbortController();
+		const run = runChild({
+			...input({ signal: controller.signal }),
+			role: { ...ROLES.explore, maxTurns: 2 },
+			hardSlackMs: 60_000,
+			onCeiling: async (ask) => {
+				asks.push(ask);
+				return { outcome: "granted", grant: { turns: 2, minutes: 1 } };
+			},
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await tick(10);
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		await tick(20);
+
+		expect(asks).toHaveLength(1);
+		expect(asks[0]).toMatchObject({ reason: "maxTurns", role: "explore", task: "find the gate", turns: 2, maxTurns: 2 });
+		const asked = spy.steers.join(" ");
+		// The child is told it has more rope, not to wrap up — the whole point of asking before enforcing.
+		expect(asked).toMatch(/extended this run by 2 turns and 1 minutes/);
+		expect(asked).not.toMatch(/Summarise your findings now/);
+
+		// The raised limit is what the run is measured against now, and the offer is spent: enforce, no dialog.
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		await tick(20);
+		expect(asks).toHaveLength(1);
+		expect(spy.steers.join(" ")).toMatch(/reached its limit of 4 turns/);
+
+		controller.abort();
+		const result = await run;
+		expect(result.turns).toBe(4);
+		expect(result.ceiling).toEqual({ reason: "maxTurns", outcome: "granted", turns: 2, minutes: 1 });
+	});
+
+	it("a refused offer is exactly the behaviour this run always had", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const run = runChild({
+			...input(),
+			role: { ...ROLES.explore, maxTurns: 2 },
+			hardSlackMs: 60_000,
+			onCeiling: async () => ({ outcome: "rejected" }),
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await tick(10);
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [] } });
+		await tick(20);
+		expect(spy.steers.join(" ")).toMatch(/reached its limit of 2 turns\. Summarise your findings now/);
+		spy.release?.();
+		const result = await run;
+		expect(result.exit).toBe("maxTurns");
+		expect(result.ceiling).toEqual({ reason: "maxTurns", outcome: "rejected", turns: 0, minutes: 0 });
+	});
+
+	it("holds the hard ceiling for the answer, then restarts both budgets from it", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		let answer!: (a: CeilingAnswer) => void;
+		const asks: CeilingAsk[] = [];
+		const started = Date.now();
+		const run = runChild({
+			...input(),
+			// A 600 ms budget, a 640 ms ceiling and a 760 ms wall: the offer below outlives all three.
+			role: { ...ROLES.explore, timeoutMinutes: 0.01 },
+			hardSlackMs: 40,
+			reportGraceMs: 120,
+			ceilingHoldMs: 5_000,
+			onCeiling: (ask) => {
+				asks.push(ask);
+				return new Promise<CeilingAnswer>((resolve) => {
+					answer = resolve;
+				});
+			},
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await tick(780);
+		expect(asks.map((ask) => ask.reason)).toEqual(["timeout"]);
+		// The clock reached the wall while the human had not answered — and did not cut the run.
+		expect(Date.now() - started).toBeGreaterThanOrEqual(760);
+		expect(spy.aborted).toBe(false);
+
+		answer({ outcome: "granted", grant: { turns: 5, minutes: 0.05 } });
+		await tick(150);
+		expect(spy.aborted).toBe(false);
+		expect(spy.steers.join(" ")).toMatch(/extended this run by 5 turns and 0.05 minutes/);
+		spy.release?.();
+		const result = await run;
+		// The run finished inside its second budget, so it reports as a completion, not as a cut short.
+		expect(result.exit).toBe("done");
+		expect(result.ceiling).toEqual({ reason: "timeout", outcome: "granted", turns: 5, minutes: 0.05 });
+	});
+
+	it("settles on the ceiling even when the offer never answers", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const started = Date.now();
+		const result = await runChild({
+			...input(),
+			role: { ...ROLES.explore, timeoutMinutes: 0.01 },
+			hardSlackMs: 40,
+			reportGraceMs: 120,
+			ceilingHoldMs: 200,
+			// A broker that hangs: the dialog is not the thing that has to be trustworthy.
+			onCeiling: () => new Promise<CeilingAnswer>(() => undefined),
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		expect(result.exit).toBe("timeout");
+		expect(spy.aborted).toBe(true);
+		// Asked at 600 ms, held for 200 ms of backstop, then the wall (760 ms) decides.
+		expect(Date.now() - started).toBeGreaterThanOrEqual(760);
+		expect(result.ceiling).toBeUndefined();
 	});
 });

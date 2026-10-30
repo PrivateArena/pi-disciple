@@ -16,13 +16,14 @@ import { type Static, Type } from "typebox";
 import { canonicalRole, type RoleId, resolveCallRole, ROLE_ORDER, setConfiguredDefaultRole, type RoleTable } from "./roles.ts";
 import { buildShims, NESTED_CALL_CEILING, type ShimHost } from "./shims.ts";
 import { childSessionDir, pruneTranscripts, runChild } from "./child.ts";
+import type { CeilingReport, RunProgress } from "./child.ts";
+import { createCeilingBroker } from "./ceiling.ts";
 import { loadSubagentLimits } from "./config-file.ts";
 import { childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
 import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type SubagentCommandArg } from "./config-view.ts";
 import { buildDelegationSection, DELEGATION_SECTION } from "./delegation.ts";
 import { claimGuard, composeResult, currentGuard, formatProgress, progressDetails, releaseGuard } from "./run.ts";
 import { renderSubagentCall, renderSubagentResult } from "./render.ts";
-import type { RunProgress } from "./child.ts";
 
 /** How often a running child re-announces itself, even when it emitted no event. */
 const PROGRESS_TICK_MS = 2000;
@@ -186,6 +187,8 @@ export default function piSubagent(pi: ExtensionAPI) {
 			const shimNames = shims.map((shim) => shim.name);
 			const childModel = modelLabel(model, overridden);
 			const startedAt = Date.now();
+			// A granted extension goes on the live card, so a run that got more rope looks like one.
+			let ceiling: CeilingReport | undefined;
 			let latest: RunProgress = { turns: 0, toolCalls: 0, elapsedMs: 0 };
 			let lastEmitAt = 0;
 			const emitProgress = (force = false) => {
@@ -195,13 +198,37 @@ export default function piSubagent(pi: ExtensionAPI) {
 				lastEmitAt = now;
 				onUpdate({
 					content: [{ type: "text", text: formatProgress(latest, shims.length) }],
-					details: progressDetails(latest, { role: role.name, roleDefaulted: defaulted, task: args.task, model: childModel, shimTools: shimNames, nestedCalls: tally.calls }),
+					details: progressDetails(latest, {
+						role: role.name,
+						roleDefaulted: defaulted,
+						task: args.task,
+						model: childModel,
+						shimTools: shimNames,
+						nestedCalls: tally.calls,
+						ceiling,
+					}),
 				});
 			};
 			// A child that thinks for minutes without a tool event must still be heard from, or its card
 			// sits on a "no activity" placeholder for the whole run.
 			const heartbeat = setInterval(() => emitProgress(true), PROGRESS_TICK_MS);
 			heartbeat.unref?.();
+
+			// A spent budget is a question before it is a verdict: one dialog per run, and only an explicit "Extend"
+			// answer raises it. Switched off, or with no UI, nothing is asked and the ceiling lands exactly as it did
+			// before this existed.
+			const onCeiling = limits.askToExtend
+				? createCeilingBroker({
+						hasUI: ctx.hasUI,
+						ui: ctx.ui,
+						signal: controller.signal,
+						onOutcome: (reason, answer) => {
+							if (answer.outcome !== "granted" || !answer.grant) return;
+							ceiling = { reason, outcome: "granted", turns: answer.grant.turns, minutes: answer.grant.minutes };
+							emitProgress(true);
+						},
+					})
+				: undefined;
 
 			try {
 				const result = await runChild({
@@ -214,6 +241,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 					tools: shims,
 					sessionDir: ctx.sessionManager.getSessionDir(),
 					signal: controller.signal,
+					onCeiling,
 					onProgress: (progress) => {
 						latest = progress;
 						emitProgress();

@@ -34,6 +34,7 @@ export const DEFAULT_LIMITS: SubagentLimits = {
 	timeoutMinutes: 20,
 	maxResultBytes: 65536,
 	keepTranscripts: 20,
+	askToExtend: true,
 };
 
 export interface LoadedLimits {
@@ -55,8 +56,9 @@ const KEYS: readonly (keyof SubagentLimits)[] = ["maxTurns", "timeoutMinutes", "
 
 /**
  * Read the numeric limits, the `enabled` switch, the `model` pin, the default role, the delegation prompt
- * switch and the `roles` table; anything else in the section is ignored. A malformed value contributes an
- * error and leaves that field at its previous value, so a typo tightens nothing and cannot disable the tool.
+ * switch, the ceiling-extension switch and the `roles` table; anything else in the section is ignored. A
+ * malformed value contributes an error and leaves that field at its previous value, so a typo tightens nothing
+ * and cannot disable the tool.
  */
 
 const cache = new Map<string, { stamp: string; loaded: LoadedLimits }>();
@@ -126,6 +128,12 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 			}
 			loaded.limits = { ...loaded.limits, roles: merged };
 			loaded.origins.roles = file;
+		}
+		if (section.askToExtend !== undefined) {
+			if (typeof section.askToExtend === "boolean") {
+				loaded.limits = { ...loaded.limits, askToExtend: section.askToExtend };
+				loaded.origins.askToExtend = file;
+			} else loaded.errors.push(`${file}: subagent.askToExtend must be a boolean, ignored`);
 		}
 		if (section.delegationPrompt !== undefined) {
 			if (typeof section.delegationPrompt === "boolean") {

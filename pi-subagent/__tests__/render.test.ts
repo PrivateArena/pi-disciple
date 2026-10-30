@@ -273,3 +273,33 @@ describe("the frontend card contract", () => {
 		expect(clip("abcdefghij", 5)).toBe("abcd…");
 	});
 });
+
+describe("the budget extension on the card", () => {
+	it("appends what the human decided, and moves the period to the end", () => {
+		const granted = details({ ceiling: { reason: "maxTurns", outcome: "granted", turns: 40, minutes: 10 } });
+		expect(formatStatusLine(granted, undefined, theme)).toBe(
+			"Agent completed in 21.0s (2 turns, 3 tool uses) — budget extended by the user at the turn limit: +40 turns / +10 min.",
+		);
+		const refused = details({ status: "aborted", exit: "maxTurns", ceiling: { reason: "maxTurns", outcome: "rejected", turns: 0, minutes: 0 } });
+		expect(formatStatusLine(refused, undefined, theme)).toBe(
+			"Agent stopped after 21.0s (maxTurns) (2 turns, 3 tool uses) — extension declined by the user at the turn limit.",
+		);
+	});
+
+	it("says a running child is running on borrowed time", () => {
+		const running = details({
+			status: "running",
+			exit: undefined,
+			elapsedMs: 5_000,
+			ceiling: { reason: "timeout", outcome: "granted", turns: 20, minutes: 5 },
+		});
+		expect(formatStatusLine(running, undefined, theme)).toBe(
+			"Agent running for 5.0s (2 turns, 3 tool uses) — budget extended by the user at the time budget: +20 turns / +5 min",
+		);
+	});
+
+	it("stays silent about budgets for an ordinary run", () => {
+		expect(formatStatusLine(details(), undefined, theme)).toBe("Agent completed in 21.0s (2 turns, 3 tool uses).");
+		expect(formatResultBlock(details(), { content: [{ type: "text", text: "x" }], details: details() }, true, theme)).not.toContain("budget");
+	});
+});

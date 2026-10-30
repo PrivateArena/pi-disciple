@@ -16,7 +16,8 @@ import { childThinkingLevel } from "./model-override.ts";
 import type { ChildModelResolution } from "./model-override.ts";
 import { FORBIDDEN_CHILD_TOOLS, NESTED_CALL_CEILING } from "./shims.ts";
 import { ROLES, type Role, type RoleTable } from "./roles.ts";
-import { childSessionDir, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./child.ts";
+import { CEILING_OFFER_HOLD_MS, childSessionDir, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./child.ts";
+import { CEILING_DIALOG_TIMEOUT_MS, EXTENSION_STEPS } from "./ceiling.ts";
 import type { SubagentLimits } from "./config-file.ts";
 import type { RunGuard } from "./run.ts";
 
@@ -132,6 +133,12 @@ function limitsSection(input: ConfigViewInput): string[] {
 		["enabled", limits.enabled ? "yes" : "no (the subagent tool is hidden and calls fail)"],
 		["defaultRole", `${limits.defaultRole} — what a call gets when the model names no role`],
 		["delegationPrompt", limits.delegationPrompt ? "yes (a <delegation> section tells the model when to delegate)" : "no (only the tool description guides delegation)"],
+		[
+			"askToExtend",
+			limits.askToExtend
+				? `yes — a spent budget asks the human once per run (Esc, a timed-out dialog or no UI enforces it; ${CEILING_DIALOG_TIMEOUT_MS / 60_000} min to answer): ${extensionLadder()}`
+				: "no — a spent budget ends the run as it always did",
+		],
 		["maxTurns", `${limits.maxTurns} (a ceiling: a role gets min(role.maxTurns, this))`],
 		["timeoutMinutes", `${limits.timeoutMinutes} (a ceiling: a role gets min(role.timeoutMinutes, this))`],
 		["maxResultBytes", `${limits.maxResultBytes} (${formatBytes(limits.maxResultBytes)}) — the report comes back whole up to this; beyond it the head is sent and the full report is written next to the transcript as <id>.report.md`],
@@ -146,7 +153,15 @@ function limitsSection(input: ConfigViewInput): string[] {
 		`  deadline: at the role's minutes the child is told to conclude; ${HARD_SETTLE_MS / 1000}s later the ceiling fires.`,
 		`  A run is never cut mid-report or mid-tool-call — the ceiling waits for that to land, up to`,
 		`  ${REPORT_GRACE_MS / 60_000} min past it. Longest possible run: budget + ${(HARD_SETTLE_MS + REPORT_GRACE_MS) / 60_000} min.`,
+		limits.askToExtend
+			? `  One dialog per run is allowed at a spent budget, and the clock holds for it up to ${CEILING_OFFER_HOLD_MS / 60_000} min; a granted extension restarts\n  both budgets from the answer, so the longest run grows by the extension the human chose.`
+			: `  subagent.askToExtend is off: a spent budget is a spent budget, and no dialog is asked.`,
 	];
+}
+
+/** The extension ladder the ceiling dialog offers, in one line. */
+function extensionLadder(): string {
+	return EXTENSION_STEPS.map((step) => `+${step.turns}t/+${step.minutes}m`).join(" · ");
 }
 
 /** Stable marker for the roles block, shared with the command tests. */
@@ -182,6 +197,7 @@ function runtimeSection(input: ConfigViewInput): string[] {
 		`nested calls: ${NESTED_CALL_CEILING} per child (further calls are rejected) · forbidden in children: ${FORBIDDEN_CHILD_TOOLS.join(", ")}`,
 		`one child at a time: a second subagent call fails while one runs (globalThis guard, run.ts)`,
 		`delegation prompt: ${input.limits.delegationPrompt ? "on — a <delegation> system prompt section states when to hand work to a child (subagent.delegationPrompt)" : "off — subagent.delegationPrompt: false"}`,
+		`budget extension: ${input.limits.askToExtend ? `on — a spent budget asks the human once per run (${extensionLadder()})` : "off — subagent.askToExtend: false"}`,
 	];
 }
 

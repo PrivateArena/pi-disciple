@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { claimGuard, composeResult, currentGuard, formatProgress, releaseGuard, RUN_GUARD_KEY } from "../run.ts";
+import { claimGuard, composeResult, currentGuard, formatProgress, progressDetails, releaseGuard, RUN_GUARD_KEY } from "../run.ts";
 import { reportFileFor } from "../child.ts";
 import type { ChildResult } from "../child.ts";
 import { loadSubagentLimits } from "../config-file.ts";
@@ -258,5 +258,48 @@ describe("enabled switch", () => {
 		const loaded = loadSubagentLimits(root, false, root);
 		expect(loaded.limits.enabled).toBe(true);
 		expect(loaded.errors.join(" ")).toMatch(/enabled must be a boolean/);
+	});
+});
+
+describe("the budget extension in the result", () => {
+	it("says what the human decided about a spent budget", () => {
+		const result = composeResult(
+			child({ ceiling: { reason: "maxTurns", outcome: "granted", turns: 40, minutes: 10 } }),
+			"explore",
+			20_000,
+			90_000,
+		);
+		const text = (result.content[0] as { text: string }).text;
+		expect(text).toContain("budget extended by the user at the turn limit: +40 turns / +10 min");
+		// The card reads it off details, and the extension changes what the run was: not a cut, a longer rope.
+		expect(result.details.ceiling).toEqual({ reason: "maxTurns", outcome: "granted", turns: 40, minutes: 10 });
+	});
+
+	it("names a refused extension, so a spent budget does not read as a glitch", () => {
+		const refused = composeResult(
+			child({ exit: "timeout", ceiling: { reason: "timeout", outcome: "dismissed", turns: 0, minutes: 0 } }),
+			"explore",
+			20_000,
+			90_000,
+		);
+		expect((refused.content[0] as { text: string }).text).toContain(
+			"extension went unanswered at the time budget (Esc, or the dialog timed out) — the limit stood",
+		);
+	});
+
+	it("says nothing about budgets for a run that never spent one", () => {
+		expect((composeResult(child(), "explore", 20_000, 1000).content[0] as { text: string }).text).not.toContain("budget");
+	});
+
+	it("keeps a granted extension on the live card, so a long run says it has more rope", () => {
+		const details = progressDetails({ turns: 25, toolCalls: 9, elapsedMs: 40_000 }, {
+			role: "explore",
+			task: "survey the gate",
+			model: "local/x (inherited)",
+			shimTools: ["read"],
+			nestedCalls: 9,
+			ceiling: { reason: "maxTurns", outcome: "granted", turns: 20, minutes: 5 },
+		});
+		expect(details.ceiling).toEqual({ reason: "maxTurns", outcome: "granted", turns: 20, minutes: 5 });
 	});
 });

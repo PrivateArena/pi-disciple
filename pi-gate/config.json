@@ -36,6 +36,7 @@
     "model": "inherit",
     "defaultRole": "explore",
     "delegationPrompt": true,
+    "askToExtend": true,
     "maxTurns": 30,
     "timeoutMinutes": 20,
     "maxResultBytes": 65536,

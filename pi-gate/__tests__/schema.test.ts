@@ -75,6 +75,15 @@ describe("parseSubagentConfig", () => {
 		expect(DEFAULT_SUBAGENT_LIMITS.defaultRole).toBe("general-purpose");
 		expect(DEFAULT_SUBAGENT_LIMITS.delegationPrompt).toBe(true);
 	});
+
+	it("parses the ceiling-extension switch, and refuses a non-boolean", () => {
+		// Asking is the default: the budgets are guesses, and a human watching is the one who knows.
+		expect(DEFAULT_SUBAGENT_LIMITS.askToExtend).toBe(true);
+		expect(parseSubagentConfig({ askToExtend: false }, "test").limits.askToExtend).toBe(false);
+		const junk = parseSubagentConfig({ askToExtend: "yes" }, "test");
+		expect(junk.limits.askToExtend).toBeUndefined();
+		expect(junk.errors.join(" ")).toContain("subagent.askToExtend must be a boolean");
+	});
 });
 
 describe("subagent.roles", () => {

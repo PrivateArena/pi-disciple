@@ -50,6 +50,7 @@ const CASES: [label: string, config: Record<string, unknown>][] = [
 	["role ceilings", { roles: { r: { maxTurns: ROLE_TURNS_CEILING + 5, timeoutMinutes: ROLE_TIMEOUT_CEILING_MINUTES + 1 } } }],
 	["roles not an object", { roles: ["explore"] }],
 	["everything at once", { enabled: false, delegationPrompt: false, maxTurns: 2, model: "session", roles: { auditor: { tools: ["read"], maxTurns: 3 } } }],
+	["a non-boolean ceiling switch", { askToExtend: "yes" }],
 ];
 
 describe("the shipped duplication stays honest", () => {
@@ -59,7 +60,7 @@ describe("the shipped duplication stays honest", () => {
 			const where = document(config);
 			const file = loadSubagentLimits(where.cwd, false, where.agentDir);
 			// Same accepted values, key for key.
-			for (const key of ["enabled", "delegationPrompt", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole"] as const) {
+			for (const key of ["enabled", "delegationPrompt", "askToExtend", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole"] as const) {
 				if (pure.limits[key] === undefined) continue;
 				expect(file.limits[key], key).toEqual(pure.limits[key]);
 			}
@@ -73,6 +74,15 @@ describe("the shipped duplication stays honest", () => {
 			for (const error of readerErrors) expect(parserErrors.join(" | "), error).toContain(error);
 		});
 	}
+
+	it("ships the ceiling switch on, in both readers", () => {
+		// The dialog is the feature's whole value; a default that quietly turned it off would not be reported.
+		expect(DEFAULT_LIMITS.askToExtend).toBe(true);
+		const where = document({});
+		expect(loadSubagentLimits(where.cwd, false, where.agentDir).limits.askToExtend).toBe(true);
+		// The pure parser returns a partial: the caller owns the default, and both agree it is on.
+		expect(parseSubagentConfig({}, "test").limits.askToExtend).toBeUndefined();
+	});
 
 	it("mirrors the vocabulary constants", () => {
 		expect(ROLE_ID_PATTERN.test("general-purpose")).toBe(true);
