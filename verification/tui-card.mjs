@@ -24,7 +24,7 @@ const { composeResult } = await import(pathToFileURL(join(REPO, "pi-subagent", "
 const def = {
 	name: "subagent",
 	label: "subagent",
-	renderCall: (args, t, ctx) => renderSubagentCall(args, t, { argsComplete: ctx?.argsComplete, expanded: ctx?.expanded }),
+	renderCall: (args, t, ctx) => renderSubagentCall(args, t, { argsComplete: ctx?.argsComplete }),
 	renderResult: (result, options, t) => renderSubagentResult(result, options, t),
 };
 const ui = { requestRender() {} };
@@ -67,7 +67,7 @@ running.updateResult({ content: result.content, details: result.details, isError
 dump("finished", running);
 
 running.setExpanded(true);
-dump("finished, expanded (whole task under the role)", running);
+dump("finished, expanded (whole report)", running);
 
 const defaulted = component({ task });
 defaulted.setArgsComplete();

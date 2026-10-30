@@ -16,16 +16,19 @@ import { keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions
 import type { Usage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import type { Exit } from "./child.ts";
-import { roleDisplayName, taskSummary } from "./labels.ts";
+import { roleDisplayName, taskBody } from "./labels.ts";
 import { configuredDefaultRole, type RoleId } from "./roles.ts";
 import type { SubagentDetails } from "./run.ts";
 
 /** Glyph for the call title. pi's own tools have one per tool; this is ours. */
 export const SUBAGENT_GLYPH = "🤖";
 
-/** Report lines shown while the card is collapsed / expanded. Beyond the cap: a "more lines" hint. */
+/**
+ * Report lines shown while the card is collapsed. Beyond the cap: a "more lines" hint. Expanded, the card
+ * prints the report whole — expanding is the human asking for the rest, and truncating it there would send
+ * them to a file for text this process already holds.
+ */
 export const COLLAPSED_REPORT_LINES = 10;
-export const EXPANDED_REPORT_LINES = 50;
 
 /** `21.0s` below a minute, then `13m 33s`, then `2h 3m`. */
 export function formatDuration(ms: number): string {
@@ -110,12 +113,10 @@ function expandHint(): string {
 export function formatReportBody(details: SubagentDetails, report: string, expanded: boolean, theme: Theme): string {
 	const text = report.trim();
 	if (!text) return theme.fg("muted", "(the subagent returned no text)");
-	const budget = expanded ? EXPANDED_REPORT_LINES : COLLAPSED_REPORT_LINES;
-	const lines = text.split("\n");
-	const shown = lines.slice(0, budget).map((line) => theme.fg("toolOutput", line)).join("\n");
-	const remaining = lines.length - budget;
-	if (remaining <= 0) return shown;
-	return `${shown}\n${theme.fg("muted", `... (${remaining} more lines, ${expandHint()})`)}`;
+	const lines = text.split("\n").map((line) => theme.fg("toolOutput", line));
+	if (expanded || lines.length <= COLLAPSED_REPORT_LINES) return lines.join("\n");
+	const remaining = lines.length - COLLAPSED_REPORT_LINES;
+	return `${lines.slice(0, COLLAPSED_REPORT_LINES).join("\n")}\n${theme.fg("muted", `... (${remaining} more lines, ${expandHint()})`)}`;
 }
 
 /** The whole result block: status sentence, identity, then the report. */
@@ -129,7 +130,7 @@ export function formatResultBlock(
 	const status = formatStatusLine(details, result.usage, theme);
 	if (details.exit) return `${status}\n${formatIdentityLine(details, theme)}\n\n${formatReportBody(details, report, expanded, theme)}`;
 	// Running: the activity line is the payload — a frontend with no update at all has nothing to say.
-	// The task is not repeated here: the call block above the card carries it, summarized when collapsed.
+	// The task is not repeated here: the call block above the card already prints it whole.
 	const activity = details.activity ? `\n${theme.fg("dim", `last call: ${details.activity}`)}` : "";
 	return `${status}${activity}`;
 }
@@ -140,31 +141,28 @@ export interface CallTitleContext {
 	argsComplete?: boolean;
 	/** Role an unnamed call gets. Left out, the configured `subagent.defaultRole` is used. */
 	defaultRole?: RoleId;
-	/** The card is expanded: show the whole task under the title instead of the one-line summary. */
-	expanded?: boolean;
 }
 
 /**
- * The tool card's title line: what kind of call this is, and the task it was given.
+ * The tool card's call block: the role on the title line, then the complete task under it.
  *
  * The role *leads* the title, because that is the part a card must never lose: a title is drawn in the
- * width left after the transcript's indent, and a tail is what gets truncated. `Explore  Read the gate
- * config and list its keys` is the shape; the task is summarized to one line so a 500-character
- * delegation does not turn the call card into a paragraph (the whole task is one keystroke away, below).
+ * width left after the transcript's indent, and a tail is what gets truncated. The prompt is not a
+ * summary and not a tooltip — it is the human's instruction to a child they cannot watch, so it is
+ * printed whole, from the first render, and stays the same text for the life of the call. Wrapping and
+ * scrolling a tall block is pi's job (`ctrl+o`), not ours.
  *
  * pi renders this repeatedly while the call streams in, so an absent role means two different things and
  * says two different things here: *not yet* (arguments still arriving, so name no role the model may still
- * choose — "Launch subagent" with the task summary after it) or *not at all* (arguments complete, so name
- * the default that will actually run, marked as the human's choice rather than the model's).
+ * choose — "Launch subagent" with the prompt under it) or *not at all* (arguments complete, so name the
+ * default that will actually run, marked as the human's choice rather than the model's).
  */
 export function formatCallBlock(args: { role?: string; task?: string }, theme: Theme, context: CallTitleContext = {}): string {
 	const role = args.role ?? (context.argsComplete === false ? undefined : (context.defaultRole ?? configuredDefaultRole()));
 	const name = role ? `${roleDisplayName(role)}${args.role ? "" : " (default)"}` : "Launch subagent";
-	const bold = theme.fg("toolTitle", theme.bold(name));
-	// Expanded: the task gets its own lines, so the title stays just the role.
-	if (context.expanded && args.task) return `${bold}\n${theme.fg("muted", args.task)}`;
-	const summary = taskSummary(args.task);
-	return summary ? `${bold}  ${theme.fg("muted", summary)}` : bold;
+	const title = theme.fg("toolTitle", theme.bold(name));
+	const task = taskBody(args.task);
+	return task ? `${title}\n${theme.fg("muted", task)}` : title;
 }
 
 function textOf(result: AgentToolResult<unknown>): string {

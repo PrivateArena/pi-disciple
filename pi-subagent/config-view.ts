@@ -134,7 +134,7 @@ function limitsSection(input: ConfigViewInput): string[] {
 		["delegationPrompt", limits.delegationPrompt ? "yes (a <delegation> section tells the model when to delegate)" : "no (only the tool description guides delegation)"],
 		["maxTurns", `${limits.maxTurns} (a ceiling: a role gets min(role.maxTurns, this))`],
 		["timeoutMinutes", `${limits.timeoutMinutes} (a ceiling: a role gets min(role.timeoutMinutes, this))`],
-		["maxResultBytes", `${limits.maxResultBytes} (${formatBytes(limits.maxResultBytes)})`],
+		["maxResultBytes", `${limits.maxResultBytes} (${formatBytes(limits.maxResultBytes)}) — the report comes back whole up to this; beyond it the head is sent and the full report is written next to the transcript as <id>.report.md`],
 		["keepTranscripts", `${limits.keepTranscripts} per role dir`],
 		["model", limits.model ? `"${limits.model}"` : "(unset — inherit the session model)"],
 		["roles", limits.roles ? `${Object.keys(limits.roles).join(", ")} — see the roles section below` : "(none — the three built-ins in roles.ts)"],

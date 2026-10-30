@@ -3,7 +3,6 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
 	COLLAPSED_REPORT_LINES,
-	EXPANDED_REPORT_LINES,
 	formatCallBlock,
 	formatDuration,
 	formatIdentityLine,
@@ -102,17 +101,21 @@ describe("the status sentence", () => {
 describe("the report body", () => {
 	const longReport = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n");
 
-	it("shows the head collapsed and more expanded, and always says how much is left", () => {
-		const collapsed = formatReportBody(details(), longReport, false, theme).split("\n");
-		expect(collapsed[0]).toBe("line 1");
-		expect(collapsed[COLLAPSED_REPORT_LINES - 1]).toBe("line 10");
-		expect(collapsed).toHaveLength(COLLAPSED_REPORT_LINES + 1);
-		expect(collapsed.at(-1)).toContain("50 more lines");
+	it("shows the head collapsed and the whole report expanded, and says how much is left",
+		() => {
+			const collapsed = formatReportBody(details(), longReport, false, theme).split("\n");
+			expect(collapsed[0]).toBe("line 1");
+			expect(collapsed[COLLAPSED_REPORT_LINES - 1]).toBe("line 10");
+			expect(collapsed).toHaveLength(COLLAPSED_REPORT_LINES + 1);
+			expect(collapsed.at(-1)).toContain("50 more lines");
 
-		const expanded = formatReportBody(details(), longReport, true, theme).split("\n");
-		expect(expanded).toHaveLength(EXPANDED_REPORT_LINES + 1);
-		expect(expanded[EXPANDED_REPORT_LINES - 1]).toBe("line 50");
-	});
+			// Expanded is the human asking for the rest, so the card prints all of it: no second clip.
+			const expanded = formatReportBody(details(), longReport, true, theme).split("\n");
+			expect(expanded).toHaveLength(60);
+			expect(expanded.at(-1)).toBe("line 60");
+			expect(expanded.join("\n")).toBe(longReport);
+		},
+	);
 
 	it("adds no hint when the whole report fits", () => {
 		expect(formatReportBody(details(), "one\ntwo", false, theme)).toBe("one\ntwo");
@@ -155,13 +158,13 @@ describe("the result block", () => {
 
 	it("titles the call with the role, and admits when the role is not the model's",
 		() => {
-			// The role leads the title: it is the one part a narrow card must not lose to truncation.
-			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toBe("Explore  survey the gate");
-			expect(formatCallBlock({ role: "general-purpose", task: "fix the flaky test" }, theme)).toBe("General Purpose  fix the flaky test");
-			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toContain("survey the gate");
+			// The role leads the title: it is the one part a narrow card must not lose to truncation. The
+			// prompt goes under it, whole, from the first render of the call.
+			expect(formatCallBlock({ role: "explore", task: "survey the gate" }, theme)).toBe("Explore\nsurvey the gate");
+			expect(formatCallBlock({ role: "general-purpose", task: "fix the flaky test" }, theme)).toBe("General Purpose\nfix the flaky test");
 			// pi renders this while the arguments stream in: a role that has not arrived may still arrive.
 			expect(formatCallBlock({}, theme, { argsComplete: false })).toBe("Launch subagent");
-			expect(formatCallBlock({ task: "survey the gate" }, theme, { argsComplete: false })).toBe("Launch subagent  survey the gate");
+			expect(formatCallBlock({ task: "survey the gate" }, theme, { argsComplete: false })).toBe("Launch subagent\nsurvey the gate");
 			// Complete arguments and no role: name the role that will actually run, as the human's choice.
 			expect(formatCallBlock({}, theme, { argsComplete: true, defaultRole: "explore" })).toBe("Explore (default)");
 			expect(formatCallBlock({}, theme, { argsComplete: true })).toContain("(default)");
@@ -170,14 +173,14 @@ describe("the result block", () => {
 			expect(formatCallBlock({ role: "review" }, theme)).not.toContain("default");
 		});
 
-	it("summarizes a long task on the title line and shows the whole thing when expanded", () => {
-		const long = "Read every file in pi-gate/ and describe\\nhow the policy layer resolves a grant,\\nthen list the ones that can loop.";
-		const collapsed = formatCallBlock({ role: "explore", task: long }, theme);
-		expect(collapsed).not.toContain("\n"); // the title stays one line whatever the task contains
-		expect(collapsed).toContain("…");
-		const expanded = formatCallBlock({ role: "explore", task: long }, theme, { expanded: true });
-		expect(expanded).toContain("how the policy layer resolves a grant");
-		expect(expanded.startsWith("Explore\n")).toBe(true);
+	it("prints the whole prompt under the role, clipped never", () => {
+		const long = `Read every file in pi-gate/ and describe\nhow the policy layer resolves a grant,\nthen list ${"the ones that can loop; ".repeat(60)}and say why.`;
+		const block = formatCallBlock({ role: "explore", task: long }, theme);
+		expect(block.startsWith("Explore\n")).toBe(true);
+		expect(block).toBe(`Explore\n${long}`);
+		expect(block).not.toContain("…");
+		// The card's collapse is the scrollable affordance; the text itself is not cut to fit the title.
+		expect(formatCallBlock({ role: "explore", task: "  short task  \n\n" }, theme)).toBe("Explore\nshort task");
 	});
 
 	it("marks a defaulted role on the identity line", () => {
@@ -189,7 +192,7 @@ describe("the result block", () => {
 		const result = composeResult(child(), "explore", 20_000, 21_000);
 		const lines = renderSubagentResult(result, { expanded: false, isPartial: false }, theme).render(200).join("\n");
 		expect(lines).toContain("Agent completed in 21.0s");
-		expect(renderSubagentCall({ role: "explore", task: "survey" }, theme).render(200).join("\n")).toContain("Explore  survey");
+		expect(renderSubagentCall({ role: "explore", task: "survey" }, theme).render(200).join("\n")).toContain("Explore");
 	});
 
 	it("falls back to the raw text when there are no details", () => {

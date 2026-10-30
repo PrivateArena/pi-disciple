@@ -41,9 +41,9 @@ pi-subagent/
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
   child.ts         runChild(): assembly, timeouts (ceiling, report-safe deferral), steering, transcripts, usage  steps 13, 14
   config-file.ts   own copy of the config reader: limits, model pin, `roles` table        step 20
-  run.ts           globalThis run guard + result mapping (status header, truncation, card contract)  steps 15, 16
+  run.ts           globalThis run guard + result mapping (status header, report budget + spill file, card contract)  steps 15, 16
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
-  labels.ts        the one-line strings a card is titled with: role display name, task summary (shared by render.ts and run.ts)
+  labels.ts        the strings a card is titled with: role display name, task label, task body — never clipped (shared by render.ts and run.ts)
   config-view.ts   the /subagentc text: effective config, model resolution, roles, catalog  step 20
   index.ts         the single `subagent` tool + /subagentc                                  steps 15, 16
 ```
@@ -171,7 +171,8 @@ rule (`rule: …` line) that a grant choice would write — in full; the TUI wor
 option labels shorten the rule (they have to stay single-line), and the unshortened rule sits right above
 them. pi's own limits are separate and not extension-configurable: the collapsed transcript preview shows
 20 visual lines (`ctrl+o` toggles it), and the bash tool caps what the *model* sees at 2000 lines / 50KB
-while saving the full output to a temp file (`core/tools/truncate.js`).
+while saving the full output to a temp file (`core/tools/truncate.js`) — the same "cut for the model, spill
+for the human" convention the subagent's report budget follows (see *The report is the artifact*).
 
 "Allow everything" (dialog, or `/gatec allow [off|5min|session]`) is **absolute**: while it is active no
 `tool_call` reaches the dialog — other commands, other tools, a file outside the workspace, a hidden
@@ -235,23 +236,25 @@ Two separate mechanisms feed one card, and only one of them is ours.
 **pi's own renderer** (`pi-subagent/render.ts` — `renderCall`/`renderResult`) is what the terminal TUI and
 `/export` HTML use: a title line, one sentence about the run — `Agent completed in 21.0s (5 turns, 6 tool
 uses, 4.2k token).` — then `role · model · Agent ID`, the transcript path, and the child's report (10 lines
-collapsed, 50 expanded, with a "more lines" hint built from the expand keybinding, never a hardcoded
-`ctrl+o`). `details.report` holds the child's answer on its own, so the card never re-parses the
-model-facing text. pi calls a renderer with `{ content, details }` only — never `usage` — which is why the
-token total is also carried in `details.tokens`.
+collapsed with a "more lines" hint built from the expand keybinding, never a hardcoded `ctrl+o`; **whole**
+when expanded — expanding is the human asking for the rest, so there is no second clip). `details.report`
+holds the child's *complete* answer on its own, so the card never re-parses the model-facing text and never
+shows less than the child wrote. pi calls a renderer with `{ content, details }` only — never `usage` — which
+is why the token total is also carried in `details.tokens`.
 
-**The title leads with the role, gotgenes-style** (`labels.ts` builds the strings, so the TUI and the
-frontend `details` cannot drift): `Explore  Read pi-gate/ and list its rule layers` — the role display name
-in bold (`explore` → `Explore`, `general-purpose` → `General Purpose`), two spaces, then the task summarized
-to one line (`taskSummary`: whitespace collapsed, leading `#` stripped, clipped at 72 characters with an
-ellipsis). The role is the *first* token because the title is drawn in whatever width the transcript
-indent leaves, and a tail is what wraps and what truncates; a title that began with a fixed phrase and
-appended the role (`Launch subagent · explore`) buried the only variable part of the line. The whole task is
-not lost: `renderCall` receives `context.expanded` (pi forwards it, `index.ts`), and an expanded card prints
-the role alone, then the complete task. The title still has three states, because pi renders it while the
-arguments stream: role named, role not yet arrived (`Launch subagent`, nothing invented), and role not sent
-at all (`General Purpose (default)`). The running result block no longer repeats the task — the call block
-above it carries it, summarized or whole.
+**The call block leads with the role and prints the whole prompt** (`labels.ts` builds the strings, so the
+TUI and the frontend `details` cannot drift): `Explore` in bold, then the complete task under it, exactly as
+sent. The role is the *first* line because a title is drawn in whatever width the transcript indent leaves,
+and a tail is what wraps and what truncates; a title that began with a fixed phrase and appended the role
+(`Launch subagent · explore`) buried the only variable part of the line. Nothing clips the task: a
+delegation prompt is the human's instruction to a child they cannot watch, and an ellipsis where the rest of
+the prompt should be makes the call unauditable (`taskLabel` flattens it to one line for single-line header
+slots, `taskBody` prints it verbatim; `ctrl+o` scrolling is pi's affordance and is enough). The prompt is
+there from the first render, before the child starts, and it is the same text at every state of the call —
+the states are the *role*'s, not the prompt's, and there are three because pi renders while the arguments
+stream: role named, role not yet arrived (`Launch subagent`, nothing invented), and role not sent at all
+(`General Purpose (default)`). The running result block does not repeat the task — the call block above it
+carries it whole.
 
 **What a non-TUI frontend (Pendant) reads is `details`, not the renderers** — it never invokes them, so a
 correct `Text` component buys nothing there. Worse: Pendant *claims our tool by name* — its subagent panel
@@ -263,7 +266,10 @@ Pendant found no name and titled the card with its generic fallback. That is why
 card no matter what `formatCallBlock` returned. Two documented levers fix it from our side: `agent` in
 `details` (the key the panel vocabulary uses for a step's agent), and `details.pendant = { title, subtitle }`,
 which replaces the tool's name and the muted text after it in the header — read when the call finishes, and
-ignored by pi's terminal. `run.ts` emits both, plus the field names and status vocabulary
+ignored by pi's terminal. `subtitle` carries the **entire prompt on one line**: Pendant's own rule for a
+header label is that it never shortens it in the data, only on screen, and "the whole label appears as its
+tooltip" — which is where a human reads what the child was told to do. `run.ts` emits both, plus the field
+names and status vocabulary
 `@gotgenes/pi-subagents` established (`AgentDetails`/`GetResultDetails`: `displayName`, `subagentType`, one-line
 `description`, `toolUses`, `durationMs`, `tokens`, `agentId`, `modelName`, `preview`, `uiStatus`), our own
 `exit`/`elapsedMs`/`toolCalls`, and `status` (`completed`/`running`/`stopped`/`aborted`/`error`) — a `status`
@@ -277,6 +283,37 @@ through streaming, running, finished and expanded, because the unit tests' fake 
 frontend or a wrapping terminal does. Every `onUpdate` still carries a complete `SubagentDetails`
 (`status: "running"`, turns, tool uses, activity, model) and a 2s heartbeat re-emits it, so a child that thinks
 for minutes without a tool event keeps reporting activity.
+
+**Known limit, unchanged:** the *live* Pendant header still cannot name the role or show the prompt, because
+that card builds its header from the launch **arguments** and `details.pendant` is only read at completion.
+Fixing it needs an argument named `agent`/`subagent_type`, which the tool does not have and
+`prepareArguments` cannot fake (pi renders the assistant message's own arguments, not the prepared ones).
+
+## The report is the artifact: the model gets it whole
+
+A delegation buys one thing — the child's answer. Cutting that answer and pointing at the transcript was
+the old behaviour (`maxResultBytes: 20000`, footer "the full result is in the transcript"), and it was
+counter-productive in exactly the case it was meant to bound: the parent then read a multi-hundred-KB
+session JSONL to recover a tail it had already paid for, costing far more than the bytes it was spared. So
+in `composeResult`:
+
+- **Up to `subagent.maxResultBytes` (default now 64 KB) the report is returned whole**, line count
+  irrelevant — pi's `truncateHead` also enforces 2000 lines by default, and a report is prose, not tool
+  output, so the byte cap is passed as the only cap.
+- **Beyond it, the head goes to the model and the *complete* report is written beside the transcript** as
+  `<id>.report.md` (pi's own convention for cut tool output: name a file that holds only that output). The
+  footer states the sizes, names the file and says *not* to re-read the transcript. If the spill file
+  cannot be written (no transcript path, read-only home), the footer falls back to the transcript.
+- One enormous line (a pasted blob) cannot swallow the budget: `truncateHead` never returns a partial line,
+  so a 13-byte heading would be "the head" of a 20 KB budget. Past half the budget the cut moves to a byte
+  boundary, on a UTF-8 character start (`sliceBytes`) — pi's bash tool makes the same trade.
+- `details.report` is always the **whole** report: the byte cap bounds what the *model* is sent, never what
+  the human is shown.
+
+The cap is therefore a safety valve, not a budget — a report past 64 KB is a child that dumped a survey
+instead of reporting one, and that is the case the file is for. The spill file sits in the agent dir, so
+reading it is an `external_directory` call and the gate asks once (as it does for pi's own truncated bash
+output file); `/subagentc limits` prints the number, its source file and this contract.
 
 ## Deviations from the plan (all verified against pi 1.4.0 types)
 

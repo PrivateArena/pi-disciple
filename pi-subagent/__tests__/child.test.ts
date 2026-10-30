@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
@@ -8,13 +8,13 @@ import {
 	CHILD_RETRY_MAX_DELAY_MS,
 	childSessionDir,
 	pruneTranscripts,
+	reportFileFor,
 	runChild,
 	totalUsage,
 	type ChildRunInput,
 } from "../child.ts";
 import { ROLES } from "../roles.ts";
 import { buildShims, type ShimHost } from "../shims.ts";
-import { writeFileSync } from "node:fs";
 
 interface Spy {
 	messages?: unknown[];
@@ -267,6 +267,29 @@ describe("usage and transcripts", () => {
 		for (let i = 0; i < 5; i++) writeFileSync(join(dir, `s${i}.jsonl`), "{}", "utf8");
 		const removed = await pruneTranscripts(dir, 2);
 		expect(removed).toBe(3);
+	});
+
+	it("takes each report file with its transcript, and sweeps orphans", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-sub-prune-report-"));
+		try {
+			// Three runs, newest last, each a transcript plus the report spilled beside it — plus a report whose
+			// transcript was deleted by an earlier pass.
+			for (const name of ["s0", "s1", "s2"]) {
+				writeFileSync(join(dir, `${name}.jsonl`), "{}", "utf8");
+				writeFileSync(reportFileFor(join(dir, `${name}.jsonl`)), "report", "utf8");
+				const when = new Date(Date.parse("2026-01-01T00:00:00Z") + Number(name.slice(1)) * 60_000);
+				utimesSync(join(dir, `${name}.jsonl`), when, when);
+			}
+			writeFileSync(join(dir, "gone.report.md"), "report", "utf8");
+
+			const removed = await pruneTranscripts(dir, 2);
+			// Only transcripts count as removed — the count is what the model is told, and it means sessions.
+			expect(removed).toBe(1);
+			expect(readdirSync(dir).sort()).toEqual(["s1.jsonl", "s1.report.md", "s2.jsonl", "s2.report.md"]);
+			expect(existsSync(reportFileFor(join(dir, "s0.jsonl")))).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

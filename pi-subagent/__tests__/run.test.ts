@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { claimGuard, composeResult, currentGuard, formatProgress, releaseGuard, RUN_GUARD_KEY } from "../run.ts";
+import { reportFileFor } from "../child.ts";
 import type { ChildResult } from "../child.ts";
 import { loadSubagentLimits } from "../config-file.ts";
 import { DEFAULT_SUBAGENT_LIMITS } from "../../pi-gate/schema.ts";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -67,7 +68,7 @@ describe("result mapping", () => {
 		expect(composeResult(child(), "explore", 20_000, 1000).details.roleDefaulted).toBeUndefined();
 	});
 
-	it("titles the frontend header with the role and one line of task", () => {
+	it("titles the frontend header with the role and the whole task", () => {
 		const result = composeResult(child(), "explore", 20_000, 1000, { task: "# Survey\n\nread pi-gate/ and report the rule layers" });
 		expect(result.details.agent).toBe("explore");
 		expect(result.details.description).not.toContain("\n");
@@ -76,19 +77,82 @@ describe("result mapping", () => {
 		expect(composeResult(child(), "explore", 20_000, 1000).details.pendant).toEqual({ title: "Explore" });
 	});
 
+	it("never clips the task the human has to audit", () => {
+		const task = `Survey every rule layer in the gate.\n\n${"report the exact pattern that matches each fact; ".repeat(30)}`;
+		const result = composeResult(child(), "explore", 20_000, 1000, { task });
+		expect(result.details.task).toBe(task);
+		expect(result.details.description).toBe(task.replace(/\s+/g, " ").trim());
+		expect(result.details.pendant.subtitle).toContain("each fact");
+		expect(result.details.pendant.subtitle).not.toContain("…");
+	});
+
 	it("marks every non-done exit INCOMPLETE", () => {
 		const result = composeResult(child({ exit: "timeout", text: "partial" }), "review", 20_000, 1000);
 		expect((result.content[0] as { text: string }).text).toMatch(/INCOMPLETE \(timeout\)/);
 		expect(result.details.exit).toBe("timeout");
 	});
 
-	it("truncates to the configured byte budget and points at the transcript", () => {
-		const long = "x".repeat(5000);
-		const result = composeResult(child({ text: long }), "explore", 1000, 1000, { childSessionFile: "/tmp/c.jsonl" });
+	it("returns the report whole when it fits the byte budget", () => {
+		const report = "a\n".repeat(3000); // 6000 bytes over 3000 lines: pi's 2000-line budget must not apply
+		const result = composeResult(child({ text: report }), "explore", 8_000, 1000, { childSessionFile: "/tmp/c.jsonl" });
 		const text = (result.content[0] as { text: string }).text;
-		expect(text).toContain("output truncated");
-		expect(text).toContain("/tmp/c.jsonl");
-		expect(result.details.truncated).toBe(true);
+		expect(text).not.toContain("truncated");
+		expect(text.endsWith(report.trim())).toBe(true);
+		expect(result.details.truncated).toBe(false);
+		expect(result.details.report).toBe(report);
+		expect(result.details.reportFile).toBeUndefined();
+	});
+
+	it("beyond the byte budget, sends the head and writes the complete report beside the transcript", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-sub-report-"));
+		try {
+			const transcript = join(dir, "child.jsonl");
+			const long = `${"head\n".repeat(300)}TAIL-MARKER`;
+			const result = composeResult(child({ text: long }), "explore", 1000, 1000, { childSessionFile: transcript });
+			const text = (result.content[0] as { text: string }).text;
+			expect(result.details.truncated).toBe(true);
+			expect(text).not.toContain("TAIL-MARKER");
+			// The pointer is to a report-only file, and it says so: the transcript is explicitly ruled out.
+			expect(result.details.reportFile).toBe(join(dir, "child.report.md"));
+			expect(text).toContain(join(dir, "child.report.md"));
+			expect(text).toContain("Do not re-read the transcript");
+			expect(readFileSync(result.details.reportFile!, "utf8")).toBe(long);
+			// The human still gets the whole report on the card, cut or not.
+			expect(result.details.report).toBe(long);
+			expect(result.details.preview).toBe("head");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("fills the byte budget when one enormous line would otherwise eat it", () => {
+		// `truncateHead` never returns a partial line: given a 48 KB single line it stops at the 13-byte
+		// heading, so the model would get a heading and 3987 bytes of the cap left unused.
+		const blob = `## Conclusion\n\n${"payload ".repeat(6000)}\n\nEPILOGUE`;
+		const result = composeResult(child({ text: blob }), "explore", 4000, 1000);
+		const text = (result.content[0] as { text: string }).text;
+		expect(text).toContain("## Conclusion");
+		expect(text).toContain("payload");
+		expect(text).not.toContain("EPILOGUE");
+		expect(Buffer.byteLength(text)).toBeGreaterThan(4000);
+	});
+
+	it("cuts a byte budget at a character boundary, never mid-codepoint", () => {
+		const text = (composeResult(child({ text: "é".repeat(5000) }), "explore", 100, 1000).content[0] as { text: string }).text;
+		expect(text).not.toContain("\uFFFD");
+		expect(text).toContain("é");
+	});
+
+	it("falls back to the transcript when there is nowhere to write the report", () => {
+		const result = composeResult(child({ text: "y".repeat(5000) }), "explore", 1000, 1000);
+		const text = (result.content[0] as { text: string }).text;
+		expect(result.details.reportFile).toBeUndefined();
+		expect(text).toContain("the rest is in the transcript above");
+	});
+
+	it("pairs the report file with its transcript", () => {
+		expect(reportFileFor("/a/b/c.jsonl")).toBe("/a/b/c.report.md");
+		expect(reportFileFor("/a/b/c.log")).toBe("/a/b/c.log.report.md");
 	});
 
 	it("reports an error exit as a tool error", () => {

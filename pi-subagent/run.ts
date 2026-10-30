@@ -3,10 +3,11 @@
  * testable without a live provider.
  */
 
-import { truncateHead, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { formatSize, truncateHead, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { writeFileSync } from "node:fs";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ChildResult, Exit, RunProgress } from "./child.ts";
-import { clip, roleDisplayName, taskSummary } from "./labels.ts";
+import { reportFileFor, type ChildResult, type Exit, type RunProgress } from "./child.ts";
+import { clip, roleDisplayName, taskLabel } from "./labels.ts";
 import type { RoleId } from "./roles.ts";
 
 export { clip } from "./labels.ts";
@@ -102,7 +103,7 @@ export interface SubagentCardFields {
 	subagentType: RoleId;
 	/** The role id again, under the key the frontend vocabulary uses for a step's agent name. */
 	agent: RoleId;
-	/** What was asked of the child, on one line, clipped. */
+	/** What was asked of the child, whole, flattened onto one line (a header slot is one line, a hover is not). */
 	description: string;
 	toolUses: number;
 	durationMs: number;
@@ -115,7 +116,9 @@ export interface SubagentCardFields {
 	/**
 	 * Header labels for the Pendant frontend, which draws its own subagent card and never calls our
 	 * renderers. It reads this object when the call finishes; pi's terminal ignores it. An empty string
-	 * counts as missing there, so a label that is not available is left out rather than sent blank.
+	 * counts as missing there, so a label that is not available is left out rather than sent blank. The
+	 * subtitle carries the entire task: Pendant puts a label that does not fit the header behind a hover
+	 * tooltip, and that tooltip is where a human reads what the child was actually told to do.
 	 */
 	pendant: { title: string; subtitle?: string };
 }
@@ -129,7 +132,7 @@ export function cardFields(
 		displayName: roleDisplayName(host.role),
 		subagentType: host.role,
 		agent: host.role,
-		description: taskSummary(host.task, 160),
+		description: taskLabel(host.task),
 		toolUses: run.toolCalls,
 		durationMs: run.elapsedMs,
 		tokens: formatTokens(run.usage),
@@ -140,9 +143,9 @@ export function cardFields(
 	};
 }
 
-/** The Pendant header: the role names the card, the task summarizes it. */
+/** The Pendant header: the role names the card, the whole task subtitles it. */
 function pendantHeader(host: { role: RoleId; task: string }): { pendant: SubagentCardFields["pendant"] } {
-	const subtitle = taskSummary(host.task);
+	const subtitle = taskLabel(host.task);
 	return { pendant: { title: roleDisplayName(host.role), ...(subtitle ? { subtitle } : {}) } };
 }
 
@@ -174,10 +177,13 @@ export interface SubagentDetails extends SubagentCardFields {
 	/** What the child was last seen doing (`bash`, `read`, …) — only while running. */
 	activity?: string;
 	/**
-	 * The child's report on its own, without the model-facing header. The tool card renders this
-	 * (`render.ts`); the model gets the same text inside `content`.
+	 * The child's report on its own, without the model-facing header, and always the *whole* thing: the
+	 * `maxResultBytes` cap bounds what the *model* is sent, never what the human is shown (see
+	 * `composeResult`, which writes the omitted part to `reportFile`).
 	 */
 	report?: string;
+	/** Where the complete report was written, when the model-facing copy had to be cut. */
+	reportFile?: string;
 }
 
 export function formatProgress(progress: RunProgress, toolCount: number): string {
@@ -220,8 +226,56 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
 }
 
 /**
- * Status header first, then the answer head (A12: `truncateHead` keeps the *first* bytes, so the
- * child's leading conclusion survives), then the pointer to the full transcript.
+ * Where the complete report goes when it does not fit the model-facing budget: `reportFileFor` beside the
+ * child's transcript. A file holding *only* the report is the cheap recovery path — reading the JSONL
+ * transcript instead would cost the parent the whole exchange it delegated to avoid.
+ */
+function writeReport(transcriptFile: string | undefined, report: string): string | undefined {
+	if (!transcriptFile) return undefined;
+	const file = reportFileFor(transcriptFile);
+	try {
+		writeFileSync(file, report, "utf8");
+		return file;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Cut a string to at most `maxBytes` bytes, never mid-character (continuation bytes are not starts). */
+function sliceBytes(text: string, maxBytes: number): string {
+	const buf = Buffer.from(text, "utf8");
+	if (buf.length <= maxBytes) return text;
+	let end = Math.max(0, maxBytes);
+	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+	return buf.subarray(0, end).toString("utf8");
+}
+
+/**
+ * The model-facing head of a report: the whole thing up to `maxBytes`, else the largest whole-line prefix
+ * that fits — except when a single enormous line (a pasted blob, a one-line table) would leave the model
+ * with a heading and half the budget unused, where cutting mid-line is the better trade.
+ *
+ * pi's `truncateHead` also enforces a 2000-line budget by default; a report is prose, not tool output, so
+ * only the byte cap is meaningful here.
+ */
+function reportHead(report: string, maxBytes: number): { head: string; truncated: boolean; totalBytes: number } {
+	const totalBytes = Buffer.byteLength(report, "utf8");
+	const cut = truncateHead(report, { maxBytes, maxLines: Number.MAX_SAFE_INTEGER });
+	if (!cut.truncated) return { head: report, truncated: false, totalBytes };
+	const wholeLines = cut.firstLineExceedsLimit ? "" : cut.content;
+	const head = Buffer.byteLength(wholeLines) * 2 >= maxBytes ? wholeLines : sliceBytes(report, maxBytes);
+	return { head, truncated: true, totalBytes };
+}
+
+/**
+ * The model-facing result: a status header, then the report.
+ *
+ * The report is the artifact the delegation was paid for, so it goes back whole up to
+ * `subagent.maxResultBytes` — the old habit of cutting it and pointing at the transcript was
+ * counter-productive: recovering the tail from a session JSONL costs the parent far more than the bytes it
+ * was spared. Beyond the cap, the head (the child's conclusion, which is what leads a report) goes to the
+ * model and the complete report is written beside the transcript, which the model is told to read. The
+ * card always gets the whole report through `details.report`.
  */
 export function composeResult(
 	result: ChildResult,
@@ -230,21 +284,24 @@ export function composeResult(
 	elapsedMs: number,
 	extra: Partial<SubagentDetails> = {},
 ): AgentToolResult<SubagentDetails> {
-	// `truncateHead` never returns a partial line, so a one-line answer needs a plain slice.
-	const truncated = truncateHead(result.text, { maxBytes: maxResultBytes });
-	const body = (truncated.firstLineExceedsLimit ? result.text.slice(0, maxResultBytes) : truncated.content).trim();
+	const report = result.text ?? "";
+	const cut = reportHead(report, maxResultBytes);
+	const answer = cut.head.trimEnd() || "(the subagent returned no text)";
 	const sessionFile = result.childSessionFile ?? extra.childSessionFile;
 	const childSessionId = result.childSessionId ?? extra.childSessionId;
+	const spillFile = cut.truncated ? writeReport(sessionFile, report) : undefined;
 	const status = result.exit === "done" ? "DONE" : `INCOMPLETE (${result.exit})`;
 	const header =
 		`[subagent ${role} · ${status} · ${result.turns} turns · ${result.toolCalls} tool calls · ${(elapsedMs / 1000).toFixed(1)}s]` +
 		(extra.model ? `\nmodel: ${extra.model}` : "") +
 		(sessionFile ? `\ntranscript: ${sessionFile}` : "") +
 		(result.error ? `\nerror: ${result.error}` : "");
-	const answer = body || "(the subagent returned no text)";
-	const footer = truncated.truncated
-		? `\n\n[… output truncated: ${Math.min(maxResultBytes, truncated.totalBytes)}/${truncated.totalBytes} bytes shown; the full result is in the transcript above.]`
-		: "";
+	const cutNote = `[… the report is ${formatSize(cut.totalBytes)} and only its first ${formatSize(Buffer.byteLength(answer))} is shown here, per subagent.maxResultBytes`;
+	const footer = !cut.truncated
+		? ""
+		: spillFile
+			? `\n\n${cutNote}. The COMPLETE report: ${spillFile} — read that file; it holds nothing but the report. Do not re-read the transcript to recover the rest.]`
+			: `\n\n${cutNote}; the rest is in the transcript above.]`;
 	return {
 		content: [{ type: "text", text: `${header}\n\n${answer}${footer}` }],
 		details: {
@@ -255,13 +312,14 @@ export function composeResult(
 			toolCalls: result.toolCalls,
 			childSessionFile: sessionFile,
 			childSessionId,
-			truncated: truncated.truncated,
+			truncated: cut.truncated,
 			elapsedMs,
 			task: extra.task,
-			report: body,
+			report,
+			...(spillFile ? { reportFile: spillFile } : {}),
 			...cardFields(
 				{ role, task: extra.task ?? "", model: extra.model },
-				{ toolCalls: result.toolCalls, elapsedMs, agentId: childSessionId, usage: result.usage, report: body },
+				{ toolCalls: result.toolCalls, elapsedMs, agentId: childSessionId, usage: result.usage, report },
 			),
 			...extra,
 		},

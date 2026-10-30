@@ -32,7 +32,7 @@ export const DEFAULT_LIMITS: SubagentLimits = {
 	delegationPrompt: true,
 	maxTurns: 30,
 	timeoutMinutes: 20,
-	maxResultBytes: 20000,
+	maxResultBytes: 65536,
 	keepTranscripts: 20,
 };
 

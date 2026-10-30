@@ -1,15 +1,17 @@
 /**
- * labels.ts — the one-line strings a subagent card is titled with.
+ * labels.ts — the strings a subagent card is titled with.
  *
  * Shared by `render.ts` (pi's TUI and the HTML export) and `run.ts` (the `details` a non-TUI frontend
  * reads), so the two surfaces cannot drift into naming the same role two different ways. Pure string
  * functions, no pi-tui, no config: the card's title is decided from what the call already carries.
+ *
+ * Nothing here shortens the task. A delegation prompt is the human's instruction to a child they cannot
+ * see, and a card that hides it behind an ellipsis makes the call unauditable — the one thing a gate and
+ * a transcript exist to prevent. `taskLabel` only flattens (a card row is one line); `taskBody` is
+ * verbatim. `clip` survives for the report preview, which is a summary of something already on screen.
  */
 
 import type { RoleId } from "./roles.ts";
-
-/** How much of the task fits in a card title before it becomes a paragraph. */
-export const CARD_SUMMARY_CHARS = 512;
 
 /** Clip for a card row: a card gets a summary, never a whole field. */
 export function clip(text: string, maxChars: number): string {
@@ -34,16 +36,20 @@ export function roleDisplayName(role: RoleId | string | undefined): string {
 }
 
 /**
- * The task as one title-safe line: whitespace collapsed, leading markdown stripped, clipped to the
- * card's budget with an ellipsis. Frontends put this in a single-line header, where a newline from the
- * task would break the row and a 500-character task would push everything else off screen.
+ * The whole task as one line: every whitespace run (newline, tab, indent) becomes a single space, so a
+ * multi-paragraph delegation still fits a frontend's single-line header slot — and, per Pendant's own
+ * rule for a header label that runs out of room, the *whole* label is what its hover tooltip shows.
+ * Length is not a reason to cut: a clipped prompt is a prompt the human cannot audit.
  */
-export function taskSummary(task: string | undefined, maxChars = CARD_SUMMARY_CHARS): string {
+export function taskLabel(task: string | undefined): string {
 	if (!task) return "";
-	const oneLine = task
-		.replace(/[\r\n\t]+/g, " ")
-		.replace(/\s{2,}/g, " ")
-		.replace(/^#+\s*/, "")
-		.trim();
-	return clip(oneLine, maxChars);
+	return task.replace(/\s+/g, " ").replace(/^#+\s*/, "").trim();
+}
+
+/**
+ * The whole task as written: only outer whitespace removed, line breaks and indentation kept. This is what
+ * pi's terminal prints under the role, and what `ctrl+o`-style collapse is for — the block never clips.
+ */
+export function taskBody(task: string | undefined): string {
+	return task?.trim() ?? "";
 }

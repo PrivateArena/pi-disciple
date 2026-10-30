@@ -359,16 +359,30 @@ export function totalUsage(messages: readonly AgentMessage[]): Usage | undefined
 	return seen ? blank : undefined;
 }
 
-/** Keep the newest `keep` transcripts and delete the rest (FM-15). */
+/**
+ * The sibling file a run's complete report is spilled to (see `pi-subagent/run.ts::composeResult`): the
+ * transcript's own directory and basename, so one child's artifacts are one pair of files and pruning can
+ * pair them without a second index.
+ */
+export function reportFileFor(transcriptFile: string): string {
+	return transcriptFile.endsWith(".jsonl") ? `${transcriptFile.slice(0, -".jsonl".length)}.report.md` : `${transcriptFile}.report.md`;
+}
+
+/**
+ * Keep the newest `keep` transcripts and delete the rest (FM-15). Report spill files are not counted as
+ * transcripts — they follow their own: a deleted transcript takes its report with it, and a report left
+ * behind by an already-deleted transcript is swept here too.
+ */
 export async function pruneTranscripts(dir: string, keep: number): Promise<number> {
 	if (!existsSync(dir)) return 0;
-	let files: string[];
+	let names: string[];
 	try {
-		files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+		names = readdirSync(dir);
 	} catch {
 		return 0;
 	}
-	const stamped = files
+	const stamped = names
+		.filter((name) => name.endsWith(".jsonl"))
 		.map((name) => {
 			const path = join(dir, name);
 			let mtimeMs = 0;
@@ -380,12 +394,16 @@ export async function pruneTranscripts(dir: string, keep: number): Promise<numbe
 			return { path, mtimeMs };
 		})
 		.sort((a, b) => b.mtimeMs - a.mtimeMs);
-	const victims = stamped.slice(Math.max(0, keep));
+	const kept = stamped.slice(0, Math.max(0, keep));
+	const keptReports = new Set(kept.map((entry) => reportFileFor(entry.path)));
+	const victims = stamped.slice(kept.length).map((entry) => entry.path);
+	// Every report whose transcript is not in the kept set is stale — deleted this pass or in an earlier one.
+	const staleReports = names.filter((name) => name.endsWith(".report.md")).map((name) => join(dir, name)).filter((report) => !keptReports.has(report));
 	let removed = 0;
-	for (const victim of victims) {
+	for (const victim of [...victims, ...staleReports]) {
 		try {
-			await rm(victim.path, { force: true });
-			removed++;
+			await rm(victim, { force: true });
+			removed += victim.endsWith(".jsonl") ? 1 : 0;
 		} catch {
 			/* best effort */
 		}

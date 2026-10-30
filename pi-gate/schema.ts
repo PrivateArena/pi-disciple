@@ -137,6 +137,13 @@ export interface SubagentLimits {
 	enabled: boolean;
 	maxTurns: number;
 	timeoutMinutes: number;
+	/**
+	 * How much of the child's report goes to the *model* (`subagent.maxResultBytes`). The report is the
+	 * artifact the delegation paid for, so this is a safety bound, not a budget to spend: up to this size the
+	 * report arrives whole, and beyond it the head is returned and the complete report is written next to the
+	 * child's transcript as `<id>.report.md`, which the result names. Keep it above any report you would
+	 * legitimately ask for — the fallback costs a file read, and re-reading the transcript costs more.
+	 */
 	maxResultBytes: number;
 	keepTranscripts: number;
 	/**
@@ -205,7 +212,7 @@ export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
 	delegationPrompt: true,
 	maxTurns: 30,
 	timeoutMinutes: 20,
-	maxResultBytes: 20000,
+	maxResultBytes: 65536,
 	keepTranscripts: 20,
 };
 

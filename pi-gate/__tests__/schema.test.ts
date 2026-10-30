@@ -140,13 +140,24 @@ describe("defaults", () => {
 		expect(shipped.gate.promptTimeoutMs).toBe(DEFAULT_GATE_CONFIG.promptTimeoutMs);
 		expect(shipped.gate.grants).toEqual({ global: [], project: [] });
 
-		// Every configurable `subagent` key is present, so the block has to parse back to exactly the defaults:
-		// "model": "inherit" is an explicit no-pin, and no `roles` section ships, because a written role is live
-		// privilege rather than documentation (`subagent.roles` is shown by `/subagentc roles` instead).
+		// Every configurable `subagent` key is spelled out, so the block is the defaults plus the shipped file's
+		// own stated choices — and nothing else. "model": "inherit" is an explicit no-pin, so it is not one.
+		// The two real choices: an unnamed delegation runs the read-only role, and the role budgets are written
+		// out under the ceiling so the arithmetic is visible instead of implicit.
 		const parsed = parseSubagentConfig(shipped.subagent, "shipped config.json");
 		expect(parsed.errors).toEqual([]);
-		expect(parsed.limits).toEqual(DEFAULT_SUBAGENT_LIMITS);
-		expect(applyRoleConfig(parsed.limits.roles).roles).toEqual(ROLES);
+		expect(parsed.limits).toEqual({ ...DEFAULT_SUBAGENT_LIMITS, defaultRole: "explore", roles: shipped.subagent.roles });
+		// The written role table re-states the three built-ins and their budgets only: no new role, no new tool,
+		// no rewritten prompt. A shipped file that added privilege would fail here, not in a running session.
+		const effective = applyRoleConfig(parsed.limits.roles).roles;
+		expect(Object.keys(effective).sort()).toEqual(["explore", "general-purpose", "review"]);
+		for (const name of ["explore", "general-purpose", "review"] as const) {
+			expect(effective[name].allowTools, name).toEqual(ROLES[name].allowTools);
+			expect(effective[name].description, name).toBe(ROLES[name].description);
+			expect(effective[name].prompt, name).toBe(ROLES[name].prompt);
+			expect(effective[name].maxTurns, name).toBeGreaterThanOrEqual(ROLES[name].maxTurns);
+			expect(effective[name].timeoutMinutes, name).toBe(ROLES[name].timeoutMinutes);
+		}
 	});
 
 	it("asks for bash by default and allows the read-only tools", () => {

@@ -3,7 +3,7 @@
  * because both the TUI renderer and the frontend `details` read these, and they must agree.
  */
 import { describe, expect, it } from "vitest";
-import { CARD_SUMMARY_CHARS, clip, roleDisplayName, taskSummary } from "../labels.ts";
+import { clip, roleDisplayName, taskBody, taskLabel } from "../labels.ts";
 
 describe("roleDisplayName", () => {
 	it("turns a role id into a title", () => {
@@ -20,18 +20,28 @@ describe("roleDisplayName", () => {
 	});
 });
 
-describe("taskSummary", () => {
+describe("taskLabel", () => {
 	it("puts the task on one line", () => {
-		expect(taskSummary("Survey the gate\n\n  and list\tthe rule layers")).toBe("Survey the gate and list the rule layers");
-		expect(taskSummary("# Findings\nrest")).toBe("Findings rest");
-		expect(taskSummary("")).toBe("");
-		expect(taskSummary(undefined)).toBe("");
+		expect(taskLabel("Survey the gate\n\n  and list\tthe rule layers")).toBe("Survey the gate and list the rule layers");
+		expect(taskLabel("# Findings\nrest")).toBe("Findings rest");
+		expect(taskLabel("")).toBe("");
+		expect(taskLabel(undefined)).toBe("");
 	});
 
-	it("clips to the card's budget", () => {
-		const long = "x".repeat(CARD_SUMMARY_CHARS + 40);
-		expect(taskSummary(long)).toBe(`${"x".repeat(CARD_SUMMARY_CHARS - 1)}…`);
-		expect(taskSummary("short task", 160)).toBe("short task");
+	it("never shortens the prompt a human has to audit", () => {
+		const long = `read every rule layer, cite file:line, and name the exact pattern.\n\n${"x".repeat(4000)}`;
+		expect(taskLabel(long)).toBe(long.replace(/\s+/g, " ").trim());
+		expect(taskLabel(long)).not.toContain("…");
+		expect(taskLabel(long).length).toBeGreaterThan(4000);
+	});
+});
+
+describe("taskBody", () => {
+	it("keeps the task as written", () => {
+		const task = "Survey the gate.\n\n- list the rule layers\n  with their order";
+		expect(taskBody(task)).toBe(task);
+		expect(taskBody(`  ${task}\n\n`)).toBe(task);
+		expect(taskBody(undefined)).toBe("");
 	});
 });
 
