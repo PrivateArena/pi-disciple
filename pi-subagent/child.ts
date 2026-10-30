@@ -41,7 +41,11 @@ export type CeilingReason = "maxTurns" | "timeout";
 export interface CeilingAsk {
 	reason: CeilingReason;
 	role: string;
-	/** What the child was told to do, whole — the human decides on this, not on a summary. */
+	/**
+	 * What the child was told to do, whole. Carried for a frontend that wants to show it next to the question;
+	 * pi's own dialog title does not print it, because a delegation prompt is a paragraph and the paragraph
+	 * would hide the options (`ceiling.ts::ceilingTitle`).
+	 */
 	task: string;
 	turns: number;
 	toolCalls: number;

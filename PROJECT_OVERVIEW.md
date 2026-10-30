@@ -81,8 +81,12 @@ additions, so one dialog means the same thing for a 10-turn `review` and a 200-t
 exceeds what a config could have said anyway. The rule set is the gate's, because the risk is the same one:
 **only an explicit Extend choice extends** — Esc, a dismissed or timed-out dialog (5 min), or no UI at all
 enforces the ceiling unchanged (FM-11); one offer per run, whatever it was answered with, because a run that
-needs a second one was delegated the wrong size; and the title prints the whole task above the counters
-(`turns: 2/2 · tool calls: 1 · elapsed: 6.5s · last: bash`) the decision is actually made on.
+needs a second one was delegated the wrong size; and the title is the question and nothing else — the role,
+which budget ran out, and the counters (`turns: 2/2 · tool calls: 1 · elapsed: 6.5s · last: bash`) the decision
+is actually made on, in three lines. It does **not** print the task: the prompt is on the tool card above and
+in the transcript, only one child can hold the run guard at a time so the dialog can never be ambiguous, and a
+paragraph-long title scrolls `Reject` and the rungs off the screen — which would silently enforce the ceiling on
+a run the human meant to extend. `CeilingAsk.task` still carries it whole for a frontend with room to show it.
 
 Nothing pauses while the question is open, because the SDK has no pause and a slow human should not be billed
 for a stalled run — and a run the human means to extend is a run whose work is worth continuing. The hard

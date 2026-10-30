@@ -66,7 +66,7 @@ describe("the extension ladder", () => {
 });
 
 describe("the dialog text", () => {
-	it("names the role, the spent budget, the counters and the whole task", () => {
+	it("names the role, the spent budget and the counters", () => {
 		const title = ceilingTitle(ask());
 		expect(title).toContain("pi-subagent: Explore — reached its limit of 30 turns");
 		expect(title).toContain("turns: 31/30");
@@ -80,9 +80,21 @@ describe("the dialog text", () => {
 		expect(ceilingTitle(ask({ reason: "timeout", timeoutMinutes: 20 }))).toContain("passed its 20 minute budget");
 	});
 
-	it("prints the task whole, newlines and all", () => {
+	it("does not print the task, because the prompt would hide the options", () => {
+		// The dialog asks a question with five answers. A delegation prompt is a paragraph, and a title that
+		// scrolls the answers off the screen enforces the ceiling on a run the human meant to extend (FM-11).
 		const task = "Read pi-gate/policy.ts and report:\n  1. the layers\n  2. the floors";
-		expect(ceilingTitle(ask({ task }))).toContain(task);
+		const title = ceilingTitle(ask({ task }));
+		expect(title).not.toContain("policy.ts");
+		expect(title).not.toContain("task:");
+		// Still carries the payload, so a frontend that has room can show it.
+		expect(ask({ task }).task).toBe(task);
+	});
+
+	it("stays inside the three lines the question needs", () => {
+		// Long roles or tools must not grow the title back into a wall of text.
+		const title = ceilingTitle(ask({ role: "senior_it_architect_and_polyglot", lastTool: "bash" }));
+		expect(title.split("\n")).toHaveLength(3);
 	});
 });
 

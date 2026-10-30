@@ -12,7 +12,8 @@
  * - One offer per run, whatever it answered (`child.ts` owns that rule). The extension is a favour, not a
  *   contract; a second dialog would be the same question the human has already answered, and a run that needs
  *   more than one is a run that was delegated the wrong size.
- * - Nothing is truncated: the task is printed whole, above the counters the decision is actually made on.
+ * - The title stays short enough that the options are on screen (`ceilingTitle`). A delegation prompt is a
+ *   paragraph; a dialog that scrolls its own buttons off the screen asks nothing — it just blocks the run.
  *
  * While the dialog is open the child keeps running: the SDK has no pause, and a human who takes a minute to
  * answer should not be billed for a stalled run — and a run the human means to extend is a run whose work is
@@ -22,7 +23,7 @@
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { CeilingAnswer, CeilingAskHandler, CeilingReason } from "./child.ts";
-import { formatDuration, roleDisplayName, taskBody } from "./labels.ts";
+import { formatDuration, roleDisplayName } from "./labels.ts";
 import type { CeilingAsk } from "./child.ts";
 
 /** One rung of the ladder the human is offered: turns and minutes, always handed out together. */
@@ -64,9 +65,13 @@ function ceilingFact(ask: CeilingAsk): string {
 }
 
 /**
- * The question, with everything it is answered on above the options: which role, which budget, what the child
- * has done so far, and what the task was. The task whole and verbatim — the human is deciding whether this
- * delegation deserves more of the bill, and an ellipsis hides exactly that.
+ * The question, and nothing else: which role, which budget ran out, what the child has spent so far, and what
+ * refusing costs. Deliberately **not** the task — a delegation prompt is the paragraph the human wrote, it is
+ * on the tool card above and in the transcript, and only one child can run at a time (`run.ts`'s guard), so
+ * the dialog can never be about an unnamed run. Printed here it would push `Reject` and the rungs off the
+ * screen, which is the failure this dialog must not have: an unanswered question grants nothing (FM-11), so a
+ * dialog whose options are invisible refuses its own run. Frontends that want the task can render it from
+ * `ask.task`, which still carries it whole.
  */
 export function ceilingTitle(ask: CeilingAsk): string {
 	const counters = [
@@ -79,7 +84,6 @@ export function ceilingTitle(ask: CeilingAsk): string {
 		.join("  ·  ");
 	return (
 		`pi-subagent: ${roleDisplayName(ask.role)} — ${ceilingFact(ask)}\n` +
-		`task: ${taskBody(ask.task)}\n` +
 		counters +
 		`\none extension per run: "Reject" ends it now and the child reports what it has`
 	);
