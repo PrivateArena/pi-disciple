@@ -24,6 +24,9 @@ node verification/rpc-ceiling-dialog.mjs "no answer"     # waits out the 5-min d
 # the subagent card: what a frontend gets in `details`, and what the renderers draw (no provider, no quota)
 node verification/probe-subagent-render.mjs [width]
 
+# what a child's request body actually carries when its role sets `sampling` (no provider, no quota)
+node verification/role-sampling-wire.mjs
+
 They refuse to answer when no option matches the requested label: an earlier version fell back to
 "Allow once" silently and skewed the run. To keep the child `pi` out of your own config — and your
 `grants.global` out of the test — point it at a scratch agent dir holding only credentials:
@@ -56,6 +59,16 @@ installed copy cannot double-gate the same run. They need a live provider, so th
   third, sibling call in the same folder after the grant raises no dialog at all.
 * `rpc-subagent-gate.mjs` — a dialog titled `… from subagent(explore): <task>` raised by the **child's**
   call, and a `logs/review.jsonl` line whose `parentCallId` is the `subagent` call id.
+* `role-sampling-wire.mjs` — the only driver that needs neither a provider nor a scratch dir: it runs a real
+  child against a fake OpenAI-compatible server on localhost, in a scratch `PI_CODING_AGENT_DIR`, and asserts on
+  the recorded request body. Expected evidence: the role's `temperature` over the model's `models.json` defaults,
+  `min_p` and `chat_template_kwargs` passed through untouched, the model's unnamed keys (`top_p`, `top_k`) still
+  present, the `samplingByThinkingLevel` block applied only at its level, `reasoning_effort` moved to the role's
+  `thinkingLevel` while the session sat on another, and `details.sampling` on the finished card. It also proves
+  the negative case by construction: `before_provider_request` never fires in a child, so no sampling extension
+  in the parent could have produced these bytes. Its third scenario is the honest one: `sampling: { "model":
+  "gpt-4-turbo" }` really does move the request onto another model (pi merges the bag over its own fields), so
+  the driver asserts that the run also *said* so instead of pretending the key is impossible.
 * `rpc-ceiling-dialog.mjs` — one dialog titled `pi-subagent: Explore — reached its limit of 2 turns`, its options
   `Reject` first and then the four rungs; `Extend by 40 turns` continues the child past the limit it just hit
   (turn count above the budget, `budget extended by the user at the turn limit: +40 turns / +10 min` in the

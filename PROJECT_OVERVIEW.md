@@ -36,6 +36,7 @@ pi-gate/
 pi-subagent/
   roles.ts         explore | general-purpose | review + applyRoleConfig: config edits them, new ones join the table    step 10
   model-override.ts subagent.model pin: "provider/id" / "provider:id" / bare id -> Model     step 10
+  sampling.ts      subagent.roles.<name>.sampling/.thinkingLevel: a cloned Model carrying what this child sends    new
   prompt.ts        child system prompt + task wrapper                                     step 11
   delegation.ts    the `<delegation>` system prompt section: when to delegate, when not to    step 15
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
@@ -112,6 +113,43 @@ the built-ins with the shape to copy.
 
 The model still never supplies a tool list: it names a role, and every name in the table is human-authored,
 after the parent's gate floored config edits to `ask`.
+
+**A role can also retune the request itself** (`subagent.roles.<name>.thinkingLevel`, `.sampling`,
+`.samplingByThinkingLevel`; `pi-subagent/sampling.ts`). A child on a local endpoint otherwise inherits whatever
+the server was launched with — temperature 1.0, top_k 20, top_p 0.95, thinking `xhigh` — and an `explore` sweep
+wants different numbers from a `review`. Like every other role field this is config, never a tool parameter.
+
+They travel on a **cloned `Model`**, because pi already has a native channel for parameters it does not model:
+`Model.samplingParams` is merged into the request body *last* (so it outranks pi's named fields) and
+`Model.samplingParamsByThinkingLevel` over that for the level in effect, and `createAgentSession` uses the model
+object it was handed as given. An extension hook could not have done it: `before_provider_request` is fired by
+the session's *own* runner and a child runs with zero extensions, so a sampling extension installed in the
+parent never sees a child's body — which is why children were the one thing a provider-level `sampling` block
+in such an extension did not cover. `sampling` is a free-form bag (pi's `SamplingParams` is
+`Record<string, unknown>`), so `top_k`, `min_p`, `repetition_penalty`, `do_sample`, `chat_template_kwargs` and
+any future server key pass through untouched, structured values included; only a non-object block, a key that is
+not a field name and a non-finite number are refused, and an out-of-contract `temperature`/`top_p` is warned
+about and sent anyway — the endpoint is not ours to legislate for.
+
+Precedence, per key: the model's own `samplingParams` (`models.json`) < the role's `sampling` < the role's block
+for the thinking level the run uses. The role's flat block is applied at *every* level the model declares,
+because pi clamps the level inside its adapter and a role that asks `xhigh` on a model that stops at `high` must
+still get its own numbers. Keys the role does not name keep the model's values. `thinkingLevel` is a role field
+for the same reason: "thinking xhigh" is not a sampling parameter, it is what selects the level block — and pi
+clamps it to the model, with `childThinkingLevel` still dropping it for a non-reasoning model.
+
+The clone is not cosmetic: `ctx.model` *is* the parent session's object, so writing onto it would retune the
+session that delegated the work. Nothing about the change is silent: `sampling: temperature=0.2 · top_k=20` on
+the result card's identity line *and* on the running block (a long retuned run should be checkable before it is
+spent), a `request:` line per role in `/subagentc roles`, `replaced per role: explore=off` in
+`/subagentc model`, and a notify when the child's API is not one of the three OpenAI-compatible ones that read
+these fields at all (pi's own limit). Because the bag is merged over pi's own fields, a key like `model`,
+`max_tokens` or `reasoning_effort` is legal and does override what pi wrote — so a role naming one is told, at
+config-settle time, that it overrode a field pi sets itself and that the card will still name the session's
+model; the same warning pass checks every level block too, and `__proto__`-shaped keys are refused before they
+can pollute the bag. `verification/role-sampling-wire.mjs` drives the real chain — tool, `runChild`,
+`createAgentSession`, pi's adapter — against a fake OpenAI server and asserts on the bytes it was actually sent,
+including that override.
 
 **Except when two facts name the same thing.** An `edit` of `/x/a.ts` and the `path` fact `/x/a.ts` are
 one location described twice, so they are judged once, by the most **specific** rule about them: a
@@ -404,8 +442,9 @@ output file); `/subagentc limits` prints the number, its source file and this co
 ## Commands
 
 ```bash
-npm test            # vitest run — 380 tests, no live provider needed
+npm test            # vitest run — 401 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
+node verification/role-sampling-wire.mjs  # a child's real request body, against a fake OpenAI server
 node verification/tui-card.mjs            # the card as pi's own ToolExecutionComponent draws it
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
 node verification/rpc-ceiling-dialog.mjs "Extend by 40 turns"     # the ceiling dialog, granted

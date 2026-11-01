@@ -96,6 +96,7 @@ function sentence(line: string, details: SubagentDetails, period = true): string
 export function formatIdentityLine(details: SubagentDetails, theme: Theme): string {
 	const parts = [`role: ${details.role}${details.roleDefaulted ? " (default)" : ""}`];
 	if (details.model) parts.push(`model: ${details.model}`);
+	if (details.sampling) parts.push(`sampling: ${details.sampling}`);
 	if (details.childSessionId) parts.push(`Agent ID: ${details.childSessionId}`);
 	if (details.nestedCalls) parts.push(`${details.nestedCalls} nested calls`);
 	const head = theme.fg("muted", parts.join(" · "));
@@ -141,7 +142,10 @@ export function formatResultBlock(
 	// Running: the activity line is the payload — a frontend with no update at all has nothing to say.
 	// The task is not repeated here: the call block above the card already prints it whole.
 	const activity = details.activity ? `\n${theme.fg("dim", `last call: ${details.activity}`)}` : "";
-	return `${status}${activity}`;
+	// The retune is said while the run is live, not only after it: a 40-minute child on parameters the human
+	// cannot see is a run whose request nobody can check before it is spent.
+	const retune = details.sampling ? `\n${theme.fg("dim", `sampling: ${details.sampling}`)}` : "";
+	return `${status}${activity}${retune}`;
 }
 
 /** What the call title needs beyond the args, because a title is drawn before the call is settled. */

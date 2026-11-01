@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { Model } from "@earendil-works/pi-ai";
 import { buildConfigView, buildModelCatalog, effectiveBudget, formatRunning, modelRef } from "../config-view.ts";
 import { DEFAULT_LIMITS } from "../config-file.ts";
-import { ROLES } from "../roles.ts";
+import { applyRoleConfig, ROLES } from "../roles.ts";
 import type { ChildModelResolution } from "../model-override.ts";
 
 const model = (provider: string, id: string, reasoning = true): Model<any> =>
@@ -68,7 +68,16 @@ describe("/subagentc config view", () => {
 	});
 
 	it("forces the child thinking level off for a non-reasoning model and says why", () => {
-		expect(buildConfigView(input())).toContain('child thinking level: off (session asks "high", the model has no such level)');
+		expect(buildConfigView(input())).toContain('child thinking level: off (session asks "high", which this model does not have)');
+	});
+
+	it("says which roles replace that level", () => {
+		const roles = applyRoleConfig({ explore: { thinkingLevel: "low" }, review: { sampling: { temperature: 0.1 } } }).roles;
+		const view = buildConfigView(input({ effectiveRoles: roles }), "model");
+		// A role's `thinkingLevel` outranks the session's for that role's runs, so the model section may not
+		// quietly print only the session's.
+		expect(view).toContain("replaced per role: explore=low (subagent.roles.<name>.thinkingLevel)");
+		expect(buildConfigView(input(), "model")).not.toContain("replaced per role");
 	});
 
 	it("labels the source of every limit, default included", () => {
@@ -114,6 +123,18 @@ describe("/subagentc config view", () => {
 		expect(buildConfigView(input())).toContain("delegation prompt: on");
 		// The roles list must mark the role an unnamed call actually gets.
 		expect(buildConfigView(input({ limits: { ...DEFAULT_LIMITS, defaultRole: "review" } }), "roles")).toContain("review · Critique of existing code, plans or diffs · the default for an unnamed call");
+	});
+
+	it("shows what a role says about the outgoing request", () => {
+		const roles = applyRoleConfig({
+			explore: { thinkingLevel: "off", sampling: { temperature: 0.2, top_k: 20 }, samplingByThinkingLevel: { high: { temperature: 0.6 } } },
+		}).roles;
+		const view = buildConfigView(input({ effectiveRoles: roles }), "roles");
+		expect(view).toContain("request: thinking off · sampling temperature=0.2 · top_k=20 · per level high=temperature=0.6");
+		// The shape a human needs to copy, in the command that shows it.
+		expect(view).toContain('"sampling": { "temperature": 0.3, "top_k": 20 }');
+		// A role that says nothing about the request prints no line: the built-ins send what the model says.
+		expect(buildConfigView(input(), "roles")).not.toContain("request: thinking");
 	});
 
 	it("shows the running child, and says what \"none\" means", () => {

@@ -20,6 +20,7 @@ import type { CeilingReport, RunProgress } from "./child.ts";
 import { createCeilingBroker } from "./ceiling.ts";
 import { loadSubagentLimits } from "./config-file.ts";
 import { childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
+import { applyRoleSampling, roleThinkingLevel, samplingLabel } from "./sampling.ts";
 import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type SubagentCommandArg } from "./config-view.ts";
 import { buildDelegationSection, DELEGATION_SECTION } from "./delegation.ts";
 import { claimGuard, composeResult, currentGuard, formatProgress, progressDetails, releaseGuard } from "./run.ts";
@@ -185,7 +186,20 @@ export default function piSubagent(pi: ExtensionAPI) {
 			};
 			const shims = buildShims(ctx.tools, roleForRun, host, limits);
 			const shimNames = shims.map((shim) => shim.name);
-			const childModel = modelLabel(model, overridden);
+			// A role may retune the request for the child only. Both the sampling and the thinking level are applied
+			// to a *clone* of the model: `ctx.model` is the parent session's own object, and writing to it would
+			// retune the session that delegated the work (see sampling.ts).
+			const childLevel = childThinkingLevel(model, roleThinkingLevel(roleForRun, ctx.thinkingLevel ?? "off"));
+			const sampling = applyRoleSampling(model, roleForRun, childLevel);
+			const samplingText = samplingLabel(sampling.applied) || undefined;
+			if (sampling.ignored) {
+				// `asked`, not `applied`: a role whose params are all keyed to another thinking level still asked for
+				// them, and a warning that named nothing would be the feature failing quietly.
+				const text = samplingLabel(sampling.asked) || `thinkingLevel "${roleForRun.thinkingLevel}"`;
+				ctx.ui.notify(`[subagent] ${model?.api} ignores sampling params — ${text} was not sent`, "warning");
+			}
+
+			const childModel = modelLabel(sampling.model, overridden);
 			const startedAt = Date.now();
 			// A granted extension goes on the live card, so a run that got more rope looks like one.
 			let ceiling: CeilingReport | undefined;
@@ -203,6 +217,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 						roleDefaulted: defaulted,
 						task: args.task,
 						model: childModel,
+						sampling: samplingText,
 						shimTools: shimNames,
 						nestedCalls: tally.calls,
 						ceiling,
@@ -236,8 +251,8 @@ export default function piSubagent(pi: ExtensionAPI) {
 					task: args.task,
 					cwd: ctx.cwd,
 					agentDir: getAgentDir(),
-					model: model,
-					thinkingLevel: childThinkingLevel(model, ctx.thinkingLevel ?? "off"),
+					model: sampling.model,
+					thinkingLevel: childLevel,
 					tools: shims,
 					sessionDir: ctx.sessionManager.getSessionDir(),
 					signal: controller.signal,
@@ -253,6 +268,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 					nestedCalls: tally.calls,
 					shimTools: shimNames,
 					model: childModel,
+					sampling: samplingText,
 					task: args.task,
 					roleDefaulted: defaulted,
 					activity: latest.lastTool ?? "reported",

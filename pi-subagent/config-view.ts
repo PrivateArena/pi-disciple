@@ -11,11 +11,13 @@
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { childThinkingLevel } from "./model-override.ts";
 import type { ChildModelResolution } from "./model-override.ts";
 import { FORBIDDEN_CHILD_TOOLS, NESTED_CALL_CEILING } from "./shims.ts";
 import { ROLES, type Role, type RoleTable } from "./roles.ts";
+import { samplingLabel } from "./sampling.ts";
 import { CEILING_OFFER_HOLD_MS, childSessionDir, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./child.ts";
 import { CEILING_DIALOG_TIMEOUT_MS, EXTENSION_STEPS } from "./ceiling.ts";
 import type { SubagentLimits } from "./config-file.ts";
@@ -120,8 +122,12 @@ function modelSection(input: ConfigViewInput): string[] {
 	}
 	if (child) {
 		const asked = input.thinkingLevel ?? "off";
-		const given = childThinkingLevel(child, asked);
-		lines.push(`  child thinking level: ${given}${given !== asked ? ` (session asks "${asked}", the model has no such level)` : ""}`);
+		// pi's own clamp, not only the non-reasoning guard: the level the request carries is the one the adapter
+		// lands on after clamping, and this is the line a human trusts when they check what a child will send.
+		const given = clampThinkingLevel(child, childThinkingLevel(child, asked));
+		lines.push(`  child thinking level: ${given}${given !== asked ? ` (session asks "${asked}", which this model does not have)` : ""}`);
+		const overridden = Object.entries(input.effectiveRoles ?? {}).filter(([, role]) => role.thinkingLevel);
+		if (overridden.length) lines.push(`    replaced per role: ${overridden.map(([name, role]) => `${name}=${role.thinkingLevel}`).join(", ")} (subagent.roles.<name>.thinkingLevel)`);
 		lines.push(`  context window: ${formatCount(child.contextWindow)} tokens · max output ${formatCount(child.maxTokens)}`);
 	}
 	return lines;
@@ -186,9 +192,33 @@ function rolesSection(input: ConfigViewInput): string[] {
 				(capped ? ` → effective ${budget.turns} turns · ${budget.minutes} min (capped by subagent.maxTurns/timeoutMinutes)` : ""),
 		);
 		lines.push(`    prompt: ${role.prompt}`);
+		const request = requestLine(role);
+		if (request) lines.push(`    ${request}`);
 	}
-	lines.push('  edit or add a role under "roles" in the config: { "tools": [...], "maxTurns": n, "timeoutMinutes": n, "description": "...", "prompt": "..." }');
+	lines.push(
+		'  edit or add a role under "roles" in the config: { "tools": [...], "maxTurns": n, "timeoutMinutes": n,\n' +
+		'    "description": "...", "prompt": "...", "thinkingLevel": "off", "sampling": { "temperature": 0.3, "top_k": 20 },\n' +
+		'    "samplingByThinkingLevel": { "high": { "temperature": 0.6 } } }',
+	);
 	return lines;
+}
+
+/**
+ * What the role says about the outgoing request: its thinking level and sampling params, printed only when it
+ * says something. A sampling change is invisible in the answer, so `/subagentc` is where a human checks that
+ * the config is doing what they meant (`formatIdentityLine` on the card says the same for a finished run).
+ */
+function requestLine(role: Role): string | undefined {
+	const sampling = samplingLabel(role.sampling ?? {});
+	const levels = Object.entries(role.samplingByThinkingLevel ?? {})
+		.filter(([, block]) => Object.keys(block ?? {}).length)
+		.map(([level, block]) => `${level}=${samplingLabel(block ?? {})}`);
+	if (!role.thinkingLevel && !sampling && !levels.length) return undefined;
+	return (
+		`request: thinking ${role.thinkingLevel ?? "inherited from session"}` +
+		(sampling ? ` · sampling ${sampling}` : "") +
+		(levels.length ? ` · per level ${levels.join(", ")}` : "")
+	);
 }
 
 function runtimeSection(input: ConfigViewInput): string[] {

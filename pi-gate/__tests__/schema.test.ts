@@ -124,6 +124,57 @@ describe("subagent.roles", () => {
 		expect(parsed.limits.roles).toBeUndefined();
 		expect(parsed.errors.join(" ")).toContain("subagent.roles must be an object");
 	});
+
+	it("reads a role's sampling params and thinking level", () => {
+		// Values are the server's vocabulary, not pi's, so they pass through untouched — including the
+		// structured ones a Qwen-style endpoint wants.
+		const parsed = parseSubagentConfig(
+			{
+				roles: {
+					explore: {
+						thinkingLevel: " Off ",
+						sampling: { temperature: 0.2, top_p: 0.9, top_k: 20, min_p: 0, do_sample: true, repetition_penalty: 1.05, chat_template_kwargs: { use_audio: false } },
+						samplingByThinkingLevel: { xhigh: { temperature: 0.6 }, off: { temperature: 1 } },
+					},
+				},
+			},
+			"test",
+		);
+		expect(parsed.errors).toEqual([]);
+		expect(parsed.limits.roles).toEqual({
+			explore: {
+				thinkingLevel: "off",
+				sampling: { temperature: 0.2, top_p: 0.9, top_k: 20, min_p: 0, do_sample: true, repetition_penalty: 1.05, chat_template_kwargs: { use_audio: false } },
+				samplingByThinkingLevel: { xhigh: { temperature: 0.6 }, off: { temperature: 1 } },
+			},
+		});
+	});
+
+	it("refuses the sampling shapes that could never reach a server, key by key", () => {
+		const parsed = parseSubagentConfig(
+			{
+				roles: {
+					explore: { thinkingLevel: "hig", sampling: ["temperature"], samplingByThinkingLevel: { hig: { temperature: 0 } } },
+					deep: { tools: ["read"], sampling: { "top k": 20, temperature: Number.NaN, top_p: 0.9 } },
+					proto: { tools: ["read"], sampling: { ["__proto__"]: 1, constructor: 2, top_k: 5 } },
+				},
+			},
+			"test",
+		);
+		const text = parsed.errors.join(" | ");
+		expect(text).toContain("roles.explore.thinkingLevel must be one of off, minimal, low, medium, high, xhigh, max");
+		expect(text).toContain("roles.explore.sampling must be an object of request-body params");
+		expect(text).toContain(`samplingByThinkingLevel key "hig" is not a thinking level`);
+		expect(text).toContain(`sampling key "top k" is not a request-body field name`);
+		expect(text).toContain("sampling.temperature must be a finite number");
+		// A bag key that is really a prototype write would vanish from the body and pollute the object instead.
+		expect(text).toContain(`sampling key "__proto__" is not a request-body field name`);
+		expect(text).toContain(`sampling key "constructor" is not a request-body field name`);
+		// The refusals cost only themselves: the one usable key survives.
+		expect(parsed.limits.roles?.deep).toEqual({ tools: ["read"], sampling: { top_p: 0.9 } });
+		expect(parsed.limits.roles?.proto).toEqual({ tools: ["read"], sampling: { top_k: 5 } });
+		expect(parsed.limits.roles?.explore).toEqual({});
+	});
 });
 
 describe("subagent.model", () => {

@@ -171,6 +171,12 @@ export interface SubagentDetails extends SubagentCardFields {
 	shimTools?: string[];
 	/** Which model the child actually ran on, e.g. `local/qwen3.8-flash-next (inherited)`. */
 	model?: string;
+	/**
+	 * What the role put on the request body, e.g. `temperature=0.3 · top_p=0.9`. Absent when the role names no
+	 * sampling: a run whose parameters changed is not visible anywhere else, and the whole point of the knob is
+	 * that the answer stops depending on which role happened to run.
+	 */
+	sampling?: string;
 	error?: string;
 	/** The task, so a running card can say what the child is doing. */
 	task?: string;
@@ -204,6 +210,8 @@ export interface ProgressContext {
 	roleDefaulted?: boolean;
 	task: string;
 	model?: string;
+	/** The role's sampling, pre-formatted for the card (see `SubagentDetails.sampling`). */
+	sampling?: string;
 	shimTools: string[];
 	nestedCalls: number;
 	/** A granted extension, so a card that stays open for minutes says the run has more rope than it started with. */
@@ -227,6 +235,7 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
 		ceiling: host.ceiling,
 		task: host.task,
 		model: host.model,
+		sampling: host.sampling,
 		shimTools: host.shimTools,
 		nestedCalls: host.nestedCalls,
 		...cardFields(host, { toolCalls: progress.toolCalls, elapsedMs: progress.elapsedMs }),

@@ -51,6 +51,29 @@ const CASES: [label: string, config: Record<string, unknown>][] = [
 	["roles not an object", { roles: ["explore"] }],
 	["everything at once", { enabled: false, delegationPrompt: false, maxTurns: 2, model: "session", roles: { auditor: { tools: ["read"], maxTurns: 3 } } }],
 	["a non-boolean ceiling switch", { askToExtend: "yes" }],
+	[
+		"role sampling",
+		{
+			roles: {
+				explore: {
+					thinkingLevel: "off",
+					sampling: { temperature: 0.2, top_k: 20, do_sample: true, chat_template_kwargs: { use_audio: false } },
+					samplingByThinkingLevel: { high: { temperature: 0.6 } },
+				},
+			},
+		},
+	],
+	[
+		"bad role sampling",
+		{
+			roles: {
+				explore: { thinkingLevel: "hig", sampling: [1], samplingByThinkingLevel: [2] },
+				r: { tools: ["read"], sampling: { "bad key": 1, top_p: 0.9 } },
+			},
+		},
+	],
+	["a sampling block that says nothing", { roles: { explore: { sampling: {} } } }],
+	["a prototype-named sampling key", { roles: { r: { tools: ["read"], sampling: { ["__proto__"]: 1, top_k: 5 } } } }],
 ];
 
 describe("the shipped duplication stays honest", () => {

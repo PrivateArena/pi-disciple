@@ -87,6 +87,29 @@ describe("subagent.roles: editing and adding roles", () => {
 		expect(applied.roles.review).toBe(ROLES.review);
 	});
 
+	it("carries a role's sampling and thinking level, and warns about a knob no server reads", () => {
+		const applied = applyRoleConfig({
+			explore: { thinkingLevel: "off", sampling: { temperature: 0.2, top_p: 0.9 } },
+			shard: { tools: ["read"], sampling: { temperature: 8 } },
+			deep: { tools: ["read"], samplingByThinkingLevel: { high: { top_p: 4 } } },
+			hijack: { tools: ["read"], sampling: { model: "gpt-4-turbo", reasoning_effort: "none" } },
+		});
+		expect(applied.roles.explore).toEqual({ ...ROLES.explore, thinkingLevel: "off", sampling: { temperature: 0.2, top_p: 0.9 } });
+		// A warning, never a refusal: the endpoint is not ours to legislate for.
+		expect(applied.warnings.join(" ")).toContain("subagent.roles.shard.sampling.temperature is 8, outside the usual 0..2");
+		expect(applied.roles.shard?.sampling).toEqual({ temperature: 8 });
+		// A per-level block is as capable of both, so it is checked too.
+		expect(applied.warnings.join(" ")).toContain("subagent.roles.deep.samplingByThinkingLevel.high.top_p is 4, outside the usual 0..1");
+		// `sampling` is merged over pi's own fields, so these two keys are not sampling at all.
+		expect(applied.warnings.join(" ")).toContain("subagent.roles.hijack.sampling.model overrides a field pi sets itself");
+		expect(applied.warnings.join(" ")).toContain("subagent.roles.hijack.sampling.reasoning_effort overrides a field pi sets itself");
+		// A role that says nothing about sampling gains no fields — the shipped table stays exactly as declared.
+		expect(applied.roles.review).toBe(ROLES.review);
+		expect(applied.warnings.join(" ")).not.toContain("roles.explore");
+		expect(ROLES.explore.sampling).toBeUndefined();
+		expect(ROLES.explore.thinkingLevel).toBeUndefined();
+	});
+
 	it("adds a role that names its tools, and refuses one that does not", () => {
 		const added = applyRoleConfig({ auditor: { tools: ["read", "grep"], description: "Compliance read-through", maxTurns: 4, timeoutMinutes: 5 } });
 		expect(added.roles.auditor).toEqual({

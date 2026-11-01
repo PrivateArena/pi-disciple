@@ -10,7 +10,7 @@
  * `<cwd>/.pi/extensions/**`, so the model cannot quietly add a role to itself.
  */
 
-import type { RoleConfigMap, SubagentRoleId, SubagentRoleName } from "../pi-gate/schema.ts";
+import type { RoleConfigMap, SamplingConfig, SamplingValue, SubagentRoleId, SubagentRoleName, ThinkingLevelWord } from "../pi-gate/schema.ts";
 import { FORBIDDEN_CHILD_TOOLS } from "./shims.ts";
 
 export type RoleName = SubagentRoleName;
@@ -29,6 +29,19 @@ export interface Role {
 	allowTools: readonly string[];
 	maxTurns: number;
 	timeoutMinutes: number;
+	/**
+	 * Request-body sampling parameters for a child on this role, merged over the model's own defaults from
+	 * `models.json`. Empty means "say nothing": the model's params and the server's defaults stand. Applied by
+	 * `sampling.ts`, and only the OpenAI-compatible APIs read it — the same limit pi has, not one of ours.
+	 */
+	sampling?: SamplingConfig;
+	/** The same, for one thinking level only; merged over {@link sampling} for that level. */
+	samplingByThinkingLevel?: Partial<Record<ThinkingLevelWord, SamplingConfig>>;
+	/**
+	 * The child's thinking level. `undefined` means inherit the parent session's, which is the shipped
+	 * behaviour; a set level is *requested*, and pi clamps it to what the model supports.
+	 */
+	thinkingLevel?: ThinkingLevelWord;
 }
 
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "bash"] as const;
@@ -143,6 +156,64 @@ function newRoleBase(key: string): Role {
 }
 
 /**
+ * Role params over built-in params, per key. A role that says nothing about sampling keeps no field at all,
+ * so an untouched built-in stays exactly the object `roles.ts` declares — and a child runs on the model's own
+ * params rather than on an empty bag that would say the same thing.
+ */
+function mergeSampling(base: SamplingConfig | undefined, override: SamplingConfig | undefined): SamplingConfig | undefined {
+	const merged = { ...base, ...override };
+	return Object.keys(merged).length ? merged : undefined;
+}
+
+function mergeSamplingByLevel(
+	base: Partial<Record<ThinkingLevelWord, SamplingConfig>> | undefined,
+	override: Partial<Record<ThinkingLevelWord, SamplingConfig>> | undefined,
+): Partial<Record<ThinkingLevelWord, SamplingConfig>> | undefined {
+	const out: Partial<Record<ThinkingLevelWord, SamplingConfig>> = { ...base };
+	for (const [level, block] of Object.entries(override ?? {}) as [ThinkingLevelWord, SamplingConfig][]) {
+		out[level] = { ...out[level], ...block };
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Body fields pi writes itself, and which `samplingParams` therefore *overrides* rather than supplements
+ * (pi merges the bag last, over the finished request). They stay legal — a human may mean `stop` or
+ * `max_tokens` — but overriding `model` from a sampling bag would move the child onto another model while the
+ * card keeps naming the one the session picked, and overriding `reasoning_effort` cancels the same role's own
+ * `thinkingLevel`. So the collision is named where the config is settled, not discovered on the wire.
+ */
+const PI_OWNED_BODY_FIELDS = ["model", "messages", "tools", "stream", "max_tokens", "max_completion_tokens", "reasoning_effort"];
+
+/**
+ * Soft checks over everything a role's request block says — the flat bag and every level block, since a
+ * per-level override is as capable of both as the flat one. Warnings, never refusals: the endpoint is not ours
+ * to legislate for, and `temperature` outside 0..2 is a typo on OpenAI, vLLM, llama.cpp and SGLang alike.
+ */
+function samplingSanityWarnings(key: string, role: { sampling?: SamplingConfig; samplingByThinkingLevel?: Record<string, SamplingConfig | undefined> }): string[] {
+	const blocks: [string, SamplingConfig][] = [["sampling", role.sampling ?? {}]];
+	for (const [level, block] of Object.entries(role.samplingByThinkingLevel ?? {})) blocks.push([`samplingByThinkingLevel.${level}`, block ?? {}]);
+	const warnings: string[] = [];
+	for (const [path, block] of blocks) {
+		for (const [field, low, high] of [
+			["temperature", 0, 2],
+			["top_p", 0, 1],
+		] as const) {
+			const value: SamplingValue | undefined = block[field];
+			if (typeof value === "number" && (value < low || value > high)) {
+				warnings.push(`subagent.roles.${key}.${path}.${field} is ${value}, outside the usual ${low}..${high} — sending it anyway`);
+			}
+		}
+		for (const field of Object.keys(block)) {
+			if (PI_OWNED_BODY_FIELDS.includes(field)) {
+				warnings.push(`subagent.roles.${key}.${path}.${field} overrides a field pi sets itself: the request will carry it, and the card still names the session's model and thinking level`);
+			}
+		}
+	}
+	return warnings;
+}
+
+/**
  * The table one run actually uses: the three built-ins, edited by `subagent.roles`, plus new roles.
  *
  * Every field is optional, so an entry saying only `{ "maxTurns": 8 }` tightens that role and keeps its
@@ -177,7 +248,11 @@ export function applyRoleConfig(config: RoleConfigMap | undefined): AppliedRoleC
 			allowTools: tools?.keep ?? base.allowTools,
 			maxTurns: entry.maxTurns ?? base.maxTurns,
 			timeoutMinutes: entry.timeoutMinutes ?? base.timeoutMinutes,
+			sampling: mergeSampling(base.sampling, entry.sampling),
+			samplingByThinkingLevel: mergeSamplingByLevel(base.samplingByThinkingLevel, entry.samplingByThinkingLevel),
+			thinkingLevel: entry.thinkingLevel ?? base.thinkingLevel,
 		};
+		warnings.push(...samplingSanityWarnings(key, roles[key] ?? {}));
 		(isNew ? added : edited).push(key);
 	}
 	return { roles, warnings, added, edited };
