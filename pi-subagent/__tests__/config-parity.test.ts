@@ -73,6 +73,14 @@ const CASES: [label: string, config: Record<string, unknown>][] = [
 		},
 	],
 	["a sampling block that says nothing", { roles: { explore: { sampling: {} } } }],
+	[
+		"shipped-style documentation keys",
+		{
+			"==roles.<name>": { tools: ["read"], thinkingLevel: "off", sampling: { temperature: 0.2 } },
+			"==entry.fields": "surface · pattern · action",
+			roles: { explore: { maxTurns: 30 } },
+		},
+	],
 	["a prototype-named sampling key", { roles: { r: { tools: ["read"], sampling: { ["__proto__"]: 1, top_k: 5 } } } }],
 ];
 

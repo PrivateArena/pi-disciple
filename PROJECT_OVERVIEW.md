@@ -442,7 +442,7 @@ output file); `/subagentc limits` prints the number, its source file and this co
 ## Commands
 
 ```bash
-npm test            # vitest run — 401 tests, no live provider needed
+npm test            # vitest run — 402 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/role-sampling-wire.mjs  # a child's real request body, against a fake OpenAI server
 node verification/tui-card.mjs            # the card as pi's own ToolExecutionComponent draws it

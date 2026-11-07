@@ -24,12 +24,25 @@
       "bash": {
         "*": "ask"
       },
+      "==powershell": {
+        "*": "ask"
+      },
+      "==<tool name>": "ask",
       "subagent": "allow"
     },
     "grants": {
       "global": [],
-      "project": []
-    }
+      "project": [],
+      "==entry": {
+        "surface": "bash",
+        "pattern": "git status *",
+        "action": "allow"
+      },
+      "==entry.fields": "surface = a tool name (bash, edit, read, subagent, an MCP tool name), or \"path\" | \"external_directory\" | \"*\" · pattern = one glob in that surface (\"cd *\", \"/mnt/usb/data/*\", \"*.env\") · action = \"allow\" | \"ask\" | \"deny\", and the last matching pattern wins",
+      "==entry.project": "grants.project is read only from a trusted <cwd>/.pi/extensions/pi-gate/config.json; session grants are memory-only and are never a key in this file"
+    },
+    "==permission": "every key is a surface, and every value is either \"allow\"|\"ask\"|\"deny\" (which means \"*\" for that surface) or a { pattern: action } map; surface names are free-form, so any tool can be configured",
+    "==commented": "a key prefixed with \"==\" is documentation: no parser reads it, so it cannot change behaviour, and it survives a grants write that a // comment would not"
   },
   "subagent": {
     "enabled": true,
@@ -54,6 +67,55 @@
         "maxTurns": 30,
         "timeoutMinutes": 20
       }
-    }
+    },
+    "==roles.<name>": {
+      "tools": ["read", "grep", "find", "ls"],
+      "description": "one line: what /subagentc roles prints and what the <delegation> prompt tells the model",
+      "prompt": "replaces this role's built-in child prompt (it is not appended to it)",
+      "maxTurns": 20,
+      "timeoutMinutes": 10,
+      "thinkingLevel": "off | minimal | low | medium | high | xhigh | max, then clamped to the levels models.json maps for this model (Qwen3.8-Flash-Next answers to reasoning_effort xhigh | medium | low, plus thinking off)",
+      "sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0
+      },
+      "samplingByThinkingLevel": {
+        "low": {
+          "temperature": 0.8,
+          "top_p": 0.9
+        },
+        "medium": {
+          "temperature": 0.9,
+          "top_p": 0.92
+        },
+        "xhigh": {
+          "temperature": 1.0,
+          "top_p": 0.95
+        },
+        "off": {
+          "temperature": 0.7,
+          "top_p": 0.8,
+          "top_k": 20,
+          "min_p": 0.0,
+          "presence_penalty": 1.5,
+          "repetition_penalty": 1.0,
+          "chat_template_kwargs": {
+            "enable_thinking": false,
+            "preserve_thinking": true
+          }
+        }
+      }
+    },
+    "==roles.<name>.fields": "every field is optional, and a written one replaces the built-in value; maxTurns 1..200 and timeoutMinutes 1..120 are then capped by subagent.maxTurns/timeoutMinutes, so a run gets min(role, section)",
+    "==roles.<name>.tools": "\"*\" means the parent's own callable set; a role naming one that does not exist must declare tools, or it is dropped; subagent, codemode and tool_search are stripped from any list",
+    "==roles.<name>.sampling": "a free-form request-body bag merged last over the model's own samplingParams from models.json, so top_k, min_p, do_sample or any server key passes through; only the OpenAI-compatible APIs read it. The numbers above are Qwen3.8-Flash-Next's Thinking Mode preset from its model card (temp 1.0 / top_p 0.95 / top_k 20 / min_p 0 / presence_penalty 0 / repetition_penalty 1)",
+    "==roles.<name>.samplingByThinkingLevel": "the same bag keyed by thinking level, merged over .sampling for every level the model declares and looked up with the level the run actually settles on. The card names two presets only: thinking (above) and Instruct/non-thinking, which is the \"off\" block (temp 0.7 / top_p 0.8 / presence_penalty 1.5) — presence_penalty is what keeps a stream with no thinking tokens from looping. xhigh/medium/low all take the card's thinking numbers as written; the differing rungs above are an example of per-effort tuning, not card values, and a level block needs only the keys you change",
+    "==roles.<name>.sampling.wire": "keys land top-level in the body, so write chat_template_kwargs and top_k here and never under extra_body — that nesting is the OpenAI SDK's client-side convention, which the SDK flattens before the wire. verification/role-sampling-wire.mjs asserts the bytes a child is really sent",
+    "==roles.<name>.sampling.thinking": "thinking on/off is pi's job: thinkingLevel is mapped to the field this model takes (enable_thinking, chat_template_kwargs or reasoning_effort, per models.json compat). Naming reasoning_effort in a bag cancels that and warns at config-settle, and naming chat_template_kwargs replaces pi's whole object — repeat preserve_thinking in it or the child loses the reasoning trace the card asks agents to keep",
+    "==roles.<new-name>": "an entry naming a role that does not exist adds it: it then appears in <delegation> and /subagentc roles and is callable as subagent(role: \"<new-name>\"); names match [a-z][a-z0-9_-]{0,31}, case, spaces, - and _ being equal, so \"Senior Reviewer\" finds \"senior_reviewer\""
   }
 }

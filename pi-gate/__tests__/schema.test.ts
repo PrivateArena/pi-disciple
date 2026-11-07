@@ -191,20 +191,45 @@ describe("subagent.model", () => {
 	});
 });
 
+/**
+ * The shipped file documents the keys it does not set as `"==key": <example>` — inert to both parsers, and
+ * the assertions below are about the live configuration, so the documentation keys come back out first.
+ */
+function stripDocs<T>(value: T): T {
+	if (Array.isArray(value)) return value.map((item) => stripDocs(item)) as unknown as T;
+	if (value && typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [key, item] of Object.entries(value)) if (!key.startsWith("==")) out[key] = stripDocs(item);
+		return out as T;
+	}
+	return value;
+}
+
 describe("defaults", () => {
 	it("matches the shipped config.json, whose placeholders change nothing", () => {
-		const shipped = JSON.parse(readFileSync(fileURLToPath(new URL("../config.json", import.meta.url)), "utf8"));
+		const raw = JSON.parse(readFileSync(fileURLToPath(new URL("../config.json", import.meta.url)), "utf8"));
+		const shipped = stripDocs(raw);
 		expect(shipped.gate.permission).toEqual(DEFAULT_GATE_CONFIG.permission);
 		expect(shipped.gate.enabled).toBe(DEFAULT_GATE_CONFIG.enabled);
 		expect(shipped.gate.reviewLog).toBe(DEFAULT_GATE_CONFIG.reviewLog);
 		expect(shipped.gate.promptTimeoutMs).toBe(DEFAULT_GATE_CONFIG.promptTimeoutMs);
 		expect(shipped.gate.grants).toEqual({ global: [], project: [] });
 
+		// Reading the file as shipped must be silent and must yield exactly the rules of the stripped document:
+		// a documentation key that produced an error (degraded config, floor on every call) or a live rule would
+		// turn the file's own comments into behaviour.
+		const rawGate = parseGateConfig(raw, "shipped config.json");
+		expect(rawGate.errors).toEqual([]);
+		expect(rawGate.entries.filter((entry) => !entry.surface.startsWith("=="))).toEqual(flattenPermission(DEFAULT_GATE_CONFIG.permission));
+		const rawLimits = parseSubagentConfig(raw.subagent, "shipped config.json");
+		expect(rawLimits.errors).toEqual([]);
+
 		// Every configurable `subagent` key is spelled out, so the block is the defaults plus the shipped file's
 		// own stated choices — and nothing else. "model": "inherit" is an explicit no-pin, so it is not one.
 		// The two real choices: an unnamed delegation runs the read-only role, and the role budgets are written
 		// out under the ceiling so the arithmetic is visible instead of implicit.
 		const parsed = parseSubagentConfig(shipped.subagent, "shipped config.json");
+		expect(rawLimits.limits).toEqual(parsed.limits);
 		expect(parsed.errors).toEqual([]);
 		expect(parsed.limits).toEqual({ ...DEFAULT_SUBAGENT_LIMITS, defaultRole: "explore", roles: shipped.subagent.roles });
 		// The written role table re-states the three built-ins and their budgets only: no new role, no new tool,
