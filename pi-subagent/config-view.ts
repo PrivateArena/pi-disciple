@@ -11,7 +11,6 @@
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { childThinkingLevel } from "./model-override.ts";
 import type { ChildModelResolution } from "./model-override.ts";
@@ -124,10 +123,13 @@ function modelSection(input: ConfigViewInput): string[] {
 		const asked = input.thinkingLevel ?? "off";
 		// pi's own clamp, not only the non-reasoning guard: the level the request carries is the one the adapter
 		// lands on after clamping, and this is the line a human trusts when they check what a child will send.
-		const given = clampThinkingLevel(child, childThinkingLevel(child, asked));
+		const given = childThinkingLevel(child, asked);
 		lines.push(`  child thinking level: ${given}${given !== asked ? ` (session asks "${asked}", which this model does not have)` : ""}`);
 		const overridden = Object.entries(input.effectiveRoles ?? {}).filter(([, role]) => role.thinkingLevel);
-		if (overridden.length) lines.push(`    replaced per role: ${overridden.map(([name, role]) => `${name}=${role.thinkingLevel}`).join(", ")} (subagent.roles.<name>.thinkingLevel)`);
+		if (overridden.length)
+			lines.push(
+				`    replaced per role: ${overridden.map(([name, role]) => `${name}=${levelArrow(child, role.thinkingLevel!)}`).join(", ")} (subagent.roles.<name>.thinkingLevel)`,
+			);
 		lines.push(`  context window: ${formatCount(child.contextWindow)} tokens · max output ${formatCount(child.maxTokens)}`);
 	}
 	return lines;
@@ -192,7 +194,7 @@ function rolesSection(input: ConfigViewInput): string[] {
 				(capped ? ` → effective ${budget.turns} turns · ${budget.minutes} min (capped by subagent.maxTurns/timeoutMinutes)` : ""),
 		);
 		lines.push(`    prompt: ${role.prompt}`);
-		const request = requestLine(role);
+		const request = requestLine(role, childModelOf(input));
 		if (request) lines.push(`    ${request}`);
 	}
 	lines.push(
@@ -204,18 +206,32 @@ function rolesSection(input: ConfigViewInput): string[] {
 }
 
 /**
+ * A written level together with the level this model actually runs it at, when they differ: `low`, or
+ * `high → xhigh`. The same shape serves a level key of a sampling block.
+ */
+function levelArrow(model: Model<Api> | undefined, written: ThinkingLevel): string {
+	if (!model) return written;
+	const given = childThinkingLevel(model, written);
+	return given === written ? written : `${written} → ${given}`;
+}
+
+/**
  * What the role says about the outgoing request: its thinking level and sampling params, printed only when it
  * says something. A sampling change is invisible in the answer, so `/subagentc` is where a human checks that
  * the config is doing what they meant (`formatIdentityLine` on the card says the same for a finished run).
+ *
+ * Levels are said twice: as written, and as this model runs them. A block keyed to a level the model has folded
+ * away still applies — `sampling.ts::foldLevels` re-keys it through the clamp — and the arrow is what shows a
+ * human where their numbers actually land.
  */
-function requestLine(role: Role): string | undefined {
+function requestLine(role: Role, model: Model<Api> | undefined): string | undefined {
 	const sampling = samplingLabel(role.sampling ?? {});
 	const levels = Object.entries(role.samplingByThinkingLevel ?? {})
 		.filter(([, block]) => Object.keys(block ?? {}).length)
-		.map(([level, block]) => `${level}=${samplingLabel(block ?? {})}`);
+		.map(([level, block]) => `${levelArrow(model, level as ThinkingLevel)}=${samplingLabel(block ?? {})}`);
 	if (!role.thinkingLevel && !sampling && !levels.length) return undefined;
 	return (
-		`request: thinking ${role.thinkingLevel ?? "inherited from session"}` +
+		`request: thinking ${role.thinkingLevel ? levelArrow(model, role.thinkingLevel) : "inherited from session"}` +
 		(sampling ? ` · sampling ${sampling}` : "") +
 		(levels.length ? ` · per level ${levels.join(", ")}` : "")
 	);

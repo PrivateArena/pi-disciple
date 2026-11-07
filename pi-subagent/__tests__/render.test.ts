@@ -95,6 +95,10 @@ describe("the status sentence", () => {
 		expect(line).toContain("model: local/qwen3.8-flash-next (inherited)");
 		expect(line).toContain("Agent ID: 01abc");
 		expect(line).toContain("transcript: /tmp/child.jsonl");
+		// A child whose level came from the role, or from the clamp, is a child that did not run like its parent.
+		expect(line).not.toContain("thinking:");
+		expect(formatIdentityLine(details({ thinking: "off" }), theme)).toContain("thinking: off");
+		expect(formatIdentityLine(details({ thinking: 'high → xhigh (this model has no "high")' }), theme)).toContain("thinking: high → xhigh");
 	});
 });
 

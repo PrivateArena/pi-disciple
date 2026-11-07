@@ -33,6 +33,14 @@
  * role asks for is deliberate: pi clamps the level itself, inside the adapter (`clampThinkingLevel`), so a
  * role that requests `xhigh` on a model that stops at `high` must still get its own values at `high`. A key
  * the role does not name keeps whatever the model declared for the level that ends up in effect.
+ *
+ * The same rule reaches the role's *own* level blocks, and there it needs one more step: pi looks a level bag
+ * up by the clamped level (`simple-options.js::resolveSamplingParams`), so a block keyed to a level this model
+ * does not advertise would sit in the clone forever and never be read. `foldLevels` therefore re-keys the role's
+ * blocks through the clamp before merging, which is what makes "the role still gets its own numbers" true of
+ * `{ "samplingByThinkingLevel": { "xhigh": … } }` on a model that has no `xhigh` — and a plain `models.json`
+ * entry with no `thinkingLevelMap` is exactly that model, since pi only advertises `xhigh`/`max` when the map
+ * declares them (`pi-ai/dist/models.js::getSupportedThinkingLevels`).
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -51,6 +59,33 @@ export function isSamplingCapable(model: Model<Api> | undefined): boolean {
 /** What the role's `thinkingLevel` asks for; unset means "whatever the session is on". */
 export function roleThinkingLevel(role: Role, inherited: ThinkingLevel): ThinkingLevel {
 	return role.thinkingLevel ?? inherited;
+}
+
+/** pi's level ladder (`EXTENDED_THINKING_LEVELS` in `pi-ai/dist/models.js`) — the line `clampThinkingLevel` walks. */
+const LEVEL_ORDER: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Re-key a role's per-level blocks onto the levels this model can actually select.
+ *
+ * Several written levels can land on one (`high` and `xhigh` on a model that stops at `high`, or a map that
+ * nulls a rung). Precedence on a key conflict: the block written for the level that is really in force beats one
+ * that only clamped there, and among the clamped ones the higher written level wins — a role that asks `xhigh`
+ * and is taken down to `high` runs at `high`, and `high`'s own block is the statement about that run.
+ */
+export function foldLevels(
+	model: Model<Api>,
+	byLevel: Partial<Record<ThinkingLevelWord, SamplingConfig | undefined>> | undefined,
+): Partial<Record<ThinkingLevelWord, SamplingConfig>> {
+	const folded: Partial<Record<ThinkingLevelWord, SamplingConfig>> = {};
+	if (!byLevel) return folded;
+	for (const level of LEVEL_ORDER) {
+		const word = level as ThinkingLevelWord;
+		const block = byLevel[word];
+		if (!block || !Object.keys(block).length) continue;
+		const target = clampThinkingLevel(model, level) as ThinkingLevelWord;
+		folded[target] = target === word ? { ...folded[target], ...block } : { ...block, ...folded[target] };
+	}
+	return folded;
 }
 
 export interface AppliedRoleSampling {
@@ -75,8 +110,9 @@ export interface AppliedRoleSampling {
  */
 export function applyRoleSampling(model: Model<Api>, role: Role, thinkingLevel: ThinkingLevel): AppliedRoleSampling {
 	const flat = role.sampling ?? {};
-	const byLevel = role.samplingByThinkingLevel ?? {};
-	const asked: SamplingConfig = Object.assign({}, flat, ...Object.values(byLevel));
+	const asked: SamplingConfig = Object.assign({}, flat, ...Object.values(role.samplingByThinkingLevel ?? {}));
+	// Keyed by the levels pi can select, so every entry here is one a request can actually read.
+	const byLevel = foldLevels(model, role.samplingByThinkingLevel);
 	const applied: SamplingConfig = { ...flat, ...byLevel[clampThinkingLevel(model, thinkingLevel) as ThinkingLevelWord] };
 	if (!Object.keys(asked).length) return { model, applied: {}, asked, ignored: false };
 

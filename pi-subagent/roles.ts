@@ -180,10 +180,28 @@ function mergeSamplingByLevel(
  * Body fields pi writes itself, and which `samplingParams` therefore *overrides* rather than supplements
  * (pi merges the bag last, over the finished request). They stay legal — a human may mean `stop` or
  * `max_tokens` — but overriding `model` from a sampling bag would move the child onto another model while the
- * card keeps naming the one the session picked, and overriding `reasoning_effort` cancels the same role's own
- * `thinkingLevel`. So the collision is named where the config is settled, not discovered on the wire.
+ * card keeps naming the one the session picked, and overriding a thinking switch cancels the same role's own
+ * `thinkingLevel`. Which thinking field pi writes depends on the endpoint's `compat.thinkingFormat`
+ * (`pi-ai/dist/api/openai-completions.js`): `reasoning_effort` is the generic one, `enable_thinking` is what a
+ * Qwen-format endpoint is sent, `thinking` / `reasoning` / `chat_template_kwargs` / `chat_template_args` are the
+ * other spellings, and `thinking_token_budget` is the budget field. Naming any of them is said where the config
+ * is settled, not discovered on the wire.
  */
-const PI_OWNED_BODY_FIELDS = ["model", "messages", "tools", "stream", "max_tokens", "max_completion_tokens", "reasoning_effort"];
+const PI_OWNED_BODY_FIELDS = [
+	"model",
+	"messages",
+	"tools",
+	"stream",
+	"max_tokens",
+	"max_completion_tokens",
+	"reasoning_effort",
+	"enable_thinking",
+	"thinking",
+	"reasoning",
+	"chat_template_kwargs",
+	"chat_template_args",
+	"thinking_token_budget",
+];
 
 /**
  * Soft checks over everything a role's request block says — the flat bag and every level block, since a

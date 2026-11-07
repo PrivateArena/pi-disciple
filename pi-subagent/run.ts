@@ -172,6 +172,12 @@ export interface SubagentDetails extends SubagentCardFields {
 	/** Which model the child actually ran on, e.g. `local/qwen3.8-flash-next (inherited)`. */
 	model?: string;
 	/**
+	 * The thinking level the child actually ran at, pre-formatted, e.g. `off` or `high → xhigh (this model has no
+	 * "high")`. Absent when the child ran on the session's level at a level the model has — the two cases where
+	 * reporting it would only repeat what the parent already knows (see `childThinkingLabel`).
+	 */
+	thinking?: string;
+	/**
 	 * What the role put on the request body, e.g. `temperature=0.3 · top_p=0.9`. Absent when the role names no
 	 * sampling: a run whose parameters changed is not visible anywhere else, and the whole point of the knob is
 	 * that the answer stops depending on which role happened to run.
@@ -210,6 +216,8 @@ export interface ProgressContext {
 	roleDefaulted?: boolean;
 	task: string;
 	model?: string;
+	/** The role's thinking level, pre-formatted for the card (see `SubagentDetails.thinking`). */
+	thinking?: string;
 	/** The role's sampling, pre-formatted for the card (see `SubagentDetails.sampling`). */
 	sampling?: string;
 	shimTools: string[];
@@ -235,6 +243,7 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
 		ceiling: host.ceiling,
 		task: host.task,
 		model: host.model,
+		thinking: host.thinking,
 		sampling: host.sampling,
 		shimTools: host.shimTools,
 		nestedCalls: host.nestedCalls,
@@ -312,6 +321,7 @@ export function composeResult(
 	const header =
 		`[subagent ${role} · ${status} · ${result.turns} turns · ${result.toolCalls} tool calls · ${(elapsedMs / 1000).toFixed(1)}s]` +
 		(extra.model ? `\nmodel: ${extra.model}` : "") +
+		(extra.thinking ? `\nthinking: ${extra.thinking}` : "") +
 		(ceilingNote ? `\n${ceilingNote}` : "") +
 		(sessionFile ? `\ntranscript: ${sessionFile}` : "") +
 		(result.error ? `\nerror: ${result.error}` : "");

@@ -19,7 +19,7 @@ import { childSessionDir, pruneTranscripts, runChild } from "./child.ts";
 import type { CeilingReport, RunProgress } from "./child.ts";
 import { createCeilingBroker } from "./ceiling.ts";
 import { loadSubagentLimits } from "./config-file.ts";
-import { childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
+import { childThinkingLabel, childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
 import { applyRoleSampling, roleThinkingLevel, samplingLabel } from "./sampling.ts";
 import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type SubagentCommandArg } from "./config-view.ts";
 import { buildDelegationSection, DELEGATION_SECTION } from "./delegation.ts";
@@ -189,9 +189,14 @@ export default function piSubagent(pi: ExtensionAPI) {
 			// A role may retune the request for the child only. Both the sampling and the thinking level are applied
 			// to a *clone* of the model: `ctx.model` is the parent session's own object, and writing to it would
 			// retune the session that delegated the work (see sampling.ts).
-			const childLevel = childThinkingLevel(model, roleThinkingLevel(roleForRun, ctx.thinkingLevel ?? "off"));
+			const askedLevel = roleThinkingLevel(roleForRun, ctx.thinkingLevel ?? "off");
+			const childLevel = childThinkingLevel(model, askedLevel);
 			const sampling = applyRoleSampling(model, roleForRun, childLevel);
 			const samplingText = samplingLabel(sampling.applied) || undefined;
+			// A thinking level is the other thing a role changes invisibly, and the model can move it on its own: a
+			// child told to think "high" on a model that has no "high" runs at whatever the clamp lands on, and
+			// nothing else in the answer would say so (see `childThinkingLabel`).
+			const thinkingText = childThinkingLabel(model, askedLevel, childLevel, !!roleForRun.thinkingLevel);
 			if (sampling.ignored) {
 				// `asked`, not `applied`: a role whose params are all keyed to another thinking level still asked for
 				// them, and a warning that named nothing would be the feature failing quietly.
@@ -217,6 +222,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 						roleDefaulted: defaulted,
 						task: args.task,
 						model: childModel,
+						thinking: thinkingText,
 						sampling: samplingText,
 						shimTools: shimNames,
 						nestedCalls: tally.calls,
@@ -268,6 +274,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 					nestedCalls: tally.calls,
 					shimTools: shimNames,
 					model: childModel,
+					thinking: thinkingText,
 					sampling: samplingText,
 					task: args.task,
 					roleDefaulted: defaulted,

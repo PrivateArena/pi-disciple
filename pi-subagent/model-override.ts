@@ -11,7 +11,7 @@
  * is only read as a provider when the registry actually knows it.
  */
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
@@ -75,10 +75,34 @@ export function resolveChildModel(reference: string, registry: ModelRegistry, pa
 	return describe(chosen, true);
 }
 
-/** Which thinking level the child may request: a non-reasoning model cannot take any level but "off". */
+/**
+ * Which thinking level the child may request: pi's own clamp, not just the non-reasoning guard.
+ *
+ * `getSupportedThinkingLevels` is what decides a model's levels, and a model's `thinkingLevelMap` can both hide
+ * rungs (`null`) and omit them — pi clamps again inside its adapter (`sdk.js`), so clamping here changes no byte
+ * on the wire. It changes the *report*: this is the only place that knows both what was asked and what the
+ * model has, and a child that ran at `xhigh` because `high` does not exist must not be described as running at
+ * `high` (see `childThinkingLabel`).
+ */
 export function childThinkingLevel(model: Model<Api> | undefined, requested: ThinkingLevel): ThinkingLevel {
-	if (!model?.reasoning && requested !== "off") return "off";
-	return requested;
+	if (!model?.reasoning) return "off";
+	return clampThinkingLevel(model, requested);
+}
+
+/**
+ * The child's thinking level for a card or `/subagentc`, or `undefined` when there is nothing to say: a run on
+ * the level the session was already on, at the level the model has. A number is worth printing when the role
+ * replaced the session's level or the clamp moved it, because both mean the child did not run like its parent.
+ */
+export function childThinkingLabel(
+	model: Model<Api> | undefined,
+	asked: ThinkingLevel,
+	effective: ThinkingLevel,
+	roleNamedLevel: boolean,
+): string | undefined {
+	if (asked === effective) return roleNamedLevel ? effective : undefined;
+	const why = model?.reasoning ? `this model has no "${asked}"` : "this model does not think";
+	return `${asked} → ${effective} (${why})`;
 }
 
 /** Display label for the result header, e.g. `local/qwen3.8-flash-next (inherited from session)`. */

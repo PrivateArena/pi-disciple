@@ -134,22 +134,34 @@ about and sent anyway — the endpoint is not ours to legislate for.
 Precedence, per key: the model's own `samplingParams` (`models.json`) < the role's `sampling` < the role's block
 for the thinking level the run uses. The role's flat block is applied at *every* level the model declares,
 because pi clamps the level inside its adapter and a role that asks `xhigh` on a model that stops at `high` must
-still get its own numbers. Keys the role does not name keep the model's values. `thinkingLevel` is a role field
-for the same reason: "thinking xhigh" is not a sampling parameter, it is what selects the level block — and pi
-clamps it to the model, with `childThinkingLevel` still dropping it for a non-reasoning model.
+still get its own numbers. Keys the role does not name keep the model's values. The role's *own* level blocks need
+one step more, because pi looks a level bag up by the **clamped** level: `sampling.ts::foldLevels` re-keys each
+written level through the clamp before merging, so a block written for `xhigh` still lands on the run when the
+model has no `xhigh` — which is every plain `models.json` entry, since pi advertises `xhigh`/`max` only when
+`thinkingLevelMap` declares them. On a key conflict the block written for the level that is really in force wins,
+and among the folded-in ones the higher written level wins. `thinkingLevel` is a role field
+for the same reason: "thinking xhigh" is not a sampling parameter, it is what selects the level block — and
+`childThinkingLevel` is now pi's own clamp, so it both drops the level for a non-reasoning model and moves it to
+a rung this model has.
 
 The clone is not cosmetic: `ctx.model` *is* the parent session's object, so writing onto it would retune the
 session that delegated the work. Nothing about the change is silent: `sampling: temperature=0.2 · top_k=20` on
 the result card's identity line *and* on the running block (a long retuned run should be checkable before it is
-spent), a `request:` line per role in `/subagentc roles`, `replaced per role: explore=off` in
-`/subagentc model`, and a notify when the child's API is not one of the three OpenAI-compatible ones that read
+spent) plus a `thinking: off` or `thinking: high → xhigh (this model has no "high")` part whenever the child did
+not run on the session's own level, a `request:` line per role in `/subagentc roles` and a
+`replaced per role: explore=low → off` line in `/subagentc model`, both saying the level as written *and* as the
+model runs it, and a notify when the child's API is not one of the three OpenAI-compatible ones that read
 these fields at all (pi's own limit). Because the bag is merged over pi's own fields, a key like `model`,
-`max_tokens` or `reasoning_effort` is legal and does override what pi wrote — so a role naming one is told, at
-config-settle time, that it overrode a field pi sets itself and that the card will still name the session's
+`max_tokens` or a thinking switch is legal and does override what pi wrote — and the switch is not always
+`reasoning_effort`: pi sends `enable_thinking` to a Qwen-format endpoint and `thinking`, `reasoning`,
+`chat_template_kwargs`, `chat_template_args` or `thinking_token_budget` for the other compat shapes, so all of
+them are named at config-settle time, the way `reasoning_effort` always was; a role naming one is told that it
+overrode a field pi sets itself and that the card will still name the session's
 model; the same warning pass checks every level block too, and `__proto__`-shaped keys are refused before they
 can pollute the bag. `verification/role-sampling-wire.mjs` drives the real chain — tool, `runChild`,
 `createAgentSession`, pi's adapter — against a fake OpenAI server and asserts on the bytes it was actually sent,
-including that override.
+including that override, against two models: one that declares its own `samplingParams`, and a Qwen-shaped one
+whose `thinkingLevelMap` hides rungs, for the fold, the switch warning and the reported level.
 
 **Except when two facts name the same thing.** An `edit` of `/x/a.ts` and the `path` fact `/x/a.ts` are
 one location described twice, so they are judged once, by the most **specific** rule about them: a

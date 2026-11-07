@@ -141,6 +141,41 @@ describe("roleThinkingLevel", () => {
 	});
 });
 
+describe("a role's level blocks against a model that does not have every level", () => {
+	/** A model with `high` but no `xhigh`/`max`: what a plain `models.json` entry with no `thinkingLevelMap` is. */
+	const noXhigh = model({ thinkingLevelMap: { off: "false", minimal: "minimal", low: "low", medium: "medium", high: "high" } });
+
+	it("applies a block written for a level the model does not have, at the level it clamps to", () => {
+		// pi advertises `xhigh`/`max` only when the model's map declares them (`getSupportedThinkingLevels`), and it
+		// looks a level bag up by the clamped level — so without the fold this block sits unread in the clone.
+		const { role } = exploreRole({ samplingByThinkingLevel: { xhigh: { temperature: 0.4, top_k: 7 } } });
+		const result = applyRoleSampling(noXhigh, role, "xhigh");
+		expect(resolveSamplingParams(result.model, "xhigh")).toEqual({ temperature: 0.4, top_k: 7 });
+		expect(result.applied).toEqual({ temperature: 0.4, top_k: 7 });
+	});
+
+	it("lets the block written for the level that is really in force win the keys they share", () => {
+		const { role } = exploreRole({ samplingByThinkingLevel: { high: { temperature: 0.6, top_k: 7 }, xhigh: { temperature: 0.4 } } });
+		const child = applyRoleSampling(noXhigh, role, "xhigh").model;
+		// The run is a `high` run: `high`'s own block describes it, and `xhigh`'s fills only what `high` left open.
+		expect(resolveSamplingParams(child, "xhigh")).toEqual({ temperature: 0.6, top_k: 7 });
+	});
+
+	it("folds each level onto its own target and keeps the model's values underneath", () => {
+		const parent = model({
+			thinkingLevelMap: { off: "false", minimal: null, low: "low", medium: "medium", high: null, xhigh: "xhigh", max: null },
+			samplingParams: { temperature: 1 },
+			samplingParamsByThinkingLevel: { off: { top_p: 0.8 }, low: { top_k: 20 } },
+		});
+		const { role } = exploreRole({ samplingByThinkingLevel: { minimal: { seed: 7 }, high: { seed: 9 } } });
+		const child = applyRoleSampling(parent, role, "xhigh").model;
+		// minimal → low and high → xhigh: two different rungs, so nothing leaks from one into the other.
+		expect(resolveSamplingParams(child, "minimal")).toEqual({ temperature: 1, top_k: 20, seed: 7 });
+		expect(resolveSamplingParams(child, "high")).toEqual({ temperature: 1, seed: 9 });
+		expect(resolveSamplingParams(child, "off")).toEqual({ temperature: 1, top_p: 0.8 });
+	});
+});
+
 describe("samplingLabel", () => {
 	it("prints one line, and nothing when the role says nothing", () => {
 		expect(samplingLabel({})).toBe("");

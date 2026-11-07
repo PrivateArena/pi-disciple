@@ -98,7 +98,13 @@ describe("the shipped duplication stays honest", () => {
 			// Same refusals, in the same words. Only the shape rules are shared: the reader additionally settles
 			// `defaultRole` and the forbidden tools against the table it built, which the pure parser has no.
 			const shared = (error: string) =>
-				!error.includes("defaultRole") && !error.includes("names no role") && !error.includes("a child may never reach") && !error.includes("names a new role");
+				!error.includes("defaultRole") &&
+				!error.includes("names no role") &&
+				!error.includes("a child may never reach") &&
+				!error.includes("names a new role") &&
+				// The "overrides a field pi sets itself" notices come from `applyRoleConfig`, which only the reader
+				// runs — the pure parser has no role table to settle, so it cannot say them.
+				!error.includes("overrides a field pi sets itself");
 			const readerErrors = file.errors.map((error) => stripFile(error, where.file)).filter(shared);
 			const parserErrors = pure.errors.map((error) => error.replace("test: ", "")).filter(shared);
 			for (const error of parserErrors) expect(readerErrors.join(" | "), error).toContain(error);

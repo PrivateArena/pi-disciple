@@ -75,8 +75,12 @@ describe("/subagentc config view", () => {
 		const roles = applyRoleConfig({ explore: { thinkingLevel: "low" }, review: { sampling: { temperature: 0.1 } } }).roles;
 		const view = buildConfigView(input({ effectiveRoles: roles }), "model");
 		// A role's `thinkingLevel` outranks the session's for that role's runs, so the model section may not
-		// quietly print only the session's.
-		expect(view).toContain("replaced per role: explore=low (subagent.roles.<name>.thinkingLevel)");
+		// quietly print only the session's. And the level printed is the one the run gets: this session model
+		// has no thinking at all, so "low" is what was asked and "off" is what a child would send.
+		expect(view).toContain("replaced per role: explore=low → off (subagent.roles.<name>.thinkingLevel)");
+		expect(buildConfigView(input({ effectiveRoles: roles, sessionModel: PINNED }), "model")).toContain(
+			"replaced per role: explore=low (subagent.roles.<name>.thinkingLevel)",
+		);
 		expect(buildConfigView(input(), "model")).not.toContain("replaced per role");
 	});
 
@@ -129,8 +133,12 @@ describe("/subagentc config view", () => {
 		const roles = applyRoleConfig({
 			explore: { thinkingLevel: "off", sampling: { temperature: 0.2, top_k: 20 }, samplingByThinkingLevel: { high: { temperature: 0.6 } } },
 		}).roles;
-		const view = buildConfigView(input({ effectiveRoles: roles }), "roles");
+		// On a model that has every level, a level says what it names.
+		const view = buildConfigView(input({ effectiveRoles: roles, sessionModel: PINNED }), "roles");
 		expect(view).toContain("request: thinking off · sampling temperature=0.2 · top_k=20 · per level high=temperature=0.6");
+		// On a model that does not have the level, the view says where the block lands — `foldLevels` re-keys it
+		// through the clamp, so it is applied there and nowhere else.
+		expect(buildConfigView(input({ effectiveRoles: roles }), "roles")).toContain("request: thinking off · sampling temperature=0.2 · top_k=20 · per level high → off=temperature=0.6");
 		// The shape a human needs to copy, in the command that shows it.
 		expect(view).toContain('"sampling": { "temperature": 0.3, "top_k": 20 }');
 		// A role that says nothing about the request prints no line: the built-ins send what the model says.

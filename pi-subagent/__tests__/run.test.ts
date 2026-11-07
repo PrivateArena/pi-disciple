@@ -53,6 +53,18 @@ describe("result mapping", () => {
 		expect(result.details.truncated).toBe(false);
 	});
 
+	it("says the thinking level a child really ran at, when it is not the session's", () => {
+		const moved = composeResult(child(), "explore", 20_000, 1000, { model: "local/x (inherited)", thinking: 'high → xhigh (this model has no "high")' });
+		const text = (moved.content[0] as { text: string }).text;
+		expect(text).toContain("\nthinking: high → xhigh");
+		expect(moved.details.thinking).toBe('high → xhigh (this model has no "high")');
+		// Nothing is said when the child ran on the session's level at a level the model has.
+		const plain = (composeResult(child(), "explore", 20_000, 1000, { model: "local/x (inherited)" }).content[0] as { text: string }).text;
+		expect(plain).toContain("\nmodel: local/x (inherited)");
+		expect(plain).not.toContain("thinking:");
+		expect(progressDetails({ turns: 1, toolCalls: 0, elapsedMs: 1 }, { role: "explore", task: "t", shimTools: [], nestedCalls: 0, thinking: "off" }).thinking).toBe("off");
+	});
+
 	it("records that the role came from the config and not from the model", () => {
 		const result = composeResult(child(), "general-purpose", 20_000, 1000, { roleDefaulted: true, task: "fix the flaky test" });
 		expect(result.details.roleDefaulted).toBe(true);
