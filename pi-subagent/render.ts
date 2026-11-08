@@ -15,13 +15,10 @@
 import { keyHint, type AgentToolResult, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
-import type { Exit } from "./child.ts";
+import type { Exit } from "./run-exit.ts";
 import { formatCeiling, formatDuration, roleDisplayName, taskBody } from "./labels.ts";
 import { configuredDefaultRole, type RoleId } from "./roles.ts";
-import type { SubagentDetails } from "./run.ts";
-
-/** Glyph for the call title. pi's own tools have one per tool; this is ours. */
-export const SUBAGENT_GLYPH = "🤖";
+import type { SubagentDetails } from "./card/details.ts";
 
 /**
  * Report lines shown while the card is collapsed. Beyond the cap: a "more lines" hint. Expanded, the card

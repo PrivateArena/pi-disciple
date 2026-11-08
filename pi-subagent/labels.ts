@@ -12,7 +12,7 @@
  */
 
 import type { RoleId } from "./roles.ts";
-import type { CeilingReport } from "./child.ts";
+import type { CeilingReport } from "./budget/ceiling-vocabulary.ts";
 
 /** Clip for a card row: a card gets a summary, never a whole field. */
 export function clip(text: string, maxChars: number): string {

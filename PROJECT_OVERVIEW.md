@@ -86,15 +86,47 @@ pi-subagent/
   delegation.ts    the `<delegation>` system prompt section: when to delegate, when not to    step 15
   shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
   ceiling.ts      the one-time "more rope?" dialog a spent budget asks: the ladder, the title, the answer rules    new
-  child.ts         runChild(): assembly, timeouts (ceiling, report-safe deferral, the held offer), steering, transcripts, usage  steps 13, 14
-  config-file.ts   own copy of the config reader: limits, model pin, `roles` table        step 20
-  run.ts           globalThis run guard + result mapping (status header, report budget + spill file, card contract)  steps 15, 16
+  child.ts         FACADE over transcript/ + budget/ + run-exit/child-messages; `runChild()` itself - assembly,  steps 13, 14
+                   the subscriber (counters, streaming shape, the two asks), the race, the result
+  run-exit.ts      the outcome vocabulary: `Exit`, its precedence list, `pickEarlier` - an exit is combined,     new
+                   never assigned, because two budgets can be spent at once
+  child-messages.ts pure readers of what a child left behind: content shape, context tokens, error, report, usage  new
+  child-request.ts what child the config asks for: the `subagent.model` pin and the role's sampling/thinking     new
+                   retuning, with the warnings they owe the human - called at their own two positions
+  budget/
+    ceiling-vocabulary.ts  the words a spent budget speaks: reason, ask, grant, answer, report, handler (leaf)   new
+    ceiling-clock.ts       the two budgets, the held ceiling, the one offer - the mechanism, not the dialog     new
+  transcript/
+    paths.ts        where a child's artifacts live and how they are named: one child, one pair of files        new
+    retention.ts    which transcripts survive a run, and what happens to the reports of the ones that do not    new
+    report-spill.ts where a cut report is copied to, so the model can read it without the transcript           new
+  config-file.ts   FACADE over config-contract/, plus what is about the *file*: scopes, order, mtime cache     step 20
+  config-contract/
+    model-pin.ts    the inherit words of `subagent.model`, and the reader turning one into a pin or a refusal  (leaf)
+    role-names.ts   ROLE_ID_PATTERN, the two normalisations, the `==` doc-key rule, the role budget ceilings  (leaf)
+    sampling-bag.ts the thinking-level words, the request-body key rules, and the readers that use them          new
+    roles-table.ts  what one `subagent.roles` entry may trip - error-for-error with `pi-gate/schema.ts`          new
+    tolerant-parse.ts the shared probes (`readBoolean`, `isRecordish`) every parser here is built from           new
+  run-guard.ts     the one-child rule and its `globalThis` slot - the only process-global state here           new
+  report-budget.ts the byte cap on a report: the whole-line head, never cut mid-character                       new
+  card/
+    ui-status.ts  the frontend status vocabulary and the exit -> status bridge                       (leaf)     new
+    details.ts    the `details` a card is drawn from: the `@gotgenes/pi-subagents` names + Pendant header       new
+    progress.ts   a complete `details` for a *running* call - an empty one is not a status a UI can draw       new
+  run.ts           FACADE over run-guard/ + card/ + report-budget, and `composeResult`: status header,        steps 15, 16
+                   report budget + spill file, card fields
   render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
   labels.ts        the strings a card is titled with: role display name, task label, task body — never clipped,
                    and what the human answered about a spent budget (shared by render.ts and run.ts)
   config-view.ts   the /subagentc text: effective config, model resolution, roles, catalog  step 20
   index.ts         the single `subagent` tool + /subagentc                                  steps 15, 16
 ```
+
+Five `pi-subagent` modules are facades over a sub-package or a split-out module, on the same terms as the
+gate's four above: `child.ts`, `config-file.ts` and `run.ts` re-export every symbol they used to declare, so
+the tests and `verification/` keep importing the old paths while the implementations live one-per-concern below
+them. Production importers were redirected to the real module; nothing in a sub-package imports its facade, and
+nothing in `pi-subagent` gained a runtime import of `pi-gate` - the cross-extension edges stay `import type`.
 
 ## Config
 
@@ -111,7 +143,7 @@ role - `timeoutMinutes: 20` with the built-in 10-minute `explore` budget cuts `e
 is why `subagent.roles.<name>.timeoutMinutes` exists. `/subagentc limits` and `/subagentc roles` print the
 ceiling, the role budget and the effective number together so the arithmetic is never guesswork.
 
-**How a deadline is decided** (`child.ts`, `HARD_SETTLE_MS`, `REPORT_GRACE_MS`): at the role's minutes the
+**How a deadline is decided** (`budget/ceiling-clock.ts`, `HARD_SETTLE_MS`, `REPORT_GRACE_MS`): at the role's minutes the
 child is *steered* to conclude (that is the whole point of the budget - a conclusion, not a kill); 60 s
 later the hard ceiling fires, and there the clock defers to the work: a run that is **streaming its report**
 (an assistant message with text and no tool call) or **mid tool call** (which means the steer has not even
@@ -541,7 +573,7 @@ output file); `/subagentc limits` prints the number, its source file and this co
 4. Child retry is **enabled but bounded** (`maxRetries: 2`, `maxAgentDelayMs: 5000`) instead of off: the
    free upstream 503s routinely, and the hard ceiling (now deferrable for a report, see Config) bounds the run.
 5. `reviewLog` records allow decisions too, not only ask resolutions (FM-17 audit value).
-6. Two extra modules: `pi-gate/handle.ts` (testable pipeline seam) and `pi-subagent/run.ts` (guard + result
+6. Two extra modules: `pi-gate/handle.ts` (testable pipeline seam) and `pi-subagent/run-guard.ts` + `pi-subagent/run.ts` (guard, then result
    mapping), so `index.ts` stays wiring only.
 7. The built-in default permission map is a real rule layer (`scope: "builtin"`) **only** when no config
    file supplies `permission` — otherwise a machine with no config would prompt for every call, reads
@@ -587,7 +619,7 @@ output file); `/subagentc limits` prints the number, its source file and this co
     under 160). The role list, the self-contained-task rule and the context argument do not fit in two.
 19. A spent budget asks the human for a one-time extension (`subagent.askToExtend`, `pi-subagent/ceiling.ts`,
     `child.ts::onCeiling`), which the plan did not have: a ceiling was only ever a verdict there. The mechanism
-    lives in `child.ts` (mutable budget, a held ceiling, one offer) and the question in `ceiling.ts`, so the
+    lives in `budget/ceiling-clock.ts` (mutable budget, a held ceiling, one offer) and the question in `ceiling.ts`, so the
     child stays testable with no UI and the dialog stays testable with no session.
 20. `pi-gate` guards **output** as well as input (`guard.ts`), which the plan never asked for: the failure it
     fixes is not a permission problem, but it is a call that never happened, and the gate is the extension that

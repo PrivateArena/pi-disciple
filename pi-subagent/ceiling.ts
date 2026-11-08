@@ -22,9 +22,8 @@
  */
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import type { CeilingAnswer, CeilingAskHandler, CeilingReason } from "./child.ts";
 import { formatDuration, roleDisplayName } from "./labels.ts";
-import type { CeilingAsk } from "./child.ts";
+import type { CeilingAnswer, CeilingAsk, CeilingAskHandler, CeilingReason } from "./budget/ceiling-vocabulary.ts";
 
 /** One rung of the ladder the human is offered: turns and minutes, always handed out together. */
 export interface ExtensionStep {

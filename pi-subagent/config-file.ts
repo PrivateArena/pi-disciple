@@ -6,25 +6,34 @@
  * limits from the same file. No gate policy code is reachable from here.
  *
  * The config vocabulary it mirrors from `pi-gate/schema.ts` — the inherit words of `subagent.model`, the
- * ceilings, the role-id pattern and the `subagent.roles` shape rules — is re-typed below rather than
- * imported, and `__tests__/config-parity.test.ts` fails if the two readers ever disagree.
+ * ceilings, the role-id pattern and the `subagent.roles` shape rules — lives one concern per module under
+ * `config-contract/` rather than being imported from `pi-gate`, and `__tests__/config-parity.test.ts` fails if
+ * the two readers ever disagree.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { applyRoleConfig, canonicalRole, DEFAULT_ROLE_NAME, type AppliedRoleConfig, type RoleTable } from "./roles.ts";
-import type { RoleConfig, RoleConfigMap, SubagentLimits } from "../pi-gate/schema.ts";
+import type { RoleConfigMap, SubagentLimits } from "../pi-gate/schema.ts";
+import { readModelValue } from "./config-contract/model-pin.ts";
+import { isRoleId, normaliseRoleId } from "./config-contract/role-names.ts";
+import { readRoles } from "./config-contract/roles-table.ts";
+import { readBoolean } from "./config-contract/tolerant-parse.ts";
 
 export type { SubagentLimits };
 
-/** Mirror of `schema.ts::MODEL_INHERIT_WORDS` — values of `subagent.model` that mean "no pin". */
-export const MODEL_INHERIT_WORDS: readonly string[] = ["inherit", "inherited", "session", "parent", "default"];
-/** Mirror of `schema.ts::ROLE_TURNS_CEILING` / `ROLE_TIMEOUT_CEILING_MINUTES`. */
-export const ROLE_TURNS_CEILING = 200;
-export const ROLE_TIMEOUT_CEILING_MINUTES = 120;
-/** Mirror of `schema.ts::isRoleId`. */
-export const ROLE_ID_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+/**
+ * The facade over the `config-contract/` package: the *vocabulary* of the `subagent` section — the
+ * `subagent.model` inherit words, the role-id rules and role ceilings, the thinking-level words and the
+ * `subagent.roles` shape rules — now lives one concern per module under `config-contract/`, while this module
+ * keeps what is about the *file*: which scopes it reads, in which order, cached on mtime, each error prefixed
+ * with the file that said it. Everything this module exported before is still reachable from here, and nothing
+ * under `config-contract/` imports this file.
+ */
+export { MODEL_INHERIT_WORDS } from "./config-contract/model-pin.ts";
+export { ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "./config-contract/role-names.ts";
+export { THINKING_LEVEL_WORDS } from "./config-contract/sampling-bag.ts";
 
 export const DEFAULT_LIMITS: SubagentLimits = {
 	enabled: true,
@@ -92,11 +101,10 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 			loaded.limits = { ...loaded.limits, [key]: Math.floor(value) };
 			loaded.origins[key] = file;
 		}
-		if (section.enabled !== undefined) {
-			if (typeof section.enabled === "boolean") {
-				loaded.limits = { ...loaded.limits, enabled: section.enabled };
-				loaded.origins.enabled = file;
-			} else loaded.errors.push(`${file}: subagent.enabled must be a boolean, ignored`);
+		const enabled = readBoolean(section, "enabled", `${file}: subagent.enabled`, loaded.errors);
+		if (enabled !== undefined) {
+			loaded.limits = { ...loaded.limits, enabled };
+			loaded.origins.enabled = file;
 		}
 		if (section.model !== undefined) {
 			const pin = readModelValue(section.model);
@@ -129,17 +137,15 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 			loaded.limits = { ...loaded.limits, roles: merged };
 			loaded.origins.roles = file;
 		}
-		if (section.askToExtend !== undefined) {
-			if (typeof section.askToExtend === "boolean") {
-				loaded.limits = { ...loaded.limits, askToExtend: section.askToExtend };
-				loaded.origins.askToExtend = file;
-			} else loaded.errors.push(`${file}: subagent.askToExtend must be a boolean, ignored`);
+		const askToExtend = readBoolean(section, "askToExtend", `${file}: subagent.askToExtend`, loaded.errors);
+		if (askToExtend !== undefined) {
+			loaded.limits = { ...loaded.limits, askToExtend };
+			loaded.origins.askToExtend = file;
 		}
-		if (section.delegationPrompt !== undefined) {
-			if (typeof section.delegationPrompt === "boolean") {
-				loaded.limits = { ...loaded.limits, delegationPrompt: section.delegationPrompt };
-				loaded.origins.delegationPrompt = file;
-			} else loaded.errors.push(`${file}: subagent.delegationPrompt must be a boolean, ignored`);
+		const delegationPrompt = readBoolean(section, "delegationPrompt", `${file}: subagent.delegationPrompt`, loaded.errors);
+		if (delegationPrompt !== undefined) {
+			loaded.limits = { ...loaded.limits, delegationPrompt };
+			loaded.origins.delegationPrompt = file;
 		}
 	}
 	finish(loaded);
@@ -161,168 +167,6 @@ function finish(loaded: LoadedLimits): void {
 		loaded.limits = { ...loaded.limits, defaultRole: DEFAULT_ROLE_NAME };
 		delete loaded.origins.defaultRole;
 	}
-}
-
-/** `subagent.model`: an inherit word means "no pin" — that is what lets the shipped config show the key. */
-function readModelValue(value: unknown): { model?: string; error?: string } {
-	if (typeof value !== "string" || !value.trim())
-		return { error: `must be a non-empty string like "provider/id", or one of ${MODEL_INHERIT_WORDS.join(", ")}` };
-	const text = value.trim();
-	if (MODEL_INHERIT_WORDS.includes(text.toLowerCase())) return {};
-	if (text.startsWith("/") || text.startsWith(":")) return { error: `"${text}" is not a usable model reference` };
-	return { model: text };
-}
-
-function isRoleId(value: unknown): value is string {
-	return typeof value === "string" && ROLE_ID_PATTERN.test(value.trim());
-}
-
-/** Mirror of `pi-gate/schema.ts::isDocKey`: a `==` key is documentation, never config, in any map of this file. */
-function isDocKey(key: string): boolean {
-	return key.startsWith("==");
-}
-
-function normaliseRoleId(value: string): string {
-	return value.trim().toLowerCase();
-}
-
-/** Mirror of `pi-gate/schema.ts::parseRolesConfig`, error-for-error. */
-function readRoles(raw: unknown, file: string, errors: string[]): RoleConfigMap | undefined {
-	if (raw === undefined || raw === null) return undefined;
-	if (!isRecordish(raw)) {
-		errors.push(`${file}: subagent.roles must be an object of role names, ignored`);
-		return undefined;
-	}
-	const out: RoleConfigMap = {};
-	const folded = new Map<string, string>();
-	for (const [key, value] of Object.entries(raw)) {
-		if (isDocKey(key)) continue; // an unread note must not become a config error, so it is skipped, not refused
-		if (!isRoleId(key)) {
-			errors.push(`${file}: subagent.roles key "${key}" must match ${ROLE_ID_PATTERN}, ignored`);
-			continue;
-		}
-		const id = normaliseRoleId(key);
-		const fold = id.replace(/[\s_-]+/g, "");
-		const clash = folded.get(fold);
-		if (clash) {
-			errors.push(`${file}: subagent.roles "${id}" collides with "${clash}" (role names ignore case, spaces, - and _), ignored`);
-			continue;
-		}
-		folded.set(fold, id);
-		if (!isRecordish(value)) {
-			errors.push(`${file}: subagent.roles.${id} must be an object, ignored`);
-			continue;
-		}
-		const entry: RoleConfig = {};
-		for (const textKey of ["description", "prompt"] as const) {
-			const text = value[textKey];
-			if (text === undefined) continue;
-			if (typeof text !== "string" || !text.trim()) errors.push(`${file}: subagent.roles.${id}.${textKey} must be a non-empty string, ignored`);
-			else entry[textKey] = text.trim();
-		}
-		if (value.tools !== undefined) {
-			if (!Array.isArray(value.tools) || !value.tools.length || value.tools.some((name) => typeof name !== "string" || !name.trim())) {
-				errors.push(`${file}: subagent.roles.${id}.tools must be a non-empty array of tool names, ignored`);
-			} else entry.tools = value.tools.map((name) => (name as string).trim());
-		}
-		for (const [numberKey, ceiling] of [
-			["maxTurns", ROLE_TURNS_CEILING],
-			["timeoutMinutes", ROLE_TIMEOUT_CEILING_MINUTES],
-		] as const) {
-			const numberValue = value[numberKey];
-			if (numberValue === undefined) continue;
-			if (typeof numberValue !== "number" || !Number.isFinite(numberValue) || numberValue <= 0 || numberValue > ceiling) {
-				errors.push(`${file}: subagent.roles.${id}.${numberKey} must be a number in 1..${ceiling}, ignored`);
-				continue;
-			}
-			entry[numberKey] = Math.floor(numberValue);
-		}
-		const sampling = readRoleSampling(value, id, file, errors);
-		if (sampling.sampling) entry.sampling = sampling.sampling;
-		if (sampling.samplingByThinkingLevel) entry.samplingByThinkingLevel = sampling.samplingByThinkingLevel;
-		if (sampling.thinkingLevel) entry.thinkingLevel = sampling.thinkingLevel;
-		out[id] = entry;
-	}
-	return Object.keys(out).length ? out : undefined;
-}
-
-function isRecordish(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Mirror of `schema.ts::THINKING_LEVEL_WORDS` — pi's thinking levels, not the provider values they map to. */
-export const THINKING_LEVEL_WORDS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-/** Mirror of `schema.ts::SAMPLING_KEY_PATTERN`. */
-const SAMPLING_KEY_PATTERN = /^[A-Za-z0-9_.\-]{1,64}$/;
-/** Mirror of `schema.ts::FORBIDDEN_SAMPLING_KEYS`. */
-const FORBIDDEN_SAMPLING_KEYS = ["__proto__", "constructor", "prototype"];
-
-function isThinkingLevelWord(value: unknown): value is RoleConfig["thinkingLevel"] & string {
-	return typeof value === "string" && THINKING_LEVEL_WORDS.includes(value.trim().toLowerCase());
-}
-
-/** Mirror of `schema.ts::parseRoleSampling`, error-for-error. */
-function readRoleSampling(
-	value: Record<string, unknown>,
-	id: string,
-	file: string,
-	errors: string[],
-): Pick<RoleConfig, "sampling" | "samplingByThinkingLevel" | "thinkingLevel"> {
-	const out: Pick<RoleConfig, "sampling" | "samplingByThinkingLevel" | "thinkingLevel"> = {};
-	const path = `subagent.roles.${id}`;
-	if (value.thinkingLevel !== undefined) {
-		const word = typeof value.thinkingLevel === "string" ? value.thinkingLevel.trim().toLowerCase() : undefined;
-		if (word && isThinkingLevelWord(word)) out.thinkingLevel = word;
-		else errors.push(`${file}: ${path}.thinkingLevel must be one of ${THINKING_LEVEL_WORDS.join(", ")}, ignored`);
-	}
-	const sampling = readSamplingBlock(value.sampling, `${file}: ${path}.sampling`, errors);
-	if (sampling) out.sampling = sampling;
-	if (value.samplingByThinkingLevel !== undefined) {
-		if (!isRecordish(value.samplingByThinkingLevel)) {
-			errors.push(`${file}: ${path}.samplingByThinkingLevel must be an object keyed by thinking level, ignored`);
-		} else {
-			const byLevel: NonNullable<RoleConfig["samplingByThinkingLevel"]> = {};
-			for (const [rawWord, block] of Object.entries(value.samplingByThinkingLevel)) {
-				const word = rawWord.trim().toLowerCase();
-				if (!isThinkingLevelWord(word)) {
-					errors.push(`${file}: ${path}.samplingByThinkingLevel key "${rawWord}" is not a thinking level (${THINKING_LEVEL_WORDS.join(", ")}), ignored`);
-					continue;
-				}
-				const levelBlock = readSamplingBlock(block, `${file}: ${path}.samplingByThinkingLevel.${word}`, errors);
-				if (!levelBlock) continue;
-				byLevel[word] = { ...byLevel[word], ...levelBlock };
-			}
-			if (Object.keys(byLevel).length) out.samplingByThinkingLevel = byLevel;
-		}
-	}
-	return out;
-}
-
-/** Mirror of `schema.ts::parseSamplingBlock`, error-for-error. */
-function readSamplingBlock(value: unknown, where: string, errors: string[]): RoleConfig["sampling"] | undefined {
-	if (value === undefined || value === null) return undefined;
-	if (!isRecordish(value)) {
-		errors.push(`${where} must be an object of request-body params, ignored`);
-		return undefined;
-	}
-	const out: NonNullable<RoleConfig["sampling"]> = {};
-	for (const [rawKey, item] of Object.entries(value)) {
-		const key = rawKey.trim();
-		if (!SAMPLING_KEY_PATTERN.test(key) || FORBIDDEN_SAMPLING_KEYS.includes(key)) {
-			errors.push(`${where} key "${rawKey}" is not a request-body field name, ignored`);
-			continue;
-		}
-		if (item === undefined || typeof item === "function" || typeof item === "symbol" || typeof item === "bigint") {
-			errors.push(`${where}.${key} has no JSON value, ignored`);
-			continue;
-		}
-		if (typeof item === "number" && !Number.isFinite(item)) {
-			errors.push(`${where}.${key} must be a finite number, ignored`);
-			continue;
-		}
-		out[key] = item as NonNullable<RoleConfig["sampling"]>[string];
-	}
-	return Object.keys(out).length ? out : undefined;
 }
 
 function readSubagentSection(file: string, errors: string[]): Record<string, unknown> | undefined {

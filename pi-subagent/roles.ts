@@ -8,9 +8,12 @@
  * by the parent's own callable tools, and each nested call is gated by the parent's policy. Editing the
  * config is itself floored to `ask`: `PROTECTED_PATH_GLOBS` covers `~/.pi/agent/**` and
  * `<cwd>/.pi/extensions/**`, so the model cannot quietly add a role to itself.
+ *
+ * This module also owns `effectiveBudget` — the `min(role, subagent)` rule the run and `/subagentc` must agree
+ * on — because the budgets it caps are fields of `Role`.
  */
 
-import type { RoleConfigMap, SamplingConfig, SamplingValue, SubagentRoleId, SubagentRoleName, ThinkingLevelWord } from "../pi-gate/schema.ts";
+import type { RoleConfigMap, SamplingConfig, SamplingValue, SubagentLimits, SubagentRoleId, SubagentRoleName, ThinkingLevelWord } from "../pi-gate/schema.ts";
 import { FORBIDDEN_CHILD_TOOLS } from "./shims.ts";
 
 export type RoleName = SubagentRoleName;
@@ -303,4 +306,15 @@ export function resolveCallRole(input: unknown, fallback: RoleId, roles: RoleTab
 	// the table is config-driven the refusal has to live here, because running some role the model never asked
 	// for — one with more tools, or fewer — is the failure this tool must never have.
 	return blank ? { role: roles[fallbackName], roleDefaulted: true } : { role: undefined, roleDefaulted: false };
+}
+
+/**
+ * The budget one run actually gets: `min(role, subagent)` turns and minutes. The role asks, the config ceiling
+ * bounds — `subagent.maxTurns`/`timeoutMinutes` never raise a role above what it asked for, only below it.
+ *
+ * Moved here from `config-view.ts`, which keeps re-exporting it as its facade: this is the module that owns
+ * `maxTurns`/`timeoutMinutes`, and the rule is the one thing both the view and the run have to agree on.
+ */
+export function effectiveBudget(role: Role, limits: SubagentLimits): { turns: number; minutes: number } {
+	return { turns: Math.min(role.maxTurns, limits.maxTurns), minutes: Math.min(role.timeoutMinutes, limits.timeoutMinutes) };
 }

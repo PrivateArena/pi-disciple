@@ -15,12 +15,16 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { childThinkingLevel } from "./model-override.ts";
 import type { ChildModelResolution } from "./model-override.ts";
 import { FORBIDDEN_CHILD_TOOLS, NESTED_CALL_CEILING } from "./shims.ts";
-import { ROLES, type Role, type RoleTable } from "./roles.ts";
+import { effectiveBudget, ROLES, type Role, type RoleTable } from "./roles.ts";
 import { samplingLabel } from "./sampling.ts";
-import { CEILING_OFFER_HOLD_MS, childSessionDir, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./child.ts";
+import { CEILING_OFFER_HOLD_MS, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./budget/ceiling-clock.ts";
+import { childSessionDir } from "./transcript/paths.ts";
 import { CEILING_DIALOG_TIMEOUT_MS, EXTENSION_STEPS } from "./ceiling.ts";
 import type { SubagentLimits } from "./config-file.ts";
-import type { RunGuard } from "./run.ts";
+import type { RunGuard } from "./run-guard.ts";
+
+// `effectiveBudget` moved to `roles.ts`, the module that owns the budgets it caps, and is re-exported here for its callers.
+export { effectiveBudget } from "./roles.ts";
 
 export type ConfigSection = "all" | "model" | "limits" | "roles" | "status";
 
@@ -66,10 +70,6 @@ export function modelRef(model: Model<Api> | undefined): string {
 export function childModelOf(input: ConfigViewInput): Model<Api> | undefined {
 	if (input.pin?.resolution.status === "resolved") return input.pin.resolution.model;
 	return input.sessionModel;
-}
-
-export function effectiveBudget(role: Role, limits: SubagentLimits): { turns: number; minutes: number } {
-	return { turns: Math.min(role.maxTurns, limits.maxTurns), minutes: Math.min(role.timeoutMinutes, limits.timeoutMinutes) };
 }
 
 /** Sections of the view, so `/subagentc model` shows the model block and nothing else. */

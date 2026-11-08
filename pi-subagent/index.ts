@@ -13,17 +13,22 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { type Static, Type } from "typebox";
-import { canonicalRole, type RoleId, resolveCallRole, ROLE_ORDER, setConfiguredDefaultRole, type RoleTable } from "./roles.ts";
-import { buildShims, NESTED_CALL_CEILING, type ShimHost } from "./shims.ts";
-import { childSessionDir, pruneTranscripts, runChild } from "./child.ts";
-import type { CeilingReport, RunProgress } from "./child.ts";
+import { canonicalRole, effectiveBudget, type RoleId, resolveCallRole, ROLE_ORDER, setConfiguredDefaultRole, type RoleTable } from "./roles.ts";
+import { buildShims, type ShimHost } from "./shims.ts";
+import { runChild } from "./child.ts";
+import type { RunProgress } from "./child.ts";
+import type { CeilingReport } from "./budget/ceiling-vocabulary.ts";
+import { childSessionDir } from "./transcript/paths.ts";
+import { pruneTranscripts } from "./transcript/retention.ts";
 import { createCeilingBroker } from "./ceiling.ts";
 import { loadSubagentLimits } from "./config-file.ts";
-import { childThinkingLabel, childThinkingLevel, modelLabel, resolveChildModel } from "./model-override.ts";
-import { applyRoleSampling, roleThinkingLevel, samplingLabel } from "./sampling.ts";
+import { resolveChildModel } from "./model-override.ts";
+import { resolveChildRequest, resolveModelPin } from "./child-request.ts";
 import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type SubagentCommandArg } from "./config-view.ts";
 import { buildDelegationSection, DELEGATION_SECTION } from "./delegation.ts";
-import { claimGuard, composeResult, currentGuard, formatProgress, progressDetails, releaseGuard } from "./run.ts";
+import { claimGuard, currentGuard, releaseGuard } from "./run-guard.ts";
+import { formatProgress, progressDetails } from "./card/progress.ts";
+import { composeResult } from "./run.ts";
 import { renderSubagentCall, renderSubagentResult } from "./render.ts";
 
 /** How often a running child re-announces itself, even when it emitted no event. */
@@ -150,23 +155,13 @@ export default function piSubagent(pi: ExtensionAPI) {
 				throw new Error(`pi-subagent: role "${String(args.role)}" names no role; use one of ${Object.keys(roles).join(", ")} (or omit it for "${limits.defaultRole}")`);
 			}
 			setConfiguredDefaultRole(limits.defaultRole);
-			const roleForRun = {
-				...role,
-				maxTurns: Math.min(role.maxTurns, limits.maxTurns),
-				timeoutMinutes: Math.min(role.timeoutMinutes, limits.timeoutMinutes),
-			};
+			const budget = effectiveBudget(role, limits);
+			const roleForRun = { ...role, maxTurns: budget.turns, timeoutMinutes: budget.minutes };
 
 			// Child model: the session's model, unless the human pinned subagent.model in the config.
-			let model = ctx.model;
-			let overridden = false;
-			if (limits.model) {
-				const resolved = resolveChildModel(limits.model, ctx.modelRegistry, ctx.model);
-				if (resolved.status === "error") ctx.ui.notify(`[subagent] ${resolved.message} — running on the session model`, "warning");
-				else {
-					model = resolved.model;
-					overridden = true;
-				}
-			}
+			const pin = resolveModelPin(limits.model, ctx.modelRegistry, ctx.model, (text) => ctx.ui.notify(text, "warning"));
+			const model = pin.model;
+			const overridden = pin.overridden;
 
 			const controller = new AbortController();
 			const parentSignal = signal ?? ctx.signal;
@@ -175,36 +170,31 @@ export default function piSubagent(pi: ExtensionAPI) {
 
 			claimGuard({ callId: toolCallId, role: role.name, defaulted, startedAt: Date.now(), abort: () => controller.abort() });
 
-			const tally = { calls: 0, overCeiling: 0 };
+			// The ceiling itself is enforced where the nested calls actually run (`child.ts`, on the child's own
+			// tool counter); the parent only tallies to report the number on the card.
+			const tally = { calls: 0 };
 			const host: ShimHost = {
 				parentCallId: toolCallId,
 				executeTool: ctx.executeTool,
 				onNestedCall: () => {
 					tally.calls++;
-					if (tally.calls > NESTED_CALL_CEILING) tally.overCeiling++;
 				},
 			};
 			const shims = buildShims(ctx.tools, roleForRun, host, limits);
 			const shimNames = shims.map((shim) => shim.name);
-			// A role may retune the request for the child only. Both the sampling and the thinking level are applied
-			// to a *clone* of the model: `ctx.model` is the parent session's own object, and writing to it would
-			// retune the session that delegated the work (see sampling.ts).
-			const askedLevel = roleThinkingLevel(roleForRun, ctx.thinkingLevel ?? "off");
-			const childLevel = childThinkingLevel(model, askedLevel);
-			const sampling = applyRoleSampling(model, roleForRun, childLevel);
-			const samplingText = samplingLabel(sampling.applied) || undefined;
-			// A thinking level is the other thing a role changes invisibly, and the model can move it on its own: a
-			// child told to think "high" on a model that has no "high" runs at whatever the clamp lands on, and
-			// nothing else in the answer would say so (see `childThinkingLabel`).
-			const thinkingText = childThinkingLabel(model, askedLevel, childLevel, !!roleForRun.thinkingLevel);
-			if (sampling.ignored) {
-				// `asked`, not `applied`: a role whose params are all keyed to another thinking level still asked for
-				// them, and a warning that named nothing would be the feature failing quietly.
-				const text = samplingLabel(sampling.asked) || `thinkingLevel "${roleForRun.thinkingLevel}"`;
-				ctx.ui.notify(`[subagent] ${model?.api} ignores sampling params — ${text} was not sent`, "warning");
-			}
-
-			const childModel = modelLabel(sampling.model, overridden);
+			// The child's own model, thinking level and sampling params — decided where it has always been decided,
+			// after the guard is claimed (see child-request.ts for why the two halves are not one call).
+			const childRequest = resolveChildRequest({
+				role: roleForRun,
+				sessionModel: model,
+				overridden,
+				sessionThinkingLevel: ctx.thinkingLevel ?? "off",
+				onWarning: (text) => ctx.ui.notify(text, "warning"),
+			});
+			const childModel = childRequest.label;
+			const childLevel = childRequest.thinkingLevel;
+			const thinkingText = childRequest.thinking;
+			const samplingText = childRequest.sampling;
 			const startedAt = Date.now();
 			// A granted extension goes on the live card, so a run that got more rope looks like one.
 			let ceiling: CeilingReport | undefined;
@@ -257,7 +247,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 					task: args.task,
 					cwd: ctx.cwd,
 					agentDir: getAgentDir(),
-					model: sampling.model,
+					model: childRequest.model,
 					thinkingLevel: childLevel,
 					tools: shims,
 					sessionDir: ctx.sessionManager.getSessionDir(),
