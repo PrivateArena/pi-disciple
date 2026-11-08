@@ -118,7 +118,7 @@ export function blockReason(decision: Decision, kind: "policy_deny" | "user_abor
 		);
 	}
 	const rule = matched ? ` (${matched.surface} ${codeSpan(matched.pattern)} = deny, ${matched.scope})` : "";
-	return `Blocked by policy${rule}: ${codeSpan(displaySnippet(facts.preview))}`;
+	return `Blocked by policy${rule}`;
 }
 
 /**
