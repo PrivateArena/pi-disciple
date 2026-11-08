@@ -21,6 +21,7 @@ import { clearSession, createSessionGrants, resetPersisted, type PersistedScope 
 import { handleToolCall, attachNote, type GateState, type PendingNotes } from "./handle.ts";
 import { ALLOW_ALL_WINDOW_MS, type AllowAll } from "./policy.ts";
 import { DEFAULT_GATE_CONFIG, type GrantRule } from "./schema.ts";
+import { regexPatternTimeouts } from "./match.ts";
 
 export default function piGate(pi: ExtensionAPI) {
 	let policy: Policy | undefined;
@@ -233,10 +234,12 @@ export default function piGate(pi: ExtensionAPI) {
 				`config files: ${current.files.length ? current.files.join(", ") : "none (built-in defaults)"}`,
 				`trusted project dir: ${ctx.isProjectTrusted() ? "yes" : "no (project config ignored)"}`,
 				`session grants: ${sessionGrants.map((g) => `${g.surface} "${g.pattern}"`).join(", ") || "none"}`,
-				`allow-everything: ${!allowAll ? "off" : allowAll.until === null ? "on for this session" : `on for ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`} (absolute: no call reaches the dialog; only a \`deny\` rule still blocks)`,
+				`allow-everything: ${!allowAll ? "off" : allowAll.until === null ? "on for this session" : `on for ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`} (absolute: no call reaches the dialog; only a \`deny\` rule or a \`hardDeny\` entry still blocks)`,
 				`hidden tools: ${[...hiddenByGate].join(", ") || "none"}`,
 				`rules: ${current.rules.length} · visible tools: ${recomputeActive(tools, current).length}/${tools.length}`,
 				`bash surface: ${JSON.stringify(current.config.permission.bash ?? DEFAULT_GATE_CONFIG.permission.bash)}`,
+				`network surface: ${JSON.stringify(current.config.permission.network ?? DEFAULT_GATE_CONFIG.permission.network)} · hardDeny: ${current.hardDeny.length ? current.hardDeny.map((rule) => `"${rule.pattern}"`).join(", ") : "none"} (blocks even with allow-everything on)`,
+				regexPatternTimeouts.size ? `regex rules that ran past their time budget and stopped matching this session: ${[...regexPatternTimeouts].map((s) => `re:${s}`).join(", ")} — rewrite them bounded` : "",
 				current.errors.length ? `problems:\n${current.errors.map((e) => `  · ${e}`).join("\n")}` : "problems: none",
 			].join("\n");
 			await ctx.ui.editor("/gatec status", body);

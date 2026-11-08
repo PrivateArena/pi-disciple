@@ -178,3 +178,25 @@ describe("review log", () => {
 		expect(defaultLogPath()).toContain("extensions/pi-gate/logs/review.jsonl");
 	});
 });
+
+describe("concurrent grant writes in one process", () => {
+	it("never lose a grant, whichever rename lands last", async () => {
+		// Three clicks in one tick. This is a property check, not a reproduction: the read-modify-write
+		// spans an `await`, so an interleaving *can* drop a grant, but whether it does depends on fs timing,
+		// and the verify-and-retry loop usually heals it — which is exactly why the suite was intermittently
+		// red here. `grants.ts::withFileLock` makes the property true by construction instead of usually true.
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
+		for (let round = 0; round < 5; round++) {
+			const file = persistedFile("global", fixture.cwd);
+			writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
+			await Promise.all([
+				appendPersisted(offer("git status"), "global", fixture.cwd),
+				appendPersisted(offer("git diff"), "global", fixture.cwd),
+				appendPersisted(offer("npm test"), "global", fixture.cwd),
+			]);
+			const doc = readJson(file) as { gate: { grants: { global: { pattern: string }[] } } };
+			expect(doc.gate.grants.global.map((grant) => grant.pattern).sort()).toEqual(["git diff", "git status", "npm test"]);
+		}
+	});
+});

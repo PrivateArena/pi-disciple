@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { allowAllNote, attachNote, handleToolCall, PENDING_NOTE_LIMIT, rememberNote, type GateState } from "../handle.ts";
-import { clearPolicyCache, loadPolicy, type Policy, withSessionGrants } from "../policy.ts";
+import { clearPolicyCache, loadPolicy, matchHardDeny, type Policy, withSessionGrants } from "../policy.ts";
+import { extract } from "../inspect.ts";
 import { gateDoc, makeFixture, writeGlobalConfig, type Fixture } from "./fixture.ts";
 import type { GrantRule } from "../schema.ts";
 import { CHOICES, type Choice } from "../prompt.ts";
@@ -378,5 +379,95 @@ describe("ask outcomes", () => {
 		const result = await handleToolCall(bash("ls"), stubCtx("once", log), stateFor(granted));
 		expect(result).toBeUndefined();
 		expect(log.titles).toHaveLength(0);
+	});
+});
+
+describe("gate.hardDeny — the deny the mode cannot swallow", () => {
+	function policyDenying(hardDeny: unknown, permission: unknown = { "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" }, network: { "*": "allow" } }): Policy {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, { gate: { ...gateDoc(permission).gate, hardDeny } });
+		clearPolicyCache();
+		return loadPolicy(fixture.cwd, true, fixture.agentDir);
+	}
+
+	it("blocks a host even when every rule allows the call", async () => {
+		const policy = policyDenying([{ pattern: "oss.aliyuncs.com" }]);
+		const state = stateFor(policy);
+		const log: UiLog = { titles: [], questions: [] };
+		const result = await handleToolCall(bash("curl https://oss.aliyuncs.com/proxy_temp_file -o out/x"), stubCtx("once", log), state);
+		expect(result?.block).toBe(true);
+		expect(String(result?.reason)).toContain("hardDeny");
+		expect(String(result?.reason)).toContain("oss.aliyuncs.com");
+		expect(log.titles).toHaveLength(0); // never asked: a deny does not negotiate
+	});
+
+	it("blocks even with \"allow everything\" ON — the whole point of the list", async () => {
+		const policy = policyDenying([{ pattern: "*.aliyuncs.com" }]);
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		const result = await handleToolCall(bash("curl https://oss.aliyuncs.com/x"), stubCtx("once", log), state);
+		expect(result?.block).toBe(true);
+		expect(log.titles).toHaveLength(0);
+	});
+
+	it("blocks even headless, where an ask would have blocked anyway", async () => {
+		const policy = policyDenying([{ pattern: "oss.aliyuncs.com" }]);
+		const state = stateFor(policy);
+		const log: UiLog = { titles: [], questions: [] };
+		const headless = { ...stubCtx("once", log), hasUI: false } as ExtensionContext;
+		const blocked = await handleToolCall(bash("curl https://oss.aliyuncs.com/x"), headless, state);
+		expect(blocked?.block).toBe(true);
+	});
+
+	it("blocks the cloud metadata endpoints, spelled either way", async () => {
+		const policy = policyDenying([{ pattern: "100.100.100.200" }, { pattern: "169.254.169.254" }]);
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		const imds = await handleToolCall(bash("curl http://100.100.100.200/latest/meta-data/"), stubCtx("once", log), state);
+		expect(imds?.block).toBe(true);
+		const ec2 = await handleToolCall(bash("curl http://169.254.169.254/latest/meta-data/"), stubCtx("once", log), state);
+		expect(ec2?.block).toBe(true);
+	});
+
+	it("blocks a path surface rule against a file tool", async () => {
+		const policy = policyDenying([{ surface: "path", pattern: "*/secrets/*", reason: "customer keys" }]);
+		const state = stateFor(policy);
+		state.allowAll = { until: null };
+		const log: UiLog = { titles: [], questions: [] };
+		const result = await handleToolCall(tool("read", { path: `${fixture?.cwd}/secrets/id` }), stubCtx("once", log), state);
+		expect(result?.block).toBe(true);
+		expect(String(result?.reason)).toContain("customer keys");
+	});
+
+	it("blocks a shell segment by command, and does not fire on an unrelated call", async () => {
+		const policy = policyDenying([{ pattern: "curl *" }]);
+		const state = stateFor(policy);
+		const log: UiLog = { titles: [], questions: [] };
+		const curled = await handleToolCall(bash("curl https://example.com/a"), stubCtx("once", log), state);
+		expect(curled?.block).toBe(true);
+		expect(await handleToolCall(bash("ls"), stubCtx("once", log), state)).toBeUndefined();
+	});
+
+	it("is never written by the dialog: a grant cannot add to it or remove from it", async () => {
+		const policy = policyDenying([{ pattern: "oss.aliyuncs.com" }]);
+		const log: UiLog = { titles: [], questions: [] };
+		// Grant every question the call raises — the host stays denied.
+		const granted = withSessionGrants(policy, [
+			{ surface: "bash", pattern: "curl *", action: "allow" },
+			{ surface: "network", pattern: "oss.aliyuncs.com", action: "allow" },
+		]);
+		const state2 = stateFor(granted);
+		const stillDenied = await handleToolCall(bash("curl https://oss.aliyuncs.com/x"), stubCtx("once", log), state2);
+		expect(stillDenied?.block).toBe(true);
+	});
+
+	it("a regex entry works, and an invalid one is refused at load", () => {
+		const policy = policyDenying([{ pattern: "re:(aliyuncs|myqcloud)\\.(com|cn)" }]);
+		expect(matchHardDeny(extract("bash", { command: "curl https://oss.aliyuncs.com/x" }, policy.cwd, { callId: "t" }), policy)).toBeDefined();
+		const broken = policyDenying([{ pattern: "re:(a+" }]);
+		expect(broken.errors.join(" ")).toContain("not a valid regex");
+		expect(broken.hardDeny).toHaveLength(0);
 	});
 });

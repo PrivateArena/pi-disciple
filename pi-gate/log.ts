@@ -19,7 +19,8 @@ export interface LogEntry {
 	pattern?: string;
 	scope?: Scope;
 	resolution: string;
-	/** Which question of the call this line answers: `command` (what it does) or `location` (where it goes). */
+	/** Which question of the call this line answers: `command` (what it does), `location` (where it writes)
+	 *  or `network` (whom it reaches). */
 	stage?: string;
 	reason?: string;
 	sub?: { role: string; taskExcerpt: string };

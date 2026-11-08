@@ -7,9 +7,9 @@
  *     grants.session` and the last matching pattern wins;
  *  2. **within one question** ({@link Stage}) — facts that name the *same thing* are judged once, by the
  *     most specific rule about them, most restrictive among those;
- *  3. **across the questions of one call** — `command` (what it does) and `location` (where it goes) are
- *     decided separately and combined most-restrictive, `deny > ask > allow`, because each has its own
- *     grantable rule and its own dialog.
+ *  3. **across the questions of one call** — `command` (what it does), `location` (where it goes) and
+ *     `network` (who it talks to) are decided separately and combined most-restrictive,
+ *     `deny > ask > allow`, because each has its own grantable rule and its own dialog.
  * Floors are applied per fact after rule matching and can only ever escalate.
  */
 
@@ -20,6 +20,7 @@ import {
 	type GateConfig,
 	DEFAULT_GATE_CONFIG,
 	type GrantRule,
+	type HardDenyRule,
 	SCOPE_PRECEDENCE,
 	type Scope,
 	flattenPermission,
@@ -45,10 +46,13 @@ import {
 	suggestBashPattern,
 	wildcardMatch,
 	isWrappedSegment,
+	beginRegexRound,
 } from "./match.ts";
 import { extract, isShellTool, type Facts } from "./inspect.ts";
+import { hostDomainMatches, isMetadataEndpoint, NETWORK_SURFACE } from "./network.ts";
 
 export type { GrantRule };
+export type { HardDenyRule };
 
 export interface Rule extends PermissionEntry {
 	scope: Scope;
@@ -61,6 +65,13 @@ export interface Policy {
 	errors: string[];
 	invalidScopes: Scope[];
 	config: GateConfig;
+	/**
+	 * The `gate.hardDeny` rules of the files that were read — global, plus project when the cwd is
+	 * trusted (plan step C2). Kept beside `rules` rather than mixed into them: these are not a layer of
+	 * the precedence ladder, they are the one thing above it, so they must never be reordered by scope,
+	 * overridden by a grant, or answered by a dialog click.
+	 */
+	hardDeny: HardDenyRule[];
 	/** `permission["*"]` when it is an action, else `ask` (least privilege). */
 	defaultAction: Action;
 	/** A config file could not be parsed: every `allow` escalates to `ask` (FM-9). */
@@ -69,6 +80,11 @@ export interface Policy {
 	trusted: boolean;
 	agentDir: string;
 	protectedGlobs: string[];
+	/**
+	 * The `gate.permission` surfaces a config file named. A built-in class-wide default for one of these is
+	 * the fallback under the human's own rule for it (`bash: "ask"`), not a rival — see {@link matchFact}.
+	 */
+	configuredSurfaces: ReadonlySet<string>;
 }
 
 export interface FactCheck {
@@ -76,7 +92,13 @@ export interface FactCheck {
 	value: string;
 	action: Action;
 	rule?: Rule;
-	floor?: "protected_path" | "protected_read" | "wrapper" | "external_directory" | "degraded_config";
+	floor?:
+		| "protected_path"
+		| "protected_read"
+		| "wrapper"
+		| "external_directory"
+		| "network_egress"
+		| "degraded_config";
 	/** How specifically the fact was decided — see {@link specificityOf}. */
 	specificity: number;
 }
@@ -134,8 +156,12 @@ export interface GrantOffer {
  * nothing about `cat`. Merged into one dialog, the only offer available was the command rule — so a
  * shell call that touched a path outside the workspace could not be granted by any click, and asked
  * again on every retry.
+ *
+ * `network` is the third question (plan step B): *who this call talks to*. It is separate from
+ * `location` for the same reason a directory is separate from a command — a host is neither, and the
+ * rule that answers it (`aliyuncs.com`) is a shape no path or command pattern reaches.
  */
-export type Stage = "command" | "location";
+export type Stage = "command" | "location" | "network";
 
 export interface StageDecision {
 	stage: Stage;
@@ -189,6 +215,37 @@ export const ALLOW_ALL_WINDOW_MS = 5 * 60 * 1000;
 /** Tools that only ever read, so a protected path behind them is a look, not a rewrite. */
 export const READ_ONLY_TOOLS: readonly string[] = ["read", "grep", "find", "ls"];
 
+/**
+ * The `gate.hardDeny` check: the one deny class the "allow everything" mode cannot swallow.
+ *
+ * It looks at **everything** the call touches — every fact value on every surface, every path spelling,
+ * every host — because the thing a human wrote a hardDeny about is a thing, not a surface: a host
+ * appears as a `network` fact, inside a `bash` segment and inside a `curl` argument rendering, and a rule
+ * that only checked the surface it was keyed to would miss the call that spells it differently. Surface
+ * filtering is by {@link patternMatches} semantics, so a `path` rule uses the path matcher, a `network`
+ * rule the domain matcher, and a shell segment still matches a chained pattern segment by segment.
+ *
+ * First match wins, and the offending value comes back so the block text can name what tripped.
+ */
+export function matchHardDeny(facts: Facts, policy: Policy): { rule: HardDenyRule; value: string } | undefined {
+	if (policy.hardDeny.length === 0) return undefined;
+	const shell = isShellTool(facts.toolName);
+	const shellValues = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
+	const probes: Array<{ surface: string; value: string; segments?: readonly string[] }> = [];
+	for (const [surface, values] of facts.surfaces) {
+		const segments = shell && surface === facts.toolName ? shellValues : undefined;
+		for (const value of values) probes.push({ surface, value, ...(segments ? { segments } : {}) });
+	}
+	for (const spelling of facts.paths) probes.push({ surface: "path", value: spelling });
+	for (const rule of policy.hardDeny) {
+		for (const probe of probes) {
+			if (rule.surface !== "*" && rule.surface !== probe.surface && rule.surface !== facts.toolName) continue;
+			if (patternMatches(probe.surface, rule.pattern, probe.value, probe.segments)) return { rule, value: probe.value };
+		}
+	}
+	return undefined;
+}
+
 export function allowAllActive(allowAll: AllowAll | undefined, now: number): boolean {
 	if (!allowAll) return false;
 	return allowAll.until === null || now < allowAll.until;
@@ -241,6 +298,9 @@ function buildPolicy(o: {
 	const invalidScopes: Scope[] = [];
 	const files: string[] = [];
 	const rules: Rule[] = [];
+	/** Surfaces a config file named, so the defaulted-in ones below do not duplicate or outrank them. */
+	const configuredSurfaces = new Set<string>();
+	const hardDeny: HardDenyRule[] = [];
 	let degraded = false;
 	let globalConfig: Partial<GateConfig> = {};
 
@@ -257,9 +317,13 @@ function buildPolicy(o: {
 		if (read.error) errors.push(read.error);
 		const parsed = parseGateConfig(read.json, file);
 		errors.push(...parsed.errors);
+		for (const entry of parsed.entries) configuredSurfaces.add(entry.surface);
 		rules.push(...parsed.entries.map(toRule(scope === "global" ? "global" : "project")));
 		if (scope === "global") globalConfig = { ...globalConfig, ...parsed.config };
 		rules.push(...parsed.grants.global.map(toRule("grants.global")));
+		// hardDeny is not a precedence layer, so it is *concatenated*, never ordered: an entry in either
+		// file blocks, and a project file may add to it but never remove a global one (plan step C2).
+		hardDeny.push(...parsed.hardDeny);
 		if (parsed.grants.project.length) {
 			if (scope === "global") {
 				invalidScopes.push("grants.project");
@@ -281,18 +345,39 @@ function buildPolicy(o: {
 	// The built-in defaults are a real rule layer, not display text: without it a machine with no config
 	// file — or one that omits `permission` — would ask for every call, including the reads and
 	// in-workspace edits the shipped defaults allow. Only when no file supplies a permission map.
-	const builtinRules = globalConfig.permission === undefined ? flattenPermission(DEFAULT_GATE_CONFIG.permission).map(toRule("builtin")) : [];
+	//
+	// With a permission map present, the built-in layer is *not* replayed: deviation 7 says the file owns
+	// that layer, and a built-in `bash: "ask"` sitting next to the human's `bash: "deny"` would un-hide a
+	// tool they meant to remove. What it does get instead is one fallback rule per surface it named without
+	// a class-wide rule — see {@link fallbackRulesFor}. Pushed first, so `orderRules` keeps every file layer
+	// and every grant scope above it.
+	const builtinRules = globalConfig.permission === undefined
+		? flattenPermission(DEFAULT_GATE_CONFIG.permission).map(toRule("builtin"))
+		: fallbackRulesFor(permission, configuredSurfaces);
+	// A hardDeny whose `surface` names nothing is a dead rule that *looks* live — the one failure mode a
+	// mode-proof deny must not have. The surface may legitimately be any tool name, so this can only be a
+	// warning rather than a rejection: naming it is what makes a typo visible in `/gatec status` instead of
+	// invisible in the one call it was written to stop.
+	for (const rule of hardDeny) {
+		const surface = rule.surface ?? "*";
+		if (surface === "*" || isLocationSurface(surface) || isNetworkSurface(surface) || surface in permission) continue;
+		errors.push(`gate.hardDeny names surface "${surface}", which no rule or known surface uses — it blocks nothing unless a tool is called exactly that`);
+	}
 
 	return {
 		rules: orderRules([...builtinRules, ...rules]),
 		files,
 		errors,
 		invalidScopes,
+		hardDeny,
 		config: {
 			enabled: globalConfig.enabled ?? DEFAULT_GATE_CONFIG.enabled,
 			reviewLog: globalConfig.reviewLog ?? DEFAULT_GATE_CONFIG.reviewLog,
 			promptTimeoutMs: globalConfig.promptTimeoutMs ?? DEFAULT_GATE_CONFIG.promptTimeoutMs,
 			permission,
+			// The parsed entries, not `globalConfig.hardDeny`: a project file may add one (it is only ever
+			// read when the cwd is trusted), and the effective list is what `/gatec status` has to show.
+			hardDeny,
 		},
 		defaultAction,
 		degraded,
@@ -300,7 +385,45 @@ function buildPolicy(o: {
 		trusted: o.trusted,
 		agentDir: o.agentDir,
 		protectedGlobs: protectedPathGlobs(o.cwd, o.agentDir),
+		configuredSurfaces,
 	};
+}
+
+/** The `"*"` action of a `{ pattern: action }` permission value, when it has one. */
+function classWideAction(value: unknown): Action | undefined {
+	if (isAction(value)) return value;
+	if (!value || typeof value !== "object") return undefined;
+	const star = (value as Record<string, unknown>)["*"];
+	return isAction(star) ? star : undefined;
+}
+
+/**
+ * One class-wide fallback rule per surface the config names but leaves without a `"*"` rule of its own.
+ *
+ * A fact no rule matches falls through to `permission["*"]`, which is a *tool-name* default — so a config
+ * whose whole map is `{"*": "allow"}` would decide a cross-cutting surface the file never spoke about, and
+ * the same config would decide it in the other direction if it said `"*": "ask"`. Giving each named surface
+ * its own fallback makes the surface's documented default win, and keeps it a *class-wide* rule so a
+ * concrete pattern the human wrote (`path: "*.env": "deny"`) still out-ranks it.
+ *
+ * Only surfaces the file actually named get one: a surface it never mentioned is not this config's to
+ * decide, and replaying the built-in map wholesale would let a built-in `bash: "ask"` coexist with the
+ * human's `bash: "deny"` and un-hide a tool they meant to remove.
+ */
+function fallbackRulesFor(permission: GateConfig["permission"], named: ReadonlySet<string>): Rule[] {
+	const out: Rule[] = [];
+	for (const surface of named) {
+		const value = (permission as Record<string, unknown>)[surface];
+		if (isAction(value)) continue; // `"read": "allow"` already IS the class-wide rule
+		if (!value || typeof value !== "object") continue;
+		const star = (value as Record<string, unknown>)["*"];
+		if (isAction(star)) continue; // the map already states its own default
+		const documented = (DEFAULT_GATE_CONFIG.permission as Record<string, unknown>)[surface];
+		const action = isAction(documented) ? documented : undefined;
+		if (action === undefined) continue;
+		out.push({ surface, pattern: "*", action, scope: "builtin", origin: "policy" });
+	}
+	return out;
 }
 
 function toRule(scope: Scope) {
@@ -333,6 +456,9 @@ function patternMatches(surface: string, pattern: string, value: string, segment
 		const parts = compoundPatternParts(pattern);
 		if (parts) return matchesSegmentPattern(parts, segments);
 	}
+	// A host is matched as a *domain*, not as a spelling: `aliyuncs.com` has to cover `oss.aliyuncs.com`,
+	// which no glob the human would write says and which `wildcardMatch` would answer by substring.
+	if (isNetworkSurface(surface)) return hostDomainMatches(pattern, value);
 	if (surface === "path" || surface === "external_directory") return pathPatternMatches(pattern, value);
 	return wildcardMatch(pattern, value);
 }
@@ -387,6 +513,9 @@ export function recomputeActive(toolNames: readonly string[], policy: Policy): s
 // ---------------------------------------------------------------------------
 
 export function evaluate(facts: Facts, policy: Policy): Decision {
+	// One wall-clock budget per `re:` rule per call, so a slow pattern cannot mark itself dead for the rest
+	// of the session (see `match.ts::beginRegexRound`).
+	beginRegexRound();
 	const shell = isShellTool(facts.toolName);
 	const shellValues = facts.surfaces.find(([surface]) => surface === facts.toolName)?.[1] ?? [];
 	const inPipeline = shell && shellValues.length > 1;
@@ -409,6 +538,15 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 		const named = !!rule && isExactRule(rule, value);
 		let floor: FactCheck["floor"];
 		if (surface === "external_directory") floor = "external_directory";
+		// Egress is a floor for the same reason a directory is one: a coarse `bash: curl *` says nothing about
+		// *which* host, exactly as it says nothing about which directory (plan step B3).
+		//
+		// It is raised **unconditionally** — a host is a fact about the call, not about whichever rule happened
+		// to be silent (the project's own floor axiom). What the shipped `allow` default must not do is
+		// *escalate*: so the floor is answered by the surface's own class-wide default, and only by that. Any
+		// other allow — a `curl *` grant, a `"*": "allow"` shortcut — leaves the escalation in force, which is
+		// how "stop asking me about this command" cannot silently become "never ask about a host again".
+		else if (surface === NETWORK_SURFACE) floor = "network_egress";
 		else if ((surface === "path" && isProtectedPath([value], policy.protectedGlobs)) || (surface !== "path" && protectedHit))
 			floor = readOnly ? "protected_read" : "protected_path";
 		else if (shell && surface === facts.toolName && !named && (isWrappedSegment(value, inPipeline) || hasUnparsedExpansion(value)))
@@ -420,12 +558,21 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 		// that allowed it really speaks about this call (an exact command) or, for an outside path, about
 		// this location (a concrete `…/*` grant). Without that exception no click could ever allow a file
 		// outside the workspace, because the surface that asks is a class-wide one.
-		if (floor && action === "allow" && !answersFloor(floor, rule, surface, value, named, callExact)) action = "ask";
+		if (floor && action === "allow" && !answersFloor(floor, rule, surface, value, named, callExact, specificity === SPECIFICITY.classWide && !rule)) action = "ask";
 		checks.push({ surface, value, action, rule, floor, specificity });
 	};
 
 	for (const [surface, values] of facts.surfaces) {
 		for (const value of values) push(surface, value, policy.defaultAction);
+	}
+	// A surface no rule at all speaks about takes its documented default, not `permission["*"]`: that is a
+	// tool-name default, and an egress fact is not a tool. This is the case of a config naming neither
+	// `network` nor anything else about egress — the common one, since the surface is new.
+	const networkFallback: Action | undefined = policy.config.permission.network === undefined
+		? classWideAction(DEFAULT_GATE_CONFIG.permission.network)
+		: undefined;
+	for (const host of facts.surfaces.find(([surface]) => surface === NETWORK_SURFACE)?.[1] ?? []) {
+		push(NETWORK_SURFACE, host, networkFallback, SPECIFICITY.classWide);
 	}
 	for (const spelling of facts.paths) {
 		// The cross-cutting surfaces are the gate's own statement about location, so their documented
@@ -437,9 +584,10 @@ export function evaluate(facts: Facts, policy: Policy): Decision {
 
 	// Facts that name the *same thing* — a file tool's value for `/x/a.ts` and the `path` fact for that
 	// very spelling — are judged once, by the most specific rule about them. Facts that name different
-	// things (every segment of a shell call, every path it touches) still combine most-restrictive.
-	// That grouping happens *within* a stage, never across stages: what a command does and where it
-	// goes are separate questions, each answered by its own rules and its own dialog (see {@link Stage}).
+	// things (every segment of a shell call, every path it touches, every host it reaches) still combine
+	// most-restrictive. That grouping happens *within* a stage, never across stages: what a command does,
+	// where it goes and who it talks to are separate questions, each with its own rules and its own
+	// dialog (see {@link Stage}).
 	const stages = buildStages(facts, policy, checks);
 	const { action, matched } = decideCall(stages, policy);
 	const asking = stages.filter((entry) => entry.action === "ask");
@@ -467,9 +615,13 @@ function buildStages(facts: Facts, policy: Policy, checks: FactCheck[]): StageDe
 	// by what a fact names, not by which surface it came from. Shell segments name a command, so they never
 	// join a location group and the two questions really do separate there.
 	const pathValues = new Set(facts.paths);
-	const isLocationCheck = (check: FactCheck) => isLocationSurface(check.surface) || pathValues.has(check.value);
-	const command = checks.filter((check) => !isLocationCheck(check));
+	// A host is not a path spelling, so a network check can never be swallowed by the location question;
+	// the explicit test says so, because "a URL is a path" was exactly the conflation step D removes.
+	const isLocationCheck = (check: FactCheck) => !isNetworkSurface(check.surface) && (isLocationSurface(check.surface) || pathValues.has(check.value));
+	const isNetworkCheck = (check: FactCheck) => isNetworkSurface(check.surface);
+	const command = checks.filter((check) => !isLocationCheck(check) && !isNetworkCheck(check));
 	const location = checks.filter(isLocationCheck);
+	const network = checks.filter(isNetworkCheck);
 	if (command.length > 0) {
 		stages.push({
 			stage: "command",
@@ -488,6 +640,16 @@ function buildStages(facts: Facts, policy: Policy, checks: FactCheck[]): StageDe
 			checks: location,
 			floors: floorsOf(location),
 			grant: offerLocationGrant(facts, policy, location),
+		});
+	}
+	if (network.length > 0) {
+		stages.push({
+			stage: "network",
+			heading: `network for ${facts.toolName}`,
+			...decide(network, policy),
+			checks: network,
+			floors: floorsOf(network),
+			grant: offerNetworkGrant(facts, policy, network),
 		});
 	}
 	return stages;
@@ -535,13 +697,26 @@ function answersFloor(
 	value: string,
 	exact: boolean,
 	callExact: boolean,
+	/** True when the `allow` came from no rule at all — the surface's own documented default. */
+	fromSurfaceDefault: boolean,
 ): boolean {
+	// Egress is the one floor a *default* may answer: the surface ships as `allow`, and a config that never
+	// mentions hosts must not prompt for them. Nothing else can — not `"*": "allow"`, not `curl *`. And a
+	// config that **does** name the surface has opted in, so its own class-wide rule (`network: "*": "ask"`,
+	// or a `{ "github.com": "allow" }` map with no `"*"`) is a decision about hosts and answers it too;
+	// without that, a domain allowlist would still prompt for every host it allows.
+	if (floor === "network_egress") {
+		if (fromSurfaceDefault || !rule) return fromSurfaceDefault;
+		if (exact || surface !== NETWORK_SURFACE) return exact || (rule.surface === surface && isScopedRule(rule));
+		return rule.pattern === "*" || isScopedRule(rule);
+	}
 	if (!rule) return false;
 	// A config too broken to trust is not answerable by any rule.
 	if (floor === "degraded_config") return false;
-	// An exact rule is the human naming this call. A scoped one (`/dir/*`, not `"*"`) is the human
-	// naming this location — which is exactly what a folder grant for an outside path writes. A coarse
-	// `bash: cat *` never does either job: it says nothing about this directory.
+	// An exact rule is the human naming this call. A scoped one (`/dir/*`, `aliyuncs.com`, not `"*"`) is
+	// the human naming this location or this domain — which is exactly what a folder grant and a
+	// host-typed rule say. A coarse `bash: curl *` never does either job: it says nothing about this
+	// directory, and nothing about this host.
 	if (floor === "external_directory") return exact || (rule.surface === surface && isScopedRule(rule));
 	// Protected paths: `exact` (a rule naming this very file) or a call whose own rules were all written
 	// about this exact call, which is the shape of a grant made from a protected-path dialog.
@@ -590,6 +765,19 @@ export const LOCATION_SURFACES: readonly string[] = ["path", "external_directory
 
 export function isLocationSurface(surface: string): boolean {
 	return LOCATION_SURFACES.includes(surface);
+}
+
+/**
+ * The egress surface (plan step B3): one fact per host a call can reach. The name itself lives in
+ * `network.ts`, which owns the facts, so there is one spelling of it; it is deliberately **not** in
+ * {@link LOCATION_SURFACES} — a host is not a location the gate has a rule about, and folding egress
+ * into the location question would let a folder grant answer it, the same mistake as letting `cat *`
+ * answer a domain.
+ */
+export { NETWORK_SURFACE };
+
+export function isNetworkSurface(surface: string): boolean {
+	return surface === NETWORK_SURFACE;
 }
 
 /**
@@ -673,6 +861,41 @@ export function offerLocationGrant(facts: Facts, policy: Policy, checks: readonl
 		...(rest.length > 0 ? { alsoSurfaces: rest } : {}),
 		surfacePatterns: Object.fromEntries(surfaces.map((surface) => [surface, perSurface.get(surface)!])),
 		label: patterns.join(" "),
+	};
+}
+
+/**
+ * The rule that closes the **network** question (plan step B3): one host pattern per asked-about host,
+ * written on the surface that asked.
+ *
+ * Kept minimal on purpose. It is *not* also written on `bash`: a rule like `bash: "curl https://host/*"`
+ * is a command-shaped string that matches one spelling of one URL and nothing else, so it would widen
+ * the click (any argument of that command form) while failing to cover the next host the same command
+ * fetches. The host is the decision, so the host is the rule — and `alsoSurfaces` names the tool's own
+ * surface only when that surface is itself the one asking (an unknown tool whose fact is the URL).
+ *
+ * A metadata endpoint is called out in the label: that host answers with credentials, and a human should
+ * see the word before they click "allow for all projects".
+ */
+export function offerNetworkGrant(facts: Facts, policy: Policy, checks: readonly FactCheck[]): GrantOffer | undefined {
+	void policy;
+	const hosts: string[] = [];
+	for (const check of checks) {
+		// Only what this stage is actually asking about, and never a `deny` — an explicit rule is edited in
+		// the config file, not negotiated away by a dialog click.
+		if (check.action !== "ask") continue;
+		if (!hosts.includes(check.value)) hosts.push(check.value);
+	}
+	if (hosts.length === 0) return undefined;
+	const asking = new Set(checks.filter((check) => check.action === "ask").map((check) => check.surface));
+	const also = asking.has(facts.toolName) && facts.toolName !== NETWORK_SURFACE ? [facts.toolName] : [];
+	const metadata = hosts.filter((host) => isMetadataEndpoint(host));
+	return {
+		surface: NETWORK_SURFACE,
+		patterns: hosts,
+		...(also.length > 0 ? { alsoSurfaces: also } : {}),
+		surfacePatterns: { [NETWORK_SURFACE]: hosts },
+		label: `${hosts.join(" ")}${metadata.length ? ` (metadata endpoint: ${metadata.join(" ")})` : ""}`,
 	};
 }
 

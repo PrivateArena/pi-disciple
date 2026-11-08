@@ -7,6 +7,8 @@
 
 export type Action = "allow" | "ask" | "deny";
 
+import { regexPatternError } from "./match.ts";
+
 /** Precedence order, lowest first: later scopes override earlier ones (last matching pattern wins). */
 export type Scope =
 	| "builtin"
@@ -51,12 +53,29 @@ export interface GrantRule {
 	action: Action;
 }
 
+/**
+ * One `gate.hardDeny` entry: a deny the "allow everything" mode cannot swallow (plan step C).
+ *
+ * Deliberately **not** a {@link GrantRule} and never an `action` field: there is exactly one action, and
+ * the absence of a knob is what makes the entry un-coercible by a dialog click. `surface` is optional
+ * because the common case is "this thing, wherever it appears" — a host, a file, a command — and `"*"`
+ * means every surface, including the cross-cutting `path` / `external_directory` / `network` ones.
+ */
+export interface HardDenyRule {
+	surface?: string;
+	pattern: string;
+	/** Shown in the block text and the review log: why a human wrote the rule, for whoever hits it. */
+	reason?: string;
+}
+
 export interface GateConfig {
 	enabled: boolean;
 	reviewLog: boolean;
 	/** 0 waits forever; any timeout or dismiss resolves to abort, never to allow. */
 	promptTimeoutMs: number;
 	permission: Record<string, Action | Record<string, Action>>;
+	/** Deny rules above the mode and above any matching allow. Config-only; the dialog never writes them. */
+	hardDeny: HardDenyRule[];
 }
 
 /**
@@ -244,10 +263,27 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 		},
 		external_directory: "ask",
 		bash: { "*": "ask" },
+		/**
+		 * The egress surface (plan step B4): one fact per host a call can reach, allow-by-default so no
+		 * existing user is suddenly prompted. Flipping `"*"` to `"ask"` is how you get a prompt for every
+		 * host a call touches; a scoped pattern (`"aliyuncs.com": "deny"`) is the targeted form, and
+		 * `gate.hardDeny` is the **mode-proof** one — it still blocks with "allow everything" turned on.
+		 *
+		 * A surface a config file does not name inherits this default action (`policy.ts::absorb`), which is
+		 * what keeps a years-old config from silently acquiring a new prompt — and what makes the *absence* of
+		 * a key a decision rather than an accident.
+		 */
+		network: { "*": "allow" },
 		// The subagent tool itself has no side effects; its nested calls are gated individually.
 		// (Deviation from the plan's shipped block, which left it at the "*": "ask" default.)
 		subagent: "allow",
 	},
+	/**
+	 * Empty by design (plan step C4): a deny class nobody is born with. The key is documented in
+	 * `pi-gate/config.json` and is **config-only** — the dialog never writes it, and neither does
+	 * `grants.ts` — because a rule that blocks past "allow everything" has to be human-authored.
+	 */
+	hardDeny: [],
 };
 
 export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
@@ -261,10 +297,16 @@ export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
 	askToExtend: true,
 };
 
+/** A `==`-prefixed key is documentation in this file, so no layer of the gate may read it as config. */
+export function isDocKey(key: string): boolean {
+	return key.startsWith("==");
+}
+
 /** Ordered permission entries of a `gate.permission` map (insertion order is the rule order). */
 export function flattenPermission(permission: GateConfig["permission"]): PermissionEntry[] {
 	const out: PermissionEntry[] = [];
 	for (const [surface, value] of Object.entries(permission)) {
+		if (isDocKey(surface)) continue;
 		if (isAction(value)) {
 			out.push({ surface, pattern: "*", action: value });
 		} else if (value && typeof value === "object") {
@@ -280,6 +322,7 @@ export interface ParsedGateConfig {
 	config: Partial<GateConfig>;
 	entries: PermissionEntry[];
 	grants: { global: GrantRule[]; project: GrantRule[] };
+	hardDeny: HardDenyRule[];
 	errors: string[];
 }
 
@@ -292,12 +335,12 @@ export function parseGateConfig(raw: unknown, where: string): ParsedGateConfig {
 	const config: Partial<GateConfig> = {};
 	const grants: ParsedGateConfig["grants"] = { global: [], project: [] };
 
-	if (raw === undefined || raw === null) return { config, entries: [], grants, errors };
+	if (raw === undefined || raw === null) return { config, entries: [], grants, hardDeny: [], errors };
 	const wrapped = isRecord(raw) && "gate" in raw ? raw.gate : raw;
-	if (wrapped === undefined || wrapped === null) return { config, entries: [], grants, errors };
+	if (wrapped === undefined || wrapped === null) return { config, entries: [], grants, hardDeny: [], errors };
 	if (typeof wrapped !== "object" || Array.isArray(wrapped)) {
 		errors.push(`${where}: "gate" must be an object`);
-		return { config, entries: [], grants, errors };
+		return { config, entries: [], grants, hardDeny: [], errors };
 	}
 
 	const doc = wrapped as Record<string, unknown>;
@@ -323,10 +366,16 @@ export function parseGateConfig(raw: unknown, where: string): ParsedGateConfig {
 			errors.push(`${where}: gate.permission must be an object, ignored`);
 		} else {
 			for (const [surface, value] of Object.entries(doc.permission)) {
+				if (isDocKey(surface)) continue; // `==permission`, `==powershell`: prose, not a surface
 				if (isAction(value)) {
 					entries.push({ surface, pattern: "*", action: value });
 				} else if (isRecord(value)) {
 					for (const [pattern, action] of Object.entries(value)) {
+						const bad = regexPatternError(pattern);
+						if (bad) {
+							errors.push(`${where}: gate.permission.${surface}["${pattern}"] ${bad}, ignored`);
+							continue;
+						}
 						if (isAction(action)) entries.push({ surface, pattern, action });
 						else errors.push(`${where}: gate.permission.${surface}["${pattern}"] is not an action, ignored`);
 					}
@@ -347,7 +396,49 @@ export function parseGateConfig(raw: unknown, where: string): ParsedGateConfig {
 		}
 	}
 
-	return { config, entries, grants, errors };
+	const hardDeny = doc.hardDeny === undefined ? [] : parseHardDenyList(doc.hardDeny, `${where}: gate.hardDeny`, errors);
+	if (doc.hardDeny !== undefined) config.hardDeny = hardDeny;
+
+	return { config, entries, grants, hardDeny, errors };
+}
+
+/**
+ * Parse one `gate.hardDeny` array — same style as {@link parseGrantList}: a bad entry costs only itself.
+ *
+ * There is no `action` to validate because there is only one action here. An entry that names no
+ * surface is kept as `"*"`: "never let this host through" is the sentence a human actually writes.
+ */
+export function parseHardDenyList(raw: unknown, where: string, errors: string[]): HardDenyRule[] {
+	if (!Array.isArray(raw)) {
+		errors.push(`${where} must be an array, ignored`);
+		return [];
+	}
+	const out: HardDenyRule[] = [];
+	raw.forEach((item, i) => {
+		if (!isRecord(item) || typeof item.pattern !== "string" || !item.pattern.trim()) {
+			errors.push(`${where}[${i}] must be {surface?, pattern, reason?} with a non-empty pattern, ignored`);
+			return;
+		}
+		if (item.surface !== undefined && typeof item.surface !== "string") {
+			errors.push(`${where}[${i}].surface must be a surface name, ignored`);
+			return;
+		}
+		if (item.reason !== undefined && typeof item.reason !== "string") {
+			errors.push(`${where}[${i}].reason must be a string, ignored`);
+			return;
+		}
+		const bad = regexPatternError(item.pattern);
+		if (bad) {
+			errors.push(`${where}[${i}].pattern ${bad}, ignored`);
+			return;
+		}
+		out.push({
+			surface: typeof item.surface === "string" && item.surface.trim() ? item.surface.trim() : "*",
+			pattern: item.pattern,
+			...(typeof item.reason === "string" && item.reason.trim() ? { reason: item.reason.trim() } : {}),
+		});
+	});
+	return out;
 }
 
 function parseGrantList(raw: unknown, where: string, errors: string[]): GrantRule[] {
@@ -360,6 +451,11 @@ function parseGrantList(raw: unknown, where: string, errors: string[]): GrantRul
 	raw.forEach((item, i) => {
 		if (!isRecord(item) || typeof item.surface !== "string" || typeof item.pattern !== "string" || !isAction(item.action)) {
 			errors.push(`${where}[${i}] must be {surface, pattern, action}, ignored`);
+			return;
+		}
+		const bad = regexPatternError(item.pattern);
+		if (bad) {
+			errors.push(`${where}[${i}].pattern ${bad}, ignored`);
 			return;
 		}
 		out.push({ surface: item.surface, pattern: item.pattern, action: item.action });

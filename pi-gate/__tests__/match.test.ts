@@ -17,6 +17,9 @@ import {
 	suggestBashPattern,
 	tokenize,
 	wildcardMatch,
+	compileRegexPattern,
+	isExactRule,
+	regexPatternError,
 	isWrappedSegment,
 	normaliseCommand,
 } from "../match.ts";
@@ -202,5 +205,41 @@ describe("redirects are not separators", () => {
 		expect(segmentCommands("cmd &> log")).toEqual(["cmd &> log"]);
 		expect(segmentCommands("cmd <&0")).toEqual(["cmd <&0"]);
 		expect(segmentCommands("a & b")).toEqual(["a", "b"]);
+	});
+});
+
+describe("regex patterns (re:)", () => {
+	it("matches unanchored, case-insensitively", () => {
+		expect(wildcardMatch("re:aliyuncs", "curl https://aliyuncs.com/proxy_temp_file")).toBe(true);
+		expect(wildcardMatch("re:ALiyunCS", "curl https://aliyuncs.com/x")).toBe(true);
+		expect(wildcardMatch("re:curl\\s+https?://[\\w.-]+\\.aliyuncs\\.com", "curl https://oss.aliyuncs.com/a")).toBe(true);
+		expect(wildcardMatch("re:^curl", "wget x")).toBe(false);
+	});
+	it("does not treat a glob as a regex", () => {
+		// `*.env` is a valid regex matching almost nothing; without the sigil it stays a glob.
+		expect(wildcardMatch("*.env", "/a/b/.env")).toBe(true);
+		expect(wildcardMatch("re:*.env", "/a/b/.env")).toBe(false); // a lone quantifier with nothing to repeat
+	});
+	it("never expands ~ or $HOME in a regex source", () => {
+		expect(wildcardMatch("re:~/.pi/.*", "~/.pi/agent/x")).toBe(true);
+	});
+	it("an invalid regex matches nothing rather than matching literally", () => {
+		expect(wildcardMatch("re:(a+", "re:(a+ x")).toBe(false);
+		expect(compileRegexPattern("re:(a+")).toBeUndefined();
+	});
+	it("reports why a regex pattern is unusable", () => {
+		expect(regexPatternError("git status *")).toBeUndefined();
+		expect(regexPatternError("re:ok.*")).toBeUndefined();
+		expect(regexPatternError("re:")).toContain("empty regex");
+		expect(regexPatternError("re:(a+")).toContain("not a valid regex");
+		expect(regexPatternError(`re:${"a".repeat(600)}`)).toContain("regex limit");
+	});
+	it("a regex rule is never an exact rule (floors keep their teeth)", () => {
+		const cmd = "cat ~/.pi/agent/extensions/pi-gate/config.json";
+		expect(wildcardMatch("re:cat .*config\\.json", cmd)).toBe(true);
+		expect(isExactRule({ pattern: "re:cat .*config\\.json" }, cmd)).toBe(false);
+	});
+	it("refuses a pattern over the length limit at compile time", () => {
+		expect(compileRegexPattern(`re:${"a".repeat(600)}`)).toBeUndefined();
 	});
 });

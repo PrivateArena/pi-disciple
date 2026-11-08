@@ -90,14 +90,47 @@ export async function resetPersisted(kind: PersistedScope, cwd: string): Promise
 const WRITE_ATTEMPTS = 5;
 let writeTicket = 0;
 
-async function mutateGrants(
+function mutateGrants(
 	file: string,
 	scope: PersistedScope,
 	update: (grants: GrantRule[]) => { grants: GrantRule[]; changed: boolean },
 ): Promise<WriteResult> {
-	const key: "global" | "project" = scope;
-	let last: WriteResult = { ok: false, file, error: "not written" };
+	return withFileLock(file, () => mutateGrantsLoop(file, scope, update));
+}
 
+/**
+ * One writer per file, inside this process.
+ *
+ * A read-modify-write across an `await` is not a critical section, and the verify-and-retry loop below
+ * cannot make it one: two grants clicked in the same tick both read the pre-write document, and whichever
+ * rename lands last is the file that survives. Across processes the retry loop is the right tool (it only
+ * has to win eventually); within one process the fix is to not interleave, which is also the only way the
+ * "concurrent writes merge" property is actually true rather than usually true.
+ */
+const fileQueues = new Map<string, Promise<unknown>>();
+
+function withFileLock<T>(file: string, work: () => Promise<T>): Promise<T> {
+	const tail = fileQueues.get(file) ?? Promise.resolve();
+	const run = tail.then(work, work);
+	// The queue holds the *settled* promise, so a later writer can still chain onto it; the entry is dropped
+	// when this was the last call queued, so a long session does not keep one promise per file forever.
+	const settled = run.then(
+		() => undefined,
+		() => undefined,
+	);
+	fileQueues.set(file, settled);
+	void settled.finally(() => {
+		if (fileQueues.get(file) === settled) fileQueues.delete(file);
+	});
+	return run;
+}
+
+async function mutateGrantsLoop(
+	file: string,
+	key: "global" | "project",
+	update: (grants: GrantRule[]) => { grants: GrantRule[]; changed: boolean },
+): Promise<WriteResult> {
+	let last: WriteResult = { ok: false, file, error: "not written" };
 	for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
 		const read = readConfigFile(file);
 		if (read.json === undefined && read.error && !read.error.includes("does not exist")) {

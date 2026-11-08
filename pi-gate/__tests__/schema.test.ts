@@ -251,3 +251,11 @@ describe("defaults", () => {
 		expect(DEFAULT_GATE_CONFIG.permission["*"]).toBe("ask");
 	});
 });
+
+describe("documentation keys are never config", () => {
+	it("skips `==` surfaces in the permission map, so they create no rules", () => {
+		const parsed = parseGateConfig({ gate: { permission: { "*": "ask", "==powershell": { "*": "ask" }, bash: "ask" } } }, "t");
+		expect(parsed.entries.map((entry) => entry.surface)).toEqual(["*", "bash"]);
+		expect(flattenPermission(DEFAULT_GATE_CONFIG.permission).every((entry) => !entry.surface.startsWith("=="))).toBe(true);
+	});
+});

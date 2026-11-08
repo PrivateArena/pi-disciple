@@ -17,8 +17,10 @@ import {
 	ALLOW_ALL_WINDOW_MS,
 	allowAllActive,
 	evaluate,
+	matchHardDeny,
 	type AllowAll,
 	type Decision,
+	type HardDenyRule,
 	type Policy,
 	type Stage,
 	type StageDecision,
@@ -134,6 +136,18 @@ export async function handleToolCall(
 		});
 		let decision = evaluate(facts, policy);
 		const sub = subagentOwner(state, event.parentToolCallId);
+
+		// **The axiom:** an explicit deny a human wrote outranks both a matching allow rule and the
+		// allow-everything mode. That is why this check sits *above* the allow early-return and above
+		// `allowAllActive`, and not inside `evaluate` — a hardDeny is not a layer of the precedence ladder,
+		// it is the thing above it, so no rule can be ordered past it and no switch can silence it. It is
+		// also why the mode's own documentation now reads "only a `deny` rule still blocks": a `gate.hardDeny`
+		// entry is such a rule, and the dialog can never write one.
+		const denied = matchHardDeny(facts, policy);
+		if (denied) {
+			await logit(appendLog, logPath, policy, decision, "hard_deny", sub);
+			return { block: true, reason: blockReason(decision, "hard_deny", hardDenyCause(denied.rule, denied.value)) };
+		}
 
 		if (decision.action === "allow") {
 			if (policy.config.reviewLog) await logit(appendLog, logPath, policy, decision, "allow", sub);
@@ -252,6 +266,17 @@ export async function handleToolCall(
 export function setAllowAll(state: GateState, allowAll: AllowAll): void {
 	state.allowAll = allowAll;
 	state.allowAllChanged?.(allowAll);
+}
+
+/**
+ * The `hard_deny` cause text: the pattern, what it matched, and the human's own reason. No config syntax
+ * and no instructions — the fix belongs to whoever wrote the rule, and the model must not be invited to
+ * edit it (see `prompt.ts`).
+ */
+function hardDenyCause(rule: HardDenyRule, value: string): string {
+	const surface = rule.surface === "*" ? "" : `${rule.surface}: `;
+	const reason = rule.reason ? ` — ${rule.reason}` : "";
+	return `hardDeny ${surface}${displaySnippet(rule.pattern)}${reason}`;
 }
 
 /**

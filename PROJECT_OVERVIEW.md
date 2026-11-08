@@ -25,7 +25,8 @@ nor collapse 256 sequential calls into one unreviewable batch.
 pi-gate/
   schema.ts        config parsing + defaults (GateConfig, SubagentLimits, GrantRule)      step 3
   config-file.ts   read/seed `<scope>/extensions/pi-gate/config.json`, JSONC tolerance    step 19
-  match.ts         pattern matching, shell segmentation, path spellings, folder grants, protected globs   step 4
+  match.ts         pattern matching (glob + `re:`), shell segmentation, path spellings, folder grants, protected globs   step 4
+  network.ts       the egress facts: which host a call can reach, and what a domain rule means   new
   inspect.ts       Facts: surfaces + paths + call ids extracted from a tool call           step 5
   policy.ts        layered Policy (defaults→global→project→grants→session), floors, deny   steps 6, 7
   grants.ts        session (memory) + persisted (config file) grants, review log helpers   step 8
@@ -181,6 +182,42 @@ shortcuts never walk past them. Floors are **labels** and nothing more: they
 explain an unusual call in the dialog title and in the review log, and they decide nothing once "allow
 everything" is on; see the dialog section.
 
+## Egress, and what a rule pattern can be
+
+**A rule pattern is a glob, or a regex if you say so.** `match.ts::wildcardMatch` is the one matcher: `*`
+across any characters including `/`, `?` one character, `~`/`$HOME` expanded. A pattern starting `re:` is
+instead compiled as a JavaScript regex and matched **unanchored, case-insensitively** — `re:aliyuncs` blocks
+any host containing it — so `bash: "curl https?://([\\w-]+\\.)*aliyuncs\\.com": "deny"` is now a legal rule.
+The sigil is explicit because a glob and a regex cannot be told apart by eye (`*.env` is a valid regex
+matching almost nothing) and a silently-misread rule is a rule that let the wrong call through. Regex rules
+work on every surface and inside compound (chained) patterns. They are **never** an *exact* rule
+(`isExactRule` stays literal), so a regex can never satisfy a floor that demands the human named this call.
+An invalid `re:` is reported at config load and matches nothing — a typo can only ever fail to match, never
+widen. Bounded because a gate that hangs is an outage: source length cap, a wall-clock budget per pattern
+per **call** (`beginRegexRound`, so a slow rule degrades for one call and is not permanently dead), input
+cap, and a refusal of nested-quantifier shapes (`(a+)+`) at load, since `RegExp.test` cannot be interrupted
+once running. `/gatec status` names any pattern that blew its budget.
+
+**`network` is the third fact kind** (`network.ts`, plan step B). `inspect.ts` already knew what a command
+*does* and *where it writes*; it never knew *whom it reaches* — a URL was fed to the path spellings and came
+out as a bogus cwd-relative file. Now a call yields one fact per host: URL arguments, hosts inside quoted
+code strings (`python3 -c "…urlopen('http://…')"`, which the tokeniser alone cannot see), `user@host:/path`,
+the pinned address in `curl --resolve host:port:addr`, and a `url`/`uri`/`endpoint`/`href` parameter of any
+tool. Hosts are canonical (lowercased, port/userinfo/IPv6-brackets stripped, trailing dot dropped, IPv4
+literals in hex/octal/short form resolved to the dotted quad a rule is written against). Loopback is never a
+fact — prompting for `localhost` would train a human to click through an egress dialog. The default is
+`network: {"*": "allow"}`, so an existing config is unaffected; **naming the surface at all is opting in**,
+and `network_egress` is an unconditional floor answerable only by the network surface's own rules (a scoped
+pattern, or the surface's untouched default) — so `bash: "curl *": "allow"` can never become "never ask about
+a host again", exactly as `cat *` never answers a directory. `isMetadataEndpoint` / `METADATA_ENDPOINTS` name
+the credential-bearing endpoints (`169.254.169.254`, Alibaba's `100.100.100.200`, `metadata`, `fd00:ec2::254`)
+that a path rule could never catch, because the path (`/latest/meta-data/`) looks like any download.
+
+**Stated plainly, because it reads like a guarantee and is not one:** this matches **the address a call
+names**, not the traffic. A DNS answer pointing at a blocked host, an HTTP redirect, a proxy or registry set
+in `~/.npmrc`/`pip.conf`/`$HTTPS_PROXY`, and any program resolving a name itself are all outside it. Use
+`gate.hardDeny` for the mode-proof form, and a real network boundary if you need a boundary.
+
 ## Slash commands
 
 Both are suffixed `c` ("command") so they cannot collide with a prompt file or skill of the same name:
@@ -210,15 +247,17 @@ registry knows it. A bad pin warns and the child stays on the session model; ove
 non-reasoning model also drops the child's thinking level to `off`. The pin is config, never a tool
 parameter - the model still cannot choose its own child model.
 
-**A call is two questions, and gets one dialog each.** *What it does* (its own surface: every shell
-segment, the tool name) and *where it goes* (`path`, `external_directory`) are decided separately and
+**A call is up to three questions, and gets one dialog each.** *What it does* (its own surface: every shell
+segment, the tool name), *where it goes* (`path`, `external_directory`) and *whom it reaches* (`network`)
+are decided separately and
 asked in that order — `pi-gate: bash · location — … — question 2 of 2`. The split exists because the two
 questions are answered by different rule shapes: `cat *` says nothing about a directory. One merged dialog
 could only ever offer the command rule, so a whitelisted `cat /media/…/config.json | head -200` had its
 command facts all allowed, its only `ask` coming from the boundary fact, and **no choice in the dialog
 could close it** — it asked again on every retry, whatever was clicked. Now the location dialog offers the
 **containing folder** on the surface that asked (`external_directory: /media/…/CraftGang/*`, which also
-covers the folder itself and every sibling file), and one click ends it. A question is asked at most once
+covers the folder itself and every sibling file), and one click ends it. The third question is the egress
+one: `network: <host>`, offered as the host, so a rule reads as the domain a human meant. A question is asked at most once
 per call, so a grant that leaves a floor standing cannot loop the human through the same dialog twice:
 answer every question the call raised and the call runs. A file tool's fact *is* a path, so file tools keep
 raising one question; a call that touches a **protected path** is offered as the *exact* command or file
@@ -259,6 +298,17 @@ too broken to parse. That is the point: the choice is made by a human who is abo
 overnight run), and a switch that keeps asking is not a switch. Two things stay above it, and neither
 can raise a dialog: a `deny` rule blocks (an explicit instruction outranks a mode), and the mode is
 never inferable — not from a config file, not from the model, never across a restart.
+
+**`gate.hardDeny` is the deny that survives the mode** (`policy.ts::matchHardDeny`, checked in `handle.ts`
+*above* the allow early-return and above `allowAllActive`). An ordinary `deny` rule already outranks the
+mode; what `hardDeny` adds is a list that is **not a layer of the precedence ladder**, so no rule can be
+ordered past it and no dialog click can write or widen one — it is config-only, human-authored, and
+concatenated across the global and trusted-project files rather than scope-ordered. It looks at every fact
+of a call (its own surface, every path spelling, every host), because the thing it denies is a *thing*,
+not a surface. It is checked before the `allow` early-return, so a matching allow rule cannot outrank it
+either. What it is **not**: a firewall (see the egress section — it matches the address a call *names*),
+and not a defence against `--no-gate` / `gate.enabled=false` / an agent rewriting this very file while the
+mode is on, all of which stop the whole gate including this list.
 
 The trade-off, stated plainly: with the mode on the agent can rewrite the gate's own config, and that
 edit outlives the session. Floors stay as labels, so a `reviewLog` entry still names why a call looked

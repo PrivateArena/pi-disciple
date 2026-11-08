@@ -5,6 +5,7 @@ import {
 	evaluate,
 	isFullyDenied,
 	loadPolicy,
+	matchHardDeny,
 	type Policy,
 	recomputeActive,
 	resolveConfigPaths,
@@ -364,5 +365,120 @@ describe("shipped defaults inside the workspace", () => {
 		expect(actionOf(policy, cwd, "read", { path: `${cwd}/.env.example` })).toBe("allow");
 		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/.git/hooks/pre-commit` })).toBe("ask");
 		expect(actionOf(policy, cwd, "edit", { path: `${cwd}/../else/file.ts` })).toBe("ask");
+	});
+});
+
+describe("the network surface", () => {
+	const CURL = { command: "curl https://oss.aliyuncs.com/proxy_temp_file -o out/x" };
+	const actionStages = (policy: Policy, input: Record<string, unknown>) =>
+		evaluate(extract("bash", input, policy.cwd, { callId: "t" }), policy).stages.map((s) => `${s.stage}:${s.action}`);
+
+	it("denies by bare domain, by wildcard subdomain and by regex", () => {
+		for (const pattern of ["aliyuncs.com", "*.aliyuncs.com", "re:.*aliyuncs.*", "re:oss\\.[a-z]+\\.com"]) {
+			const { policy } = setup({ "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" }, network: { "*": "allow", [pattern]: "deny" } });
+			expect(actionOf(policy, policy.cwd, "bash", CURL), pattern).toBe("deny");
+		}
+	});
+
+	it("does not let a suffix-lookalike borrow a domain rule", () => {
+		// `"*": "allow"` is in the map so the *host matcher* is the only thing under test — a config that
+		// names `network` without a class-wide rule has opted into asking, which is its own contract (below).
+		const { policy } = setup({ "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" }, network: { "*": "allow", "aliyuncs.com": "deny" } });
+		expect(actionOf(policy, policy.cwd, "bash", { command: "curl https://notaliyuncs.com/x" })).toBe("allow");
+		expect(actionOf(policy, policy.cwd, "bash", { command: "curl https://evil-aliyuncs.com/x" })).toBe("allow");
+	});
+
+	it("escalates to ask over an allowed command: a coarse `curl *` says nothing about a host", () => {
+		const { policy } = setup({ "*": "allow", path: { "*": "allow" }, bash: { "*": "allow", "curl *": "allow" }, network: { "*": "ask" } });
+		expect(actionStages(policy, CURL)).toEqual(["command:allow", "location:allow", "network:ask"]);
+	});
+
+	it("is answered by a scoped network rule, which is what a dialog click writes", () => {
+		const { policy } = setup({ "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" }, network: { "*": "ask", "oss.aliyuncs.com": "allow" } });
+		expect(actionOf(policy, policy.cwd, "bash", CURL)).toBe("allow");
+	});
+
+	it("labels the egress floor for the dialog and the review log", () => {
+		const { policy } = setup({ "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" }, network: { "*": "ask" } });
+		const decision = evaluate(extract("bash", CURL, policy.cwd, { callId: "t" }), policy);
+		expect(decision.floors).toContain("network_egress");
+	});
+
+	it("names hosts for MCP-style tools through their url parameter", () => {
+		const { policy } = setup({ "*": "allow", network: { "internal.corp": "deny" } });
+		expect(actionOf(policy, policy.cwd, "webfetch", { url: "https://internal.corp/api" })).toBe("deny");
+	});
+
+	it("is allow-by-default in the shipped config, so nothing changes for existing users", () => {
+		const { policy } = setup({ "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" } });
+		expect(actionOf(policy, policy.cwd, "bash", CURL)).toBe("allow");
+	});
+
+	it("floors every host, but lets the surface's own default answer it", () => {
+		// `"*": "ask"` is the shipped config's shape, and an unruled host fact would otherwise fall through
+		// to it — a prompt for every host, from a rule nobody wrote about hosts. The floor is still raised
+		// (a host really is being reached, and the review log must say so); what answers it is the surface's
+		// own documented `allow`, and nothing else.
+		const { policy } = setup({ "*": "ask", read: "allow", path: { "*": "allow" }, bash: { "*": "allow" } });
+		const decision = evaluate(extract("bash", CURL, policy.cwd, { callId: "t" }), policy);
+		expect(decision.floors).toContain("network_egress");
+		expect(decision.stages.find((s) => s.stage === "network")!.action).toBe("allow");
+	});
+
+	it("does not let a command grant answer the egress floor of an opted-in config", () => {
+		// The asymmetry that makes the surface a control: naming `network` at all is opting in, and then
+		// only a rule *about hosts* can answer the floor — `"*": "allow"` cannot.
+		const { policy } = setup({ "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" }, network: { "github.com": "allow" } });
+		expect(actionOf(policy, policy.cwd, "bash", CURL)).toBe("ask");
+	});
+});
+
+describe("hardDeny rules reach the matcher", () => {
+	it("checks every surface, host and path spelling of a call", () => {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, {
+			gate: {
+				enabled: true,
+				permission: { "*": "allow", path: { "*": "allow" }, bash: { "*": "allow" } },
+				hardDeny: [{ pattern: "oss.aliyuncs.com" }],
+			},
+		});
+		clearPolicyCache();
+		const policy = loadPolicy(fixture.cwd, true, fixture.agentDir);
+		expect(policy.hardDeny).toEqual([{ surface: "*", pattern: "oss.aliyuncs.com" }]);
+		const facts = extract("bash", { command: "curl https://oss.aliyuncs.com/x" }, policy.cwd, { callId: "t" });
+		expect(matchHardDeny(facts, policy)?.value).toBe("oss.aliyuncs.com");
+	});
+
+	it("a project file can add one, and only a trusted cwd reads it", () => {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, gateDoc({ "*": "allow" }));
+		writeProjectConfig(fixture, { gate: { enabled: true, permission: { "*": "allow" }, hardDeny: [{ pattern: "evil.test" }] } });
+		clearPolicyCache();
+		expect(loadPolicy(fixture.cwd, true, fixture.agentDir).hardDeny.map((r) => r.pattern)).toEqual(["evil.test"]);
+		clearPolicyCache();
+		expect(loadPolicy(fixture.cwd, false, fixture.agentDir).hardDeny).toEqual([]);
+	});
+});
+
+describe("a hardDeny that names an unknown surface is visible, not silent", () => {
+	function withHardDeny(hardDeny: unknown, permission: unknown = { "*": "allow" }) {
+		fixture = makeFixture();
+		writeGlobalConfig(fixture, { gate: { ...gateDoc(permission).gate, hardDeny } });
+		clearPolicyCache();
+		return loadPolicy(fixture.cwd, true, fixture.agentDir);
+	}
+
+	it("warns when the surface matches nothing the gate knows", () => {
+		const policy = withHardDeny([{ surface: "netowrk", pattern: "aliyuncs.com" }]);
+		expect(policy.errors.join(" ")).toContain("netowrk");
+	});
+
+	it("stays quiet for the cross-cutting surfaces, the tool wildcard and a real tool name", () => {
+		expect(withHardDeny([{ surface: "path", pattern: "*/secrets/*" }]).errors.join(" ")).not.toContain("hardDeny");
+		expect(withHardDeny([{ surface: "network", pattern: "aliyuncs.com" }]).errors.join(" ")).not.toContain("hardDeny");
+		expect(withHardDeny([{ pattern: "aliyuncs.com" }]).errors.join(" ")).not.toContain("hardDeny");
+		const withTool = withHardDeny([{ surface: "webfetch", pattern: "aliyuncs.com" }], { "*": "allow", webfetch: "ask" });
+		expect(withTool.errors.join(" ")).not.toContain("hardDeny");
 	});
 });

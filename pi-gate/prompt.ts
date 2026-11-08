@@ -71,7 +71,8 @@ export function dialogTitle(decision: Decision, sub?: { role: string; task: stri
 	// a second dialog is never mistaken for the first one coming back unanswered.
 	const question =
 		decision.question && decision.question.total > 1 ? ` \u2014 question ${decision.question.index} of ${decision.question.total}` : "";
-	const heading = decision.stage === "location" ? `${facts.toolName} \u00b7 location` : facts.toolName;
+	const heading =
+		decision.stage === "location" ? `${facts.toolName} \u00b7 location` : decision.stage === "network" ? `${facts.toolName} \u00b7 network` : facts.toolName;
 	// A protected location has no grantable rule of its own (its answer is the exact command, which the
 	// command question already offered), and a dialog must not imply one that is not there.
 	const closable = decision.grant || decision.action !== "ask" ? "" : "\nno rule can close this question \u2014 \"Allow once\" lets this call through";
@@ -100,12 +101,18 @@ export interface AskResult {
  * dialog is not going to re-approve the call either way. The fix belongs to the human, and `no_ui` is
  * the only case where the model is the one who can carry it out (FM-12).
  */
-export function blockReason(decision: Decision, kind: "policy_deny" | "user_abort" | "no_ui", instruction?: string): string {
+export function blockReason(decision: Decision, kind: "policy_deny" | "hard_deny" | "user_abort" | "no_ui", instruction?: string): string {
 	const { facts, matched } = decision;
 	if (kind === "user_abort") {
 		return instruction
 			? `Blocked by user with note: ${instruction}`
 			: `Blocked by user: ${codeSpan(displaySnippet(facts.preview))}`;
+	}
+	// A hardDeny is not a policy default and not something the model can talk its way through: it names
+	// the pattern and the human's reason, because the only useful answer to "why was this blocked" is the
+	// sentence the person who blocked it wrote.
+	if (kind === "hard_deny") {
+		return `Blocked by a hardDeny rule: ${instruction ?? codeSpan(displaySnippet(facts.preview))} matches a deny that allow-everything cannot override.`;
 	}
 	if (kind === "no_ui") {
 		const offers = neededOffers(decision);

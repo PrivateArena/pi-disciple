@@ -245,3 +245,66 @@ describe("protected paths stay narrow but grantable", () => {
 		expect(decisionFor(afterClick, "edit", { path: guarded, oldText: "a", newText: "b" }).action).toBe("allow");
 	});
 });
+
+describe("the network question of a shell call", () => {
+	/** The user's real config shape plus egress asked about: the shape that makes the floor observable. */
+	const EGRESS_ASK = {
+		...WHITELISTED_CLIS,
+		permission: { ...WHITELISTED_CLIS.permission, network: { "*": "ask" } },
+	};
+	const CURL = { command: "curl https://oss.aliyuncs.com/proxy_temp_file -o out/x" };
+
+	it("is its own stage, separate from the command and the path it writes", () => {
+		const policy = setup(EGRESS_ASK);
+		const decision = decisionFor(policy, "bash", CURL);
+		// `-o out/x` is inside the workspace, so the location stage is decided `allow` and never asked:
+		// the host is a third kind of check, folded into neither the command nor the path.
+		expect(decision.stages.map((stage) => `${stage.stage}:${stage.action}`)).toEqual(["command:ask", "location:allow", "network:ask"]);
+		expect(decision.stages[2]!.floors).toContain("network_egress");
+	});
+
+	it("is not answered by a coarse command wildcard — the ask stands", () => {
+		const policy = setup(EGRESS_ASK);
+		// `curl *` is what one click on a curl call writes today; it says nothing about a domain.
+		const granted = withSessionGrants(policy, [{ surface: "bash", pattern: "curl *", action: "allow" }]);
+		expect(decisionFor(granted, "bash", CURL).stages.map((s) => `${s.stage}:${s.action}`)).toEqual(["command:allow", "location:allow", "network:ask"]);
+	});
+
+	it("offers the host on the network surface, and one click ends the asking", () => {
+		const policy = setup(EGRESS_ASK);
+		const offer = decisionFor(policy, "bash", CURL).stages.find((s) => s.stage === "network")!.grant!;
+		expect(offer.surface).toBe("network");
+		expect(offer.patterns).toContain("oss.aliyuncs.com");
+
+		const granted = withSessionGrants(policy, toGrantRules(offer));
+		// Answer the other two questions the way the human would, and nothing keeps asking.
+		let active = granted;
+		for (const stage of decisionFor(active, "bash", CURL).stages.filter((s) => s.action === "ask")) {
+			active = withSessionGrants(active, toGrantRules(stage.grant!));
+		}
+		expect(decisionFor(active, "bash", CURL).action).toBe("allow");
+		expect(decisionFor(active, "bash", CURL).stages.filter((s) => s.action === "ask")).toEqual([]);
+	});
+
+	it("asks all three questions in order for a whitelisted command writing outside", () => {
+		const policy = setup(EGRESS_ASK);
+		const outside = `${fixture!.root}/out.bin`;
+		const decision = decisionFor(policy, "bash", { command: `curl https://example.com/x -o ${outside}` });
+		expect(decision.stages.map((s) => `${s.stage}:${s.action}`)).toEqual(["command:ask", "location:ask", "network:ask"]);
+	});
+
+	it("raises no network question for loopback", () => {
+		const policy = setup(EGRESS_ASK);
+		const decision = decisionFor(policy, "bash", { command: "curl http://localhost:3000/health" });
+		// Loopback is not egress, so there is no network stage at all — only the command question.
+		expect(decision.stages.map((s) => `${s.stage}:${s.action}`)).toEqual(["command:ask"]);
+	});
+
+	it("titles the network dialog like the location one", async () => {
+		const policy = setup(EGRESS_ASK);
+		const log: UiLog = { titles: [], choices: [] };
+		const state = stateFor(policy);
+		await handleToolCall(sh(CURL.command), stubCtx("once", log) as ExtensionContext, state);
+		expect(log.titles.some((t) => /\bnetwork\b/.test(t))).toBe(true);
+	});
+});

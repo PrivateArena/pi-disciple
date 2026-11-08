@@ -24,6 +24,9 @@
       "bash": {
         "*": "ask"
       },
+      "network": {
+        "*": "allow"
+      },
       "==powershell": {
         "*": "ask"
       },
@@ -41,6 +44,13 @@
       "==entry.fields": "surface = a tool name (bash, edit, read, subagent, an MCP tool name), or \"path\" | \"external_directory\" | \"*\" · pattern = one glob in that surface (\"cd *\", \"/mnt/usb/data/*\", \"*.env\") · action = \"allow\" | \"ask\" | \"deny\", and the last matching pattern wins",
       "==entry.project": "grants.project is read only from a trusted <cwd>/.pi/extensions/pi-gate/config.json; session grants are memory-only and are never a key in this file"
     },
+    "==hardDeny": "a deny class the \"allow everything\" mode cannot swallow: it blocks even with allow-everything ON, even when an allow rule matches, and even when no UI can answer. It is never written by the dialog and never by a grant — only by a human editing this file, which is the whole point",
+    "==hardDeny.limit": "it sits above the mode, not above the gate: --no-gate and gate.enabled=false stop everything, including this list, and a file the agent can rewrite while the mode is on can delete these entries. It is also fact-based — it denies the call that NAMES the address (see ==network.limit)",
+    "==hardDeny.entry": "{ surface?, pattern, reason? } · surface defaults to \"*\" (every surface, including path, external_directory and network) · pattern is matched the way that surface matches, so a network pattern is a domain, a path pattern a path glob, a bash pattern a command glob or re: · reason is shown to the model and the log when the call is blocked",
+    "==hardDeny.example": "[{\"pattern\": \"oss.aliyuncs.com\"}, {\"pattern\": \"100.100.100.200\", \"reason\": \"cloud metadata endpoint\"}, {\"surface\": \"path\", \"pattern\": \"/home/me/.ssh/*\"}]",
+    "==network": "the egress surface: one fact per host a call can reach (URL arguments, hosts inside quoted code strings, user@host:/path, the address in curl --resolve, and a url/uri/endpoint/href parameter of any tool). Loopback is never a fact. A pattern is a domain, and a bare domain covers its subdomains, so \"aliyuncs.com\" also denies oss.aliyuncs.com but not evilaliyuncs.com; \"*.aliyuncs.com\", \"*aliyuncs*\" and \"re:.*aliyuncs.*\" work as globs/regexes too. \"*\": \"allow\" is the shipped default so nothing changes for an existing config; name the surface at all, even with a single allow entry, to opt in, or set \"*\": \"ask\" to be asked about every host",
+    "==network.limit": "this matches the ADDRESS A CALL NAMES, not the traffic: it is a fact extracted from the command line, not a firewall. A DNS answer that points at a blocked host, an HTTP redirect to one, a proxy or index configured in ~/.npmrc / pip.conf / $HTTPS_PROXY, and any program that resolves a name itself are all outside it. Enforce egress at the boundary too if you need a guarantee",
+    "==network.floor": "every host fact is floored as network_egress, and only the network surface itself can answer it: bash: \"curl *\": \"allow\" says nothing about which host, exactly as it says nothing about which directory. The one exception is the surface's own untouched default, so a config that never mentions egress is not prompted for it",
     "==permission": "every key is a surface, and every value is either \"allow\"|\"ask\"|\"deny\" (which means \"*\" for that surface) or a { pattern: action } map; surface names are free-form, so any tool can be configured",
     "==commented": "a key prefixed with \"==\" is documentation: no parser reads it, so it cannot change behaviour, and it survives a grants write that a // comment would not"
   },
