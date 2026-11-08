@@ -1,8 +1,8 @@
 /**
  * pi-gate — a multi-scope permission gate for pi (plan steps 8 and 9).
  *
- * Scopes, lowest precedence first: built-in defaults, `~/.pi/agent/extensions/pi-gate/config.json`,
- * `<cwd>/.pi/extensions/pi-gate/config.json` (trusted projects only), `grants.global`,
+ * Scopes, lowest precedence first: built-in defaults, `~/.pi/agent/extensions/pi-disciple/config.json`,
+ * `<cwd>/.pi/extensions/pi-disciple/config.json` (trusted projects only), `grants.global`,
  * `grants.project`, and in-memory session grants. Dialog choices: allow once / allow with a note /
  * this session / this project / all projects / abort / abort with a note / allow everything.
  *
@@ -50,7 +50,7 @@ export default function piGate(pi: ExtensionAPI) {
 	const seedConfig = (file: string): string => {
 		let text: string;
 		try {
-			text = readFileSync(new URL("./config.json", import.meta.url), "utf8");
+			text = readFileSync(new URL("../config.json", import.meta.url), "utf8");
 		} catch {
 			text = JSON.stringify({ gate: { ...DEFAULT_GATE_CONFIG } }, null, 2);
 		}

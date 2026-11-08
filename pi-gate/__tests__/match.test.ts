@@ -101,8 +101,8 @@ describe("protected paths", () => {
 	const globs = protectedPathGlobs("/repo", "/agent");
 
 	it("floors the gate's own config and pi's config dir", () => {
-		expect(isProtectedPath(["/agent/extensions/pi-gate/config.json"], globs)).toBe(true);
-		expect(isProtectedPath(["/repo/.pi/extensions/pi-gate/config.json"], globs)).toBe(true);
+		expect(isProtectedPath(["/agent/extensions/pi-disciple/config.json"], globs)).toBe(true);
+		expect(isProtectedPath(["/repo/.pi/extensions/pi-disciple/config.json"], globs)).toBe(true);
 		expect(isProtectedPath(["/repo/src/app.ts"], globs)).toBe(false);
 	});
 
@@ -235,7 +235,7 @@ describe("regex patterns (re:)", () => {
 		expect(regexPatternError(`re:${"a".repeat(600)}`)).toContain("regex limit");
 	});
 	it("a regex rule is never an exact rule (floors keep their teeth)", () => {
-		const cmd = "cat ~/.pi/agent/extensions/pi-gate/config.json";
+		const cmd = "cat ~/.pi/agent/extensions/pi-disciple/config.json";
 		expect(wildcardMatch("re:cat .*config\\.json", cmd)).toBe(true);
 		expect(isExactRule({ pattern: "re:cat .*config\\.json" }, cmd)).toBe(false);
 	});

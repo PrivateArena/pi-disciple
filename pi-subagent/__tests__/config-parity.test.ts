@@ -21,8 +21,8 @@ const dirs: string[] = [];
 /** One agent dir holding `config`, read by both readers. */
 function document(config: Record<string, unknown>): { cwd: string; agentDir: string; file: string } {
 	const agentDir = mkdtempSync(join(tmpdir(), "pi-sub-parity-"));
-	mkdirSync(join(agentDir, "extensions", "pi-gate"), { recursive: true });
-	const file = join(agentDir, "extensions", "pi-gate", "config.json");
+	mkdirSync(join(agentDir, "extensions", "pi-disciple"), { recursive: true });
+	const file = join(agentDir, "extensions", "pi-disciple", "config.json");
 	writeFileSync(file, JSON.stringify({ subagent: config }), "utf8");
 	dirs.push(agentDir);
 	return { cwd: join(agentDir, "repo"), agentDir, file };
@@ -162,9 +162,9 @@ describe("subagent.roles in the file", () => {
 
 	it("merges the project file over the global one per role and per field", () => {
 		const where = document({ roles: { auditor: { tools: ["read"], maxTurns: 4 }, explore: { maxTurns: 9 } } });
-		mkdirSync(join(where.cwd, ".pi", "extensions", "pi-gate"), { recursive: true });
+		mkdirSync(join(where.cwd, ".pi", "extensions", "pi-disciple"), { recursive: true });
 		writeFileSync(
-			join(where.cwd, ".pi", "extensions", "pi-gate", "config.json"),
+			join(where.cwd, ".pi", "extensions", "pi-disciple", "config.json"),
 			JSON.stringify({ subagent: { roles: { auditor: { maxTurns: 7 }, explorer: { tools: ["ls"] } } } }),
 			"utf8",
 		);
@@ -179,8 +179,8 @@ describe("subagent.roles in the file", () => {
 		// The reader is what a real session uses, and the shipped file is now a full restatement of the three
 		// built-ins plus inert sampling suggestions: it must parse silently and must add no role, no tool, no retune.
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-sub-shipped-"));
-		mkdirSync(join(agentDir, "extensions", "pi-gate"), { recursive: true });
-		copyFileSync(fileURLToPath(new URL("../../pi-gate/config.json", import.meta.url)), join(agentDir, "extensions", "pi-gate", "config.json"));
+		mkdirSync(join(agentDir, "extensions", "pi-disciple"), { recursive: true });
+		copyFileSync(fileURLToPath(new URL("../../config.json", import.meta.url)), join(agentDir, "extensions", "pi-disciple", "config.json"));
 		const loaded = loadSubagentLimits(join(agentDir, "repo"), false, agentDir);
 		expect(loaded.errors).toEqual([]);
 		expect(Object.keys(loaded.effectiveRoles).sort()).toEqual(["explore", "general-purpose", "review"]);
@@ -199,8 +199,8 @@ describe("subagent.roles in the file", () => {
 
 	it("an inherit word clears a pin the other file set", () => {
 		const where = document({ model: "kilo/kilo-auto/free" });
-		mkdirSync(join(where.cwd, ".pi", "extensions", "pi-gate"), { recursive: true });
-		writeFileSync(join(where.cwd, ".pi", "extensions", "pi-gate", "config.json"), JSON.stringify({ subagent: { model: "inherit" } }), "utf8");
+		mkdirSync(join(where.cwd, ".pi", "extensions", "pi-disciple"), { recursive: true });
+		writeFileSync(join(where.cwd, ".pi", "extensions", "pi-disciple", "config.json"), JSON.stringify({ subagent: { model: "inherit" } }), "utf8");
 		const loaded = loadSubagentLimits(where.cwd, true, where.agentDir);
 		expect(loaded.errors).toEqual([]);
 		expect(loaded.limits.model).toBeUndefined();

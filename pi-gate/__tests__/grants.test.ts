@@ -115,7 +115,7 @@ describe("persisted grants", () => {
 		writeGlobalConfig(fixture, gateDoc({ bash: { "*": "ask" } }));
 		const written = await appendPersisted(offer("go test ./..."), "project", fixture.cwd);
 		expect(written.ok).toBe(true);
-		expect(written.file).toContain(".pi/extensions/pi-gate/config.json");
+		expect(written.file).toContain(".pi/extensions/pi-disciple/config.json");
 		const globalDoc = readJson(persistedFile("global", fixture.cwd)) as { gate?: { grants?: unknown } };
 		expect(globalDoc.gate?.grants).toBeUndefined();
 	});
@@ -175,7 +175,7 @@ describe("review log", () => {
 	});
 
 	it("defaults to a path inside the agent dir", () => {
-		expect(defaultLogPath()).toContain("extensions/pi-gate/logs/review.jsonl");
+		expect(defaultLogPath()).toContain("extensions/pi-disciple/logs/review.jsonl");
 	});
 });
 

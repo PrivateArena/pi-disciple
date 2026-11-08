@@ -9,15 +9,18 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-/** Both extensions read one file per scope; the gate also writes its grants into it (step 6). */
-export const EXTENSION_CONFIG_SLUG = "pi-gate";
+/**
+ * Both extensions read one file per scope; the gate also writes its grants into it (step 6). The directory is
+ * named for the package (`pi-disciple`), not for one of the two extensions that share the file.
+ */
+export const EXTENSION_CONFIG_SLUG = "pi-disciple";
 
-/** `<agentDir>/extensions/pi-gate/config.json`, honouring PI_CODING_AGENT_DIR. */
+/** `<agentDir>/extensions/pi-disciple/config.json`, honouring PI_CODING_AGENT_DIR. */
 export function getGlobalConfigFile(agentDir: string = getAgentDir()): string {
 	return join(agentDir, "extensions", EXTENSION_CONFIG_SLUG, "config.json");
 }
 
-/** `<cwd>/.pi/extensions/pi-gate/config.json` — only read for a trusted cwd (FM-6). */
+/** `<cwd>/.pi/extensions/pi-disciple/config.json` — only read for a trusted cwd (FM-6). */
 export function getProjectConfigFile(cwd: string): string {
 	return join(cwd, CONFIG_DIR_NAME, "extensions", EXTENSION_CONFIG_SLUG, "config.json");
 }

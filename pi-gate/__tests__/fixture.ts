@@ -11,14 +11,14 @@ export interface Fixture {
 
 /**
  * A temp `PI_CODING_AGENT_DIR` + temp project dir, so the gate's real file resolution
- * (`<agentDir>/extensions/pi-gate/config.json`, `<cwd>/.pi/extensions/pi-gate/config.json`) is
+ * (`<agentDir>/extensions/pi-disciple/config.json`, `<cwd>/.pi/extensions/pi-disciple/config.json`) is
  * exercised instead of mocked.
  */
 export function makeFixture(): Fixture {
 	const root = mkdtempSync(join(tmpdir(), "pi-gate-test-"));
 	const agentDir = join(root, "agent");
 	const cwd = join(root, "project");
-	mkdirSync(join(agentDir, "extensions", "pi-gate"), { recursive: true });
+	mkdirSync(join(agentDir, "extensions", "pi-disciple"), { recursive: true });
 	mkdirSync(cwd, { recursive: true });
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	return {
@@ -33,14 +33,14 @@ export function makeFixture(): Fixture {
 }
 
 export function writeGlobalConfig(fixture: Fixture, document: unknown): string {
-	const file = join(fixture.agentDir, "extensions", "pi-gate", "config.json");
-	mkdirSync(join(fixture.agentDir, "extensions", "pi-gate"), { recursive: true });
+	const file = join(fixture.agentDir, "extensions", "pi-disciple", "config.json");
+	mkdirSync(join(fixture.agentDir, "extensions", "pi-disciple"), { recursive: true });
 	writeFileSync(file, typeof document === "string" ? document : `${JSON.stringify(document, null, 2)}\n`, "utf8");
 	return file;
 }
 
 export function writeProjectConfig(fixture: Fixture, document: unknown): string {
-	const file = join(fixture.cwd, ".pi", "extensions", "pi-gate", "config.json");
+	const file = join(fixture.cwd, ".pi", "extensions", "pi-disciple", "config.json");
 	mkdirSync(join(file, ".."), { recursive: true });
 	writeFileSync(file, typeof document === "string" ? document : `${JSON.stringify(document, null, 2)}\n`, "utf8");
 	return file;

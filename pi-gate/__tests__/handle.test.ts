@@ -302,10 +302,10 @@ describe("ask outcomes", () => {
 		const log: UiLog = { titles: [], questions: [] };
 
 		const calls: ToolCallEvent[] = [
-			bash(`cat ${fixture?.agentDir}/extensions/pi-gate/config.json`, "c1"), // the gate's own config
+			bash(`cat ${fixture?.agentDir}/extensions/pi-disciple/config.json`, "c1"), // the gate's own config
 			tool("edit", { path: `${fixture?.agentDir}/extensions/pi-gate/policy.ts` }, "c2"), // the gate's own code
 			bash(`echo x > ${fixture?.agentDir}/settings.json`, "c3"), // pi's settings
-			tool("write", { path: `${fixture?.cwd}/.pi/extensions/pi-gate/config.json` }, "c4"), // project gate config
+			tool("write", { path: `${fixture?.cwd}/.pi/extensions/pi-disciple/config.json` }, "c4"), // project gate config
 			bash(`echo x > ${fixture?.cwd}/.git/hooks/pre-commit`, "c5"), // code that runs as the user
 		];
 		for (const call of calls) {

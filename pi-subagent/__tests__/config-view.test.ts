@@ -21,8 +21,8 @@ const resolved = (m: Model<any>): ChildModelResolution => ({ status: "resolved",
 function input(over: Partial<Parameters<typeof buildConfigView>[0]> = {}) {
 	return {
 		limits: DEFAULT_LIMITS,
-		files: ["/home/u/.pi/agent/extensions/pi-gate/config.json"],
-		defaultConfigFile: "/home/u/.pi/agent/extensions/pi-gate/config.json",
+		files: ["/home/u/.pi/agent/extensions/pi-disciple/config.json"],
+		defaultConfigFile: "/home/u/.pi/agent/extensions/pi-disciple/config.json",
 		errors: [],
 		cwd: "/repo",
 		trusted: true,
@@ -46,13 +46,13 @@ describe("/subagentc config view", () => {
 		const view = buildConfigView(
 			input({
 				limits: { ...DEFAULT_LIMITS, model: "kilo/kilo-auto/free" },
-				origins: { model: "/repo/.pi/extensions/pi-gate/config.json" },
-				files: ["/home/u/.pi/agent/extensions/pi-gate/config.json", "/repo/.pi/extensions/pi-gate/config.json"],
+				origins: { model: "/repo/.pi/extensions/pi-disciple/config.json" },
+				files: ["/home/u/.pi/agent/extensions/pi-disciple/config.json", "/repo/.pi/extensions/pi-disciple/config.json"],
 				pin: { reference: "kilo/kilo-auto/free", resolution: resolved(PINNED) },
 			}),
 		);
 		expect(view).toContain("child model: kilo/kilo-auto/free (pinned by subagent.model)");
-		expect(view).toContain('subagent.model: "kilo/kilo-auto/free" (from /repo/.pi/extensions/pi-gate/config.json) -> kilo/kilo-auto/free');
+		expect(view).toContain('subagent.model: "kilo/kilo-auto/free" (from /repo/.pi/extensions/pi-disciple/config.json) -> kilo/kilo-auto/free');
 	});
 
 	it("says so when a pin does not resolve, and keeps the inherited model in the headline", () => {
@@ -106,9 +106,9 @@ describe("/subagentc config view", () => {
 
 	it("keeps the project file marked and warns when the cwd is untrusted", () => {
 		const view = buildConfigView(
-			input({ files: ["/home/u/.pi/agent/extensions/pi-gate/config.json", "/repo/.pi/extensions/pi-gate/config.json"], cwd: "/repo" }),
+			input({ files: ["/home/u/.pi/agent/extensions/pi-disciple/config.json", "/repo/.pi/extensions/pi-disciple/config.json"], cwd: "/repo" }),
 		);
-		expect(view).toContain("/repo/.pi/extensions/pi-gate/config.json · project scope");
+		expect(view).toContain("/repo/.pi/extensions/pi-disciple/config.json · project scope");
 		expect(buildConfigView(input({ trusted: false }))).toContain("project scope ignored: this cwd is not trusted");
 	});
 

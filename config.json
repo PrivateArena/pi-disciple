@@ -42,7 +42,7 @@
         "action": "allow"
       },
       "==entry.fields": "surface = a tool name (bash, edit, read, subagent, an MCP tool name), or \"path\" | \"external_directory\" | \"*\" · pattern = one glob in that surface (\"cd *\", \"/mnt/usb/data/*\", \"*.env\") · action = \"allow\" | \"ask\" | \"deny\", and the last matching pattern wins",
-      "==entry.project": "grants.project is read only from a trusted <cwd>/.pi/extensions/pi-gate/config.json; session grants are memory-only and are never a key in this file"
+      "==entry.project": "grants.project is read only from a trusted <cwd>/.pi/extensions/pi-disciple/config.json; session grants are memory-only and are never a key in this file"
     },
     "guard": {
       "enabled": true,
@@ -64,7 +64,7 @@
       "==checkEmptyThinking": "when a message carries no text at all, look at the end of its thinking: the same markup one line from the end is the same accident, and it is the other way a turn dies silently",
       "==limit": "a false positive costs the exact thing the guard saves (a turn the model did not mean to spend), so it reads only the tail — scanTailChars, capped at 4096 by the gate's regex probe budget — never fenced or inline code, and only ever a broken or payload-bearing shape: one balanced <tool_call> named inside a sentence is prose. The guard is also part of the gate, so --no-gate and /gatec off stop it too; /gatec guard off stops only the guard, and /gatec guard remind will switch a disabled one back on for that session",
       "==example": "\"rules\": [{ \"id\": \"qwen-token\", \"pattern\": \"re:<\\\\|tool_call\\\\|>\", \"advice\": \"Make the call; do not describe it.\" }] · \"disableRules\": [\"tool-name-tag\"] · \"allowPatterns\": [\"re:pi-gate\"]",
-      "==log": "hits are appended to <agentDir>/extensions/pi-gate/logs/guard.jsonl — the file where a false positive is audited, whatever `action` is set to"
+      "==log": "hits are appended to <agentDir>/extensions/pi-disciple/logs/guard.jsonl — the file where a false positive is audited, whatever `action` is set to"
     },
     "==hardDeny": "a deny class the \"allow everything\" mode cannot swallow: it blocks even with allow-everything ON, even when an allow rule matches, and even when no UI can answer. It is never written by the dialog and never by a grant — only by a human editing this file, which is the whole point",
     "==hardDeny.limit": "it sits above the mode, not above the gate: --no-gate and gate.enabled=false stop everything, including this list, and a file the agent can rewrite while the mode is on can delete these entries. It is also fact-based — it denies the call that NAMES the address (see ==network.limit)",

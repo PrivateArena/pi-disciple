@@ -187,7 +187,7 @@ describe("limits file", () => {
 	function fixture(files: Record<string, unknown>) {
 		const agentDir = join(root, `agent-${Object.keys(files).length}-${Math.random().toString(36).slice(2)}`);
 		for (const [key, document] of Object.entries(files)) {
-			const path = key === "global" ? join(agentDir, "extensions/pi-gate/config.json") : join(root, "project", ".pi/extensions/pi-gate/config.json");
+			const path = key === "global" ? join(agentDir, "extensions/pi-disciple/config.json") : join(root, "project", ".pi/extensions/pi-disciple/config.json");
 			mkdirSync(join(path, ".."), { recursive: true });
 			writeFileSync(path, JSON.stringify(document), "utf8");
 		}
@@ -241,7 +241,7 @@ describe("limits file", () => {
 
 	it("tolerates hand-written JSONC comments like pi-gate does", () => {
 		const agentDir = join(root, `agent-jsonc-${Math.random().toString(36).slice(2)}`);
-		const path = join(agentDir, "extensions/pi-gate/config.json");
+		const path = join(agentDir, "extensions/pi-disciple/config.json");
 		mkdirSync(join(path, ".."), { recursive: true });
 		writeFileSync(path, `{\n // pin the cheap local model\n "subagent": { "maxTurns": 6, "model": "local/qwen3.8-flash-next" }\n}\n`, "utf8");
 		process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -255,18 +255,18 @@ describe("limits file", () => {
 describe("enabled switch", () => {
 	it("reads subagent.enabled and defaults to on", () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-sub-enabled-"));
-		mkdirSync(join(root, "extensions", "pi-gate"), { recursive: true });
-		mkdirSync(join(root, ".pi", "extensions", "pi-gate"), { recursive: true });
-		writeFileSync(join(root, "extensions", "pi-gate", "config.json"), JSON.stringify({ subagent: { enabled: true } }), "utf8");
-		writeFileSync(join(root, ".pi", "extensions", "pi-gate", "config.json"), JSON.stringify({ subagent: { enabled: false } }), "utf8");
+		mkdirSync(join(root, "extensions", "pi-disciple"), { recursive: true });
+		mkdirSync(join(root, ".pi", "extensions", "pi-disciple"), { recursive: true });
+		writeFileSync(join(root, "extensions", "pi-disciple", "config.json"), JSON.stringify({ subagent: { enabled: true } }), "utf8");
+		writeFileSync(join(root, ".pi", "extensions", "pi-disciple", "config.json"), JSON.stringify({ subagent: { enabled: false } }), "utf8");
 		expect(loadSubagentLimits(root, false, root).limits.enabled).toBe(true);
 		expect(loadSubagentLimits(root, true, root).limits.enabled).toBe(false);
 	});
 
 	it("rejects a non-boolean enabled value", () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-sub-enabled-"));
-		mkdirSync(join(root, "extensions", "pi-gate"), { recursive: true });
-		writeFileSync(join(root, "extensions", "pi-gate", "config.json"), JSON.stringify({ subagent: { enabled: "no" } }), "utf8");
+		mkdirSync(join(root, "extensions", "pi-disciple"), { recursive: true });
+		writeFileSync(join(root, "extensions", "pi-disciple", "config.json"), JSON.stringify({ subagent: { enabled: "no" } }), "utf8");
 		const loaded = loadSubagentLimits(root, false, root);
 		expect(loaded.limits.enabled).toBe(true);
 		expect(loaded.errors.join(" ")).toMatch(/enabled must be a boolean/);

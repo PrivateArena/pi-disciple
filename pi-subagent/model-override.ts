@@ -2,7 +2,7 @@
  * Config-driven child model (plan step 10's "config overrides" slot, model side).
  *
  * The child's model is inherited from the parent unless the human pins one with
- * `subagent.model` in `extensions/pi-gate/config.json`. The reference is human-authored, never
+ * `subagent.model` in `extensions/pi-disciple/config.json`. The reference is human-authored, never
  * model-authored, so it cannot be steered into a cheaper or more powerful model by prompt injection —
  * which is why `subagent(role, task)` still takes no model parameter (see index.ts header).
  *

@@ -30,7 +30,7 @@ export interface LogEntry {
 	floors?: string[];
 }
 
-/** `<agentDir>/extensions/pi-gate/logs/<name>` — one spelling for both artefacts the gate writes. */
+/** `<agentDir>/extensions/pi-disciple/logs/<name>` — one spelling for both artefacts the gate writes. */
 function gateLogFile(name: string): string {
 	return join(getAgentDir(), "extensions", EXTENSION_CONFIG_SLUG, "logs", name);
 }

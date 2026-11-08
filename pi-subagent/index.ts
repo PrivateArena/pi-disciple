@@ -21,7 +21,7 @@ import type { CeilingReport } from "./budget/ceiling-vocabulary.ts";
 import { childSessionDir } from "./transcript/paths.ts";
 import { pruneTranscripts } from "./transcript/retention.ts";
 import { createCeilingBroker } from "./ceiling.ts";
-import { loadSubagentLimits } from "./config-file.ts";
+import { loadSubagentLimits, EXTENSION_CONFIG_SLUG } from "./config-file.ts";
 import { resolveChildModel } from "./model-override.ts";
 import { resolveChildRequest, resolveModelPin } from "./child-request.ts";
 import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type SubagentCommandArg } from "./config-view.ts";
@@ -340,7 +340,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 						effectiveRoles: loaded.effectiveRoles,
 						roleOrigins: loaded.roleOrigins,
 						files: loaded.files,
-						defaultConfigFile: join(getAgentDir(), "extensions", "pi-gate", "config.json"),
+						defaultConfigFile: join(getAgentDir(), "extensions", EXTENSION_CONFIG_SLUG, "config.json"),
 						errors: loaded.errors,
 						cwd: ctx.cwd,
 						trusted: ctx.isProjectTrusted(),

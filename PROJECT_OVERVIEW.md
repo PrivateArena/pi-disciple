@@ -21,6 +21,7 @@ child tool call ────> shim.execute() ──> parent ExtensionToolContext
 ```
 pi-disciple/
   package.json  tsconfig.json   pi.extensions = [pi-gate/index.ts, pi-subagent/index.ts]; ES2022/NodeNext, strict, noEmit, erasableSyntaxOnly
+  config.json   the shipped default config both extensions seed from and document — one file at the repo root, because it carries both `gate` and `subagent`
   pi-gate/
     index.ts  handle.ts  inspect.ts  network.ts  prompt.ts  grants.ts  log.ts  config-file.ts  ordered-unique.ts
     schema.ts  match.ts  policy.ts  guard.ts        facades: re-export the sub-packages, no logic
@@ -51,8 +52,8 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (
 | pi-gate/network.ts | Egress facts: parse a host out of any token spelling, decide loopback/metadata, match domain rules. | ~390 | `parseNetworkTarget(token): NetworkTarget \| undefined`; `networkTargets(seg, cwd): string[]`; `hostDomainMatches(pattern, host): boolean`; `canonicalIpv4(value): string \| undefined`; `isMetadataEndpoint(host): boolean` |
 | pi-gate/prompt.ts | The human half: dialog title/options, grant summary text, block reasons, and `ask()`. | ~177 | `ask(ctx, decision: Decision, options: {cwd, signal?, timeoutMs?, sub?, io?, note?}): Promise<AskResult>`; `blockReason(decision, kind: "policy_deny"\|"hard_deny"\|"user_abort"\|"no_ui", instruction?): string`; `neededOffers(decision): GrantOffer[]`; `ruleLine(decision): string` |
 | pi-gate/grants.ts | Session-scoped grants array + persisted grant files under an in-process file lock. | ~182 | `createSessionGrants(): GrantRule[]`; `appendSession(grants, offer): GrantRule[]`; `appendPersisted(offer, scope: "global"\|"project", cwd): Promise<WriteResult>`; `resetPersisted(kind, cwd): Promise<WriteResult>`; `hasSessionGrant(grants, surface, value): GrantRule \| undefined` |
-| pi-gate/config-file.ts | Read/seed `<scope>/extensions/pi-gate/config.json` with JSONC tolerance and mtime probe. | ~124 | `readConfigFile(file): ConfigFileRead`; `getGlobalConfigFile(agentDir?): string`; `getProjectConfigFile(cwd): string`; `writeDefaultConfig(file, text): {created, error?}`; `stripJsonComments(text): string` |
-| pi-gate/log.ts | Redacted JSONL review + guard logs under `extensions/pi-gate/logs/`. | ~89 | `reviewLog(path, entry: LogEntry): Promise<void>`; `guardLog(path, entry: GuardLogEntry): Promise<void>`; `redact(text): string`; `defaultLogPath(): string` |
+| pi-gate/config-file.ts | Read/seed `<scope>/extensions/pi-disciple/config.json` (slug `EXTENSION_CONFIG_SLUG`) with JSONC tolerance and mtime probe. | ~124 | `readConfigFile(file): ConfigFileRead`; `getGlobalConfigFile(agentDir?): string`; `getProjectConfigFile(cwd): string`; `writeDefaultConfig(file, text): {created, error?}`; `stripJsonComments(text): string` |
+| pi-gate/log.ts | Redacted JSONL review + guard logs under `extensions/pi-disciple/logs/`. | ~89 | `reviewLog(path, entry: LogEntry): Promise<void>`; `guardLog(path, entry: GuardLogEntry): Promise<void>`; `redact(text): string`; `defaultLogPath(): string` |
 | pi-gate/ordered-unique.ts | First-seen-order dedupe list the fact collectors share (a `Set` would lose the order). | ~15 | `pushUnique<T>(list: T[], value: T): boolean` |
 | pi-gate/schema.ts | Facade over `config-contract/` — the **only** module pi-subagent may import (type-only). | ~19 | no exports declared; `export * from "./config-contract/*"` |
 | pi-gate/policy.ts | Facade over `policy-resolution/`, keeps module-level re-exports. | ~32 | no exports declared; `export * from "./policy-resolution/*"` |
@@ -132,7 +133,8 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (
 
 | File / Module | Role | LOC | Key Exports |
 |---|---|---|---|
-| package.json | Workspace root: `pi.extensions`, peer deps on the pi runtime, vitest/tsc scripts. | 33 | n/a |
+| package.json | Workspace root: `pi.extensions`, peer deps on the pi runtime, vitest/tsc scripts; ships the root `config.json`. | 33 | n/a |
+| config.json | The shipped default document (both `gate` and `subagent` sections), seeded to `<agentDir>/extensions/pi-disciple/config.json` on a clean install by `pi-gate/index.ts`. | ~173 | n/a |
 | tsconfig.json | strict, `noEmit`, `verbatimModuleSyntax`, `erasableSyntaxOnly` — type-only cross-extension imports are provably erased. | 20 | n/a |
 | verification/rpc-gate-dialog.mjs | Drive `pi --mode rpc` with pi-gate loaded; assert the real dialog and its answers. | ~98 | script |
 | verification/rpc-subagent-gate.mjs | Assert a child's tool call raises the gate dialog **in the parent**. | ~60 | script |

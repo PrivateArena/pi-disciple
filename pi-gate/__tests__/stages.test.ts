@@ -216,7 +216,7 @@ describe("the two dialogs, end to end", () => {
 describe("protected paths stay narrow but grantable", () => {
 	it("offers the exact command, never `cat *`, for a read of the gate's own config", () => {
 		const policy = setup(WHITELISTED_CLIS);
-		const guarded = `${fixture!.agentDir}/extensions/pi-gate/config.json`;
+		const guarded = `${fixture!.agentDir}/extensions/pi-disciple/config.json`;
 		const decision = decisionFor(policy, "bash", { command: `cat ${guarded} 2>&1 | head -200` });
 		expect(decision.stages[0]!.grant!.patterns).toEqual([`cat ${guarded} 2>&1`, `head -200`]);
 
@@ -232,7 +232,7 @@ describe("protected paths stay narrow but grantable", () => {
 
 	it("does not let that read grant reach writing the same file", () => {
 		const policy = setup(WHITELISTED_CLIS);
-		const guarded = `${fixture!.agentDir}/extensions/pi-gate/config.json`;
+		const guarded = `${fixture!.agentDir}/extensions/pi-disciple/config.json`;
 		const read = decisionFor(policy, "bash", { command: `cat ${guarded}` });
 		const granted = withSessionGrants(policy, toGrantRules(read.grant!));
 		const write = decisionFor(granted, "edit", { path: guarded, oldText: "a", newText: "b" });

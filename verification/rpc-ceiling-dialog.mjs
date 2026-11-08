@@ -6,7 +6,7 @@
  *   node verification/rpc-ceiling-dialog.mjs ["Extend by 20 turns / 5 min" | "Reject" | "no answer"] [project dir]
  *
  * It builds its own scratch agent dir (credentials copied, config written) so the run cannot touch your real
- * `~/.pi/agent/extensions/pi-gate/config.json` or your grants, and so the tiny `explore` budget needed to reach
+ * `~/.pi/agent/extensions/pi-disciple/config.json` or your grants, and so the tiny `explore` budget needed to reach
  * a ceiling in seconds is nobody's config but this file's. The gate is set to allow everything: the dialog
  * under test is the ceiling's, not the gate's.
  *

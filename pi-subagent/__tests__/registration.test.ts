@@ -66,8 +66,8 @@ const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 function configDir(config: Record<string, unknown>): string {
 	const agentDir = mkdtempSync(join(tmpdir(), "pi-sub-reg-"));
-	mkdirSync(join(agentDir, "extensions", "pi-gate"), { recursive: true });
-	writeFileSync(join(agentDir, "extensions", "pi-gate", "config.json"), JSON.stringify(config), "utf8");
+	mkdirSync(join(agentDir, "extensions", "pi-disciple"), { recursive: true });
+	writeFileSync(join(agentDir, "extensions", "pi-disciple", "config.json"), JSON.stringify(config), "utf8");
 	agentDirs.push(agentDir);
 	process.env.PI_CODING_AGENT_DIR = agentDir; // the handler calls loadSubagentLimits() without an explicit dir
 	return agentDir;

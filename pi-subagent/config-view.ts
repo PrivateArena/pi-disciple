@@ -42,7 +42,7 @@ export interface ConfigViewInput {
 	/** Which config file defined or edited each role; missing = `roles.ts`. */
 	roleOrigins?: Record<string, string>;
 	files: string[];
-	/** Where the section would live if no file had it yet: `<agentDir>/extensions/pi-gate/config.json`. */
+	/** Where the section would live if no file had it yet: `<agentDir>/extensions/pi-disciple/config.json`. */
 	defaultConfigFile: string;
 	errors: string[];
 	cwd: string;

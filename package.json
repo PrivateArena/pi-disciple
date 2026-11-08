@@ -28,6 +28,7 @@
     "extensions": ["pi-gate/index.ts", "pi-subagent/index.ts"]
   },
   "files": [
+    "config.json",
     "pi-gate",
     "pi-subagent",
     "!**/__tests__"

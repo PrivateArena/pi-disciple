@@ -70,7 +70,7 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 	},
 	/**
 	 * Empty by design (plan step C4): a deny class nobody is born with. The key is documented in
-	 * `pi-gate/config.json` and is **config-only** — the dialog never writes it, and neither does
+	 * `config.json` (repo root) and is **config-only** — the dialog never writes it, and neither does
 	 * `grants.ts` — because a rule that blocks past "allow everything" has to be human-authored.
 	 */
 	hardDeny: [],

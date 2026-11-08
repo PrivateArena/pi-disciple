@@ -10,11 +10,11 @@ function dir(): string {
 
 describe("config file locations", () => {
 	it("puts the global file under the agent dir", () => {
-		expect(getGlobalConfigFile("/agent")).toBe(join("/agent", "extensions", "pi-gate", "config.json"));
+		expect(getGlobalConfigFile("/agent")).toBe(join("/agent", "extensions", "pi-disciple", "config.json"));
 	});
 
 	it("puts the project file under .pi", () => {
-		expect(getProjectConfigFile("/w")).toBe(join("/w", ".pi", "extensions", "pi-gate", "config.json"));
+		expect(getProjectConfigFile("/w")).toBe(join("/w", ".pi", "extensions", "pi-disciple", "config.json"));
 	});
 });
 
@@ -43,7 +43,7 @@ describe("readConfigFile", () => {
 describe("writeDefaultConfig", () => {
 	it("seeds a missing file and leaves an existing one alone", () => {
 		const root = dir();
-		const missing = join(root, "extensions", "pi-gate", "config.json");
+		const missing = join(root, "extensions", "pi-disciple", "config.json");
 		expect(writeDefaultConfig(missing, '{"gate":{}}').created).toBe(true);
 		expect(readFileSync(missing, "utf8")).toContain(String.raw`{"gate":{}}`);
 

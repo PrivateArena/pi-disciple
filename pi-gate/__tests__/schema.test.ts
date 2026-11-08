@@ -207,7 +207,7 @@ function stripDocs<T>(value: T): T {
 
 describe("defaults", () => {
 	it("matches the shipped config.json, whose placeholders change nothing", () => {
-		const raw = JSON.parse(readFileSync(fileURLToPath(new URL("../config.json", import.meta.url)), "utf8"));
+		const raw = JSON.parse(readFileSync(fileURLToPath(new URL("../../config.json", import.meta.url)), "utf8"));
 		const shipped = stripDocs(raw);
 		expect(shipped.gate.permission).toEqual(DEFAULT_GATE_CONFIG.permission);
 		expect(shipped.gate.enabled).toBe(DEFAULT_GATE_CONFIG.enabled);

@@ -147,7 +147,7 @@ describe("extension wiring keeps the switch it was given", () => {
 
 		for (const [id, command] of [
 			["c2", `cat ${fixture?.agentDir}/settings.json`],
-			["c3", `echo x > ${fixture?.agentDir}/extensions/pi-gate/config.json`],
+			["c3", `echo x > ${fixture?.agentDir}/extensions/pi-disciple/config.json`],
 			["c4", `echo x > ${fixture?.cwd}/.git/hooks/pre-commit`],
 			["c5", "cat /etc/hosts"],
 		] as const) {
@@ -169,7 +169,7 @@ describe("extension wiring keeps the switch it was given", () => {
 		expect(log.titles).toHaveLength(1);
 
 		const calls: Array<[string, string]> = [
-			["p1", `cat ${fixture?.agentDir}/extensions/pi-gate/config.json`],
+			["p1", `cat ${fixture?.agentDir}/extensions/pi-disciple/config.json`],
 			["p2", `sed -n 1,20p ${fixture?.agentDir}/git/github.com/PrivateArena/pi-disciple/package.json`],
 			["p3", "git status"],
 			["p4", `find ${fixture?.agentDir}/extensions -maxdepth 2`],

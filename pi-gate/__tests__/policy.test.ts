@@ -79,7 +79,7 @@ describe("layering and precedence", () => {
 describe("floors", () => {
 	it("escalates an allow on the gate's own config to ask", () => {
 		const { policy, cwd, agentDir } = setup({ "*": "allow", path: { "*": "allow" } });
-		const configFile = `${agentDir}/extensions/pi-gate/config.json`;
+		const configFile = `${agentDir}/extensions/pi-disciple/config.json`;
 		expect(actionOf(policy, cwd, "write", { path: configFile, content: "{}" })).toBe("ask");
 	});
 
@@ -263,7 +263,7 @@ describe("allow-everything mode", () => {
 		// hard ones asking. It is gone, so these decisions must still carry their labels and must not be
 		// splittable into "silenceable" and "not silenceable" — the pass/fail decision lives in `handle.ts`.
 		const { policy, cwd, agentDir } = setup({ "*": "allow", path: { "*": "allow" } });
-		const gateConfig = evaluate(extract("write", { path: `${agentDir}/extensions/pi-gate/config.json` }, cwd, { callId: "t" }), policy);
+		const gateConfig = evaluate(extract("write", { path: `${agentDir}/extensions/pi-disciple/config.json` }, cwd, { callId: "t" }), policy);
 		expect(gateConfig.action).toBe("ask");
 		expect(gateConfig.floors).toContain("protected_path");
 
@@ -277,7 +277,7 @@ describe("allow-everything mode", () => {
 		for (const [toolName, input] of [
 			["bash", { command: "cat /etc/hosts" }],
 			["bash", { command: "bash -c 'rm -rf /'" }],
-			["write", { path: `${agentDir}/extensions/pi-gate/config.json` }],
+			["write", { path: `${agentDir}/extensions/pi-disciple/config.json` }],
 			["edit", { path: `${agentDir}/extensions/pi-gate/policy.ts` }],
 		] as const) {
 			const decision = evaluate(extract(toolName, input, cwd, { callId: "t" }), policy);
@@ -306,7 +306,7 @@ describe("allow-everything mode", () => {
 
 	it("still distinguishes a protected read from a protected write, for the log and the title", () => {
 		const { policy, cwd } = setup({ "*": "allow", path: { "*": "allow" } });
-		const gateConfig = `${cwd}/.pi/extensions/pi-gate/config.json`;
+		const gateConfig = `${cwd}/.pi/extensions/pi-disciple/config.json`;
 		const read = evaluate(extract("read", { path: gateConfig }, cwd, { callId: "t" }), policy);
 		expect(read.action).toBe("ask");
 		expect(read.floors).toEqual(["protected_read"]);

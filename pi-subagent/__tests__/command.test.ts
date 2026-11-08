@@ -41,9 +41,9 @@ function stubPi(): Stub {
 function fixture(config: Record<string, unknown>): { cwd: string; agentDir: string } {
 	const root = mkdtempSync(join(tmpdir(), "pi-sub-cmd-"));
 	const cwd = join(root, "repo");
-	mkdirSync(join(root, "extensions", "pi-gate"), { recursive: true });
+	mkdirSync(join(root, "extensions", "pi-disciple"), { recursive: true });
 	mkdirSync(cwd, { recursive: true });
-	writeFileSync(join(root, "extensions", "pi-gate", "config.json"), JSON.stringify(config), "utf8");
+	writeFileSync(join(root, "extensions", "pi-disciple", "config.json"), JSON.stringify(config), "utf8");
 	process.env.PI_CODING_AGENT_DIR = root;
 	return { cwd, agentDir: root };
 }
@@ -92,7 +92,7 @@ describe("/subagentc", () => {
 		expect(body).toContain("child model: kilo/kilo-auto/free (pinned by subagent.model)");
 		expect(body).toContain("maxTurns");
 		expect(body).toContain(ROLES_SECTION_HEADER);
-		expect(body).toContain(join(where.agentDir, "extensions", "pi-gate", "config.json"));
+		expect(body).toContain(join(where.agentDir, "extensions", "pi-disciple", "config.json"));
 	});
 
 	it("routes each section to its own view", async () => {

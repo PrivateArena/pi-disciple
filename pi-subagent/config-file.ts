@@ -35,6 +35,9 @@ export { MODEL_INHERIT_WORDS } from "./config-contract/model-pin.ts";
 export { ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "./config-contract/role-names.ts";
 export { THINKING_LEVEL_WORDS } from "./config-contract/sampling-bag.ts";
 
+/** Mirrors `EXTENSION_CONFIG_SLUG` in `pi-gate/config-file.ts`; the directory is named for the package, not for one extension. */
+export const EXTENSION_CONFIG_SLUG = "pi-disciple";
+
 export const DEFAULT_LIMITS: SubagentLimits = {
 	enabled: true,
 	defaultRole: DEFAULT_ROLE_NAME,
@@ -73,8 +76,8 @@ const KEYS: readonly (keyof SubagentLimits)[] = ["maxTurns", "timeoutMinutes", "
 const cache = new Map<string, { stamp: string; loaded: LoadedLimits }>();
 
 export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: string = getAgentDir()): LoadedLimits {
-	const paths = [join(agentDir, "extensions", "pi-gate", "config.json")];
-	if (trusted) paths.push(join(cwd, CONFIG_DIR_NAME, "extensions", "pi-gate", "config.json"));
+	const paths = [join(agentDir, "extensions", EXTENSION_CONFIG_SLUG, "config.json")];
+	if (trusted) paths.push(join(cwd, CONFIG_DIR_NAME, "extensions", EXTENSION_CONFIG_SLUG, "config.json"));
 	const stamp = paths.map((file) => `${file}=${safeMtime(file)}`).join("|");
 	const hit = cache.get("limits");
 	if (hit && hit.stamp === stamp) return hit.loaded;
