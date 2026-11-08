@@ -12,17 +12,16 @@
  */
 
 import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import type { Decision, GrantOffer } from "./policy.ts";
-import { ALLOW_ALL_WINDOW_MS } from "./policy.ts";
+import { ALLOW_ALL_WINDOW_MINUTES } from "./policy-resolution/override-mode.ts";
+import type { Decision, GrantOffer } from "./policy-resolution/call-decision.ts";
 import { getGlobalConfigFile } from "./config-file.ts";
-import { codeSpan, displaySnippet, shorten } from "./match.ts";
+import { codeSpan, displaySnippet, shorten } from "./render/text.ts";
 
 export type Choice = "once" | "allow_reason" | "session" | "project" | "global" | "abort" | "abort_reason" | "all_session" | "all_timed";
 
 /** Index-aligned with {@link optionLabels}. */
 export const CHOICES: readonly Choice[] = ["once", "allow_reason", "session", "project", "global", "abort", "abort_reason", "all_session", "all_timed"];
 
-const ALLOW_ALL_WINDOW_MINUTES = Math.round(ALLOW_ALL_WINDOW_MS / 60_000);
 
 /**
  * Option labels stay single-line (displaySnippet) and long enough to identify the rule; the whole rule

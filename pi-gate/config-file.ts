@@ -22,6 +22,9 @@ export function getProjectConfigFile(cwd: string): string {
 	return join(cwd, CONFIG_DIR_NAME, "extensions", EXTENSION_CONFIG_SLUG, "config.json");
 }
 
+/** The one phrase a missing file is reported with: three readers sniff it, so it gets one spelling. */
+export const MISSING_FILE_MARK = "does not exist";
+
 export interface ConfigFileRead {
 	file: string;
 	/** Parsed document, or `undefined` when the file is missing or unparseable. */
@@ -35,7 +38,7 @@ export function readConfigFile(file: string): ConfigFileRead {
 	let mtimeMs = 0;
 	let text: string;
 	try {
-		if (!existsSync(file)) return { file, json: undefined, mtimeMs: 0, error: `${file} does not exist` };
+		if (!existsSync(file)) return { file, json: undefined, mtimeMs: 0, error: `${file} ${MISSING_FILE_MARK}` };
 		mtimeMs = statSync(file).mtimeMs;
 		text = readFileSync(file, "utf8");
 	} catch (error) {
@@ -78,6 +81,11 @@ export function writeDefaultConfig(file: string, text: string): { created: boole
 		if (code === "EEXIST") return { created: false };
 		return { created: false, error: (error as Error).message };
 	}
+}
+
+/** True when a read failed only because the file is not there — the case every caller treats as "nothing written". */
+export function isMissingFileRead(read: ConfigFileRead): boolean {
+	return read.error !== undefined && read.error.includes(MISSING_FILE_MARK);
 }
 
 /** Remove `//` and block comments outside string literals. */

@@ -21,19 +21,62 @@ nor collapse 256 sequential calls into one unreviewable batch.
 
 ## Module map
 
+Four modules of the gate are facades over a sub-package: `schema.ts`, `match.ts`, `policy.ts` and
+`guard.ts` re-export every symbol they used to declare, so the tests and `pi-subagent` keep importing the
+old paths while the implementations live one-per-concern below them. Nothing in a sub-package imports its
+facade, so there is no cycle; the facade is also where a module's own re-exports (`NETWORK_SURFACE`,
+`severity`) still live.
+
 ```
 pi-gate/
-  schema.ts        config parsing + defaults (GateConfig, SubagentLimits, GrantRule)      step 3
+  schema.ts        FACADE over config-contract/ — the one public surface pi-subagent may import  step 3
+  config-contract/
+    action-vocabulary.ts  Action/Scope/PermissionEntry/GrantRule/HardDenyRule, isDocKey, isRecord   (leaf)
+    gate-section.ts       GateConfig, DEFAULT_GATE_CONFIG, parseGateConfig, hardDeny + grants lists
+    guard-section.ts      GuardConfig, DEFAULT_GUARD_CONFIG, parseGuardConfig, mergeGuardConfigs
+    role-vocabulary.ts    role names/ids, thinking levels, RoleConfig, the role ceilings
+    sampling-vocabulary.ts SamplingConfig + the .sampling / .samplingByThinkingLevel parsers
+    subagent-section.ts   SubagentLimits, the model pin, parseRolesConfig, parseSubagentConfig
+    tolerant-parse.ts     the readBoolean/readNumber/checkedPattern/trimmed probes every parser shares
   config-file.ts   read/seed `<scope>/extensions/pi-gate/config.json`, JSONC tolerance    step 19
-  match.ts         pattern matching (glob + `re:`), shell segmentation, path spellings, folder grants, protected globs   step 4
+  match.ts         FACADE over pattern/ + render/                                         step 4
+  pattern/
+    regex-dialect.ts      the `re:` dialect + the per-round match budget (leaf; config-contract sits on it)
+    glob.ts               wildcardMatch + `~`/`$HOME` expansion
+    rule-shape.ts         isExactRule, isScopedRule — what a rule's shape says about it
+    path-spellings.ts     pathSpellings, isUnder, pathPatternMatches, directoryPattern
+    protected-locations.ts the protected-path and external-directory floors
+    shell-segmentation.ts segmentCommands, peelEnvPrefix, tokenize, hasUnparsedExpansion
+    shell-commands.ts     wrappers, interpreters, arity, normaliseCommand, suggestBashPattern
+    compound-patterns.ts  chained (`&&`/`;`) patterns matched segment by segment
+  render/text.ts   codeSpan, shorten, displaySnippet — the strings the dialog and footer show
+  ordered-unique.ts the first-seen-order list every fact collector shares (a Set would lose the order)  new
   network.ts       the egress facts: which host a call can reach, and what a domain rule means   new
   inspect.ts       Facts: surfaces + paths + call ids extracted from a tool call           step 5
-  policy.ts        layered Policy (defaults→global→project→grants→session), floors, deny   steps 6, 7
+  policy.ts        FACADE over policy-resolution/                                    steps 6, 7
+  policy-resolution/
+    call-decision.ts      Rule, Policy, FactCheck, GrantOffer, Stage, Decision, the surface taxonomy
+    override-mode.ts      "allow everything" mode + matchHardDeny, the layer above the ladder
+    policy-loading.ts     the mtime cache, loadPolicy, buildPolicy, the fallback layer, withSessionGrants
+    surface-matching.ts   patternMatches / matchRule / matchFact — which rule wins for one value
+    fact-evaluation.ts    evaluate, the stages, the floors, decide — the correctness core, kept whole
+    grant-offers.ts       what each dialog click actually writes
   grants.ts        session (memory) + persisted (config file) grants, review log helpers   step 8
   prompt.ts        the 9-choice dialog → AskResult, titles, block text                     step 9
   log.ts           review.jsonl + redact()                                                step 18
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
-  guard.ts         the output guard: a tool call the model wrote as text, caught at turn_end    new
+  guard.ts         FACADE over output-guard/                                                  new
+  output-guard/
+    guard-limits.ts       the budgets, ids and message type every other module reads
+    tag-shapes.ts         the call-dialect tag vocabulary + the tag scanner
+    message-scan.ts       one pass per message: code stripped, tags scanned
+    guard-rule.ts         Rule (a detector) and GuardHit (what it found)
+    detectors/            tag-rules · json-rules · protocol-tokens — mutually independent detectors
+    rule-registry.ts      BUILTIN_RULES, builtinRuleIds, how a config-written pattern is matched
+    detection.ts          detectMalformedCall: the veto, the thinking tail, the one hit to report
+    reminder-copy.ts      reminderText + guardNotice
+    session-budget.ts     what was already answered, how much rope is left, the two resets
+    turn-end-pipeline.ts  guardTurnEnd: is this the turn to read, and what `continue` costs
   index.ts         wiring: flags, footer, tool visibility, /gatec                          steps 8, 9
 pi-subagent/
   roles.ts         explore | general-purpose | review + applyRoleConfig: config edits them, new ones join the table    step 10

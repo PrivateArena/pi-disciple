@@ -15,24 +15,21 @@
 
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { isFullyDenied, loadPolicy, type Policy, recomputeActive, resolveConfigPaths, withSessionGrants } from "./policy.ts";
+import { isFullyDenied, recomputeActive } from "./policy-resolution/fact-evaluation.ts";
+import type { Policy } from "./policy-resolution/call-decision.ts";
+import { loadPolicy, resolveConfigPaths, withSessionGrants } from "./policy-resolution/policy-loading.ts";
 import { writeDefaultConfig } from "./config-file.ts";
 import { clearSession, createSessionGrants, resetPersisted, type PersistedScope } from "./grants.ts";
 import { handleToolCall, attachNote, type GateState, type PendingNotes } from "./handle.ts";
-import {
-	activeRuleIds,
-	builtinRuleIds,
-	createGuardBudget,
-	effectiveGuardAction,
-	guardTurnEnd,
-	refillGuardBudget,
-	resetGuardCounters,
-	resetGuardSession,
-	type GuardTurnState,
-} from "./guard.ts";
-import { ALLOW_ALL_WINDOW_MS, type AllowAll } from "./policy.ts";
-import { DEFAULT_GATE_CONFIG, GUARD_BUILTIN_RULE_IDS, type GrantRule } from "./schema.ts";
-import { regexPatternTimeouts } from "./match.ts";
+import { activeRuleIds } from "./output-guard/detection.ts";
+import { builtinRuleIds } from "./output-guard/rule-registry.ts";
+import { createGuardBudget, refillGuardBudget, resetGuardCounters, resetGuardSession } from "./output-guard/session-budget.ts";
+import { effectiveGuardAction, guardTurnEnd, type GuardTurnState } from "./output-guard/turn-end-pipeline.ts";
+import { ALLOW_ALL_WINDOW_MINUTES, ALLOW_ALL_WINDOW_MS, type AllowAll } from "./policy-resolution/override-mode.ts";
+import { DEFAULT_GATE_CONFIG } from "./config-contract/gate-section.ts";
+import { GUARD_BUILTIN_RULE_IDS } from "./config-contract/guard-section.ts";
+import { type GrantRule } from "./config-contract/action-vocabulary.ts";
+import { regexPatternTimeouts } from "./pattern/regex-dialect.ts";
 
 export default function piGate(pi: ExtensionAPI) {
 	let policy: Policy | undefined;
@@ -112,7 +109,7 @@ export default function piGate(pi: ExtensionAPI) {
 				allowAll = undefined;
 				allowAllTimer = undefined;
 				footer(ctx);
-				ctx.ui.notify(`[gate] allow-everything window (${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} min) expired — approvals are back on`, "info");
+				ctx.ui.notify(`[gate] allow-everything window (${ALLOW_ALL_WINDOW_MINUTES} min) expired — approvals are back on`, "info");
 			}, remaining);
 		}
 		footer(ctx);
@@ -302,7 +299,7 @@ export default function piGate(pi: ExtensionAPI) {
 				ctx.ui.notify(
 					next.until === null
 						? "[gate] allow-everything on for this session — nothing will ask again, protected paths and pi's own config included"
-						: `[gate] allow-everything on for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — nothing will ask again, protected paths and pi's own config included`,
+						: `[gate] allow-everything on for ${ALLOW_ALL_WINDOW_MINUTES} minutes — nothing will ask again, protected paths and pi's own config included`,
 					"warning",
 				);
 				return;

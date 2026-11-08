@@ -9,7 +9,9 @@
  * from {@link networkTargets}, the verdict from `policy.ts`.
  */
 
-import { tokenize, wildcardMatch } from "./match.ts";
+import { wildcardMatch } from "./pattern/glob.ts";
+import { tokenize } from "./pattern/shell-segmentation.ts";
+import { pushUnique } from "./ordered-unique.ts";
 
 /**
  * The surface name the egress facts are written on. Spelled here, in the module that produces those
@@ -25,8 +27,6 @@ export const NETWORK_SURFACE = "network";
  * cares about and the gate must treat an `s3://` bucket exactly like an `https://` one.
  */
 const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
-
-
 
 /** scp / rsync-style remote: `[user@]host:path`. The userinfo colon is excluded so a URL is never read as one. */
 const SCP_TARGET_RE = /^(?:[^/@:]+(?::[^@/]*)?)@(?<host>[A-Za-z0-9._~\-]+|\[[0-9A-Fa-f:.]+\]):(?<tail>[^\s]*)$/;
@@ -268,7 +268,7 @@ export function networkTargets(seg: string, cwd: string): string[] {
 	const add = (token: string): void => {
 		const target = parseNetworkTarget(token);
 		if (!target || isLoopbackHost(target.host)) return;
-		if (!out.includes(target.host)) out.push(target.host);
+		pushUnique(out, target.host);
 	};
 	for (const token of tokenize(seg)) {
 		if (token === "--") continue;
@@ -289,7 +289,7 @@ export function networkTargets(seg: string, cwd: string): string[] {
 		// {@link parseNetworkTarget}, which demands the path or port evidence a bare host does not carry.
 		const target = parseNetworkTarget(`http://${host}`);
 		if (!target || isLoopbackHost(target.host)) continue;
-		if (!out.includes(target.host)) out.push(target.host);
+		pushUnique(out, target.host);
 	}
 	return out;
 }

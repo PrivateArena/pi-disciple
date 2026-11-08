@@ -14,23 +14,21 @@
 import type { ExtensionContext, ToolCallEvent, ToolCallEventResult, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { extract, type Facts } from "./inspect.ts";
 import {
+	ALLOW_ALL_WINDOW_MINUTES,
 	ALLOW_ALL_WINDOW_MS,
 	allowAllActive,
-	evaluate,
 	matchHardDeny,
 	type AllowAll,
-	type Decision,
-	type HardDenyRule,
-	type Policy,
-	type Stage,
-	type StageDecision,
-	withSessionGrants,
-} from "./policy.ts";
+} from "./policy-resolution/override-mode.ts";
+import { evaluate } from "./policy-resolution/fact-evaluation.ts";
+import { withSessionGrants } from "./policy-resolution/policy-loading.ts";
+import type { Decision, Policy, Stage, StageDecision } from "./policy-resolution/call-decision.ts";
+import type { HardDenyRule } from "./config-contract/action-vocabulary.ts";
 import { appendPersisted, appendSession, toGrantRules, type PersistedScope, type WriteResult } from "./grants.ts";
 import { ask, blockReason, type AskResult } from "./prompt.ts";
 import { defaultLogPath, redact, reviewLog } from "./log.ts";
-import { displaySnippet } from "./match.ts";
-import type { GrantRule } from "./schema.ts";
+import { displaySnippet } from "./render/text.ts";
+import type { GrantRule } from "./config-contract/action-vocabulary.ts";
 
 export interface GateState {
 	policy: Policy;
@@ -216,7 +214,7 @@ export async function handleToolCall(
 					return;
 				case "all_timed":
 					setAllowAll(state, { until: now() + ALLOW_ALL_WINDOW_MS });
-					ctx.ui.notify(`[gate] allow-everything is ON for ${Math.round(ALLOW_ALL_WINDOW_MS / 60_000)} minutes — nothing will ask again, /gatec allow off stops it sooner`, "warning");
+					ctx.ui.notify(`[gate] allow-everything is ON for ${ALLOW_ALL_WINDOW_MINUTES} minutes — nothing will ask again, /gatec allow off stops it sooner`, "warning");
 					return;
 				case "allow_reason":
 					// The call runs; the note reaches the agent on this call's tool result.

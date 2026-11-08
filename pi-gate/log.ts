@@ -8,7 +8,8 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { Scope } from "./schema.ts";
+import type { Scope } from "./config-contract/action-vocabulary.ts";
+import { EXTENSION_CONFIG_SLUG } from "./config-file.ts";
 
 export interface LogEntry {
 	ts: string;
@@ -29,8 +30,13 @@ export interface LogEntry {
 	floors?: string[];
 }
 
+/** `<agentDir>/extensions/pi-gate/logs/<name>` — one spelling for both artefacts the gate writes. */
+function gateLogFile(name: string): string {
+	return join(getAgentDir(), "extensions", EXTENSION_CONFIG_SLUG, "logs", name);
+}
+
 export function defaultLogPath(): string {
-	return join(getAgentDir(), "extensions", "pi-gate", "logs", "review.jsonl");
+	return gateLogFile("review.jsonl");
 }
 
 /**
@@ -38,7 +44,7 @@ export function defaultLogPath(): string {
  * permission decision and a human reading one log should not have to filter the other out of it.
  */
 export function defaultGuardLogPath(): string {
-	return join(getAgentDir(), "extensions", "pi-gate", "logs", "guard.jsonl");
+	return gateLogFile("guard.jsonl");
 }
 
 export interface GuardLogEntry {

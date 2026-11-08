@@ -6,12 +6,12 @@
  * re-read-then-merge and a temp-file rename, so two `pi` processes cannot lose writes (FM-9).
  */
 
+import { isAction, isRecord, type Action, type GrantRule } from "./config-contract/action-vocabulary.ts";
 import { rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { getGlobalConfigFile, getProjectConfigFile, readConfigFile } from "./config-file.ts";
-import type { GrantRule, Action } from "./schema.ts";
-import type { GrantOffer } from "./policy.ts";
+import type { GrantOffer } from "./policy-resolution/call-decision.ts";
 
 export type PersistedScope = "global" | "project";
 
@@ -166,7 +166,7 @@ function containsAll(actual: readonly GrantRule[], expected: readonly GrantRule[
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+	return isRecord(value) ? value : {};
 }
 
 function normaliseGrants(value: unknown): GrantRule[] {
@@ -175,7 +175,7 @@ function normaliseGrants(value: unknown): GrantRule[] {
 	for (const item of value) {
 		const record = asRecord(item);
 		if (typeof record.surface !== "string" || typeof record.pattern !== "string") continue;
-		if (record.action !== "allow" && record.action !== "ask" && record.action !== "deny") continue;
+		if (!isAction(record.action)) continue;
 		out.push({ surface: record.surface, pattern: record.pattern, action: record.action });
 	}
 	return out;

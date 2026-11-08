@@ -13,7 +13,11 @@
  * surface is data, and adding a field per surface would make every new question a schema change.
  */
 
-import { displaySnippet, normaliseCommand, pathSpellings, peelEnvPrefix, segmentCommands, tokenize } from "./match.ts";
+import { pathSpellings } from "./pattern/path-spellings.ts";
+import { normaliseCommand } from "./pattern/shell-commands.ts";
+import { peelEnvPrefix, segmentCommands, tokenize } from "./pattern/shell-segmentation.ts";
+import { displaySnippet } from "./render/text.ts";
+import { pushUnique } from "./ordered-unique.ts";
 import { isLoopbackHost, looksLikeUrl, networkTargets, parseNetworkTarget } from "./network.ts";
 
 export interface Facts {
@@ -130,7 +134,7 @@ function shellPathTokens(seg: string, cwd: string): string[] {
 function hostFacts(segments: string[]): string[] {
 	const out: string[] = [];
 	for (const seg of segments) {
-		for (const host of networkTargets(seg, "")) if (!out.includes(host)) out.push(host);
+		for (const host of networkTargets(seg, "")) pushUnique(out, host);
 	}
 	return out;
 }
@@ -190,7 +194,7 @@ function scanNetworkParams(input: Record<string, unknown>): string[] {
 	for (const token of tokens) {
 		const target = parseNetworkTarget(token);
 		if (!target || isLoopbackHost(target.host)) continue;
-		if (!out.includes(target.host)) out.push(target.host);
+		pushUnique(out, target.host);
 	}
 	return out;
 }
@@ -217,7 +221,7 @@ export function extract(
 	for (const [surface, values] of extracted.surfaces) {
 		const key = surface === "call" ? toolName : surface;
 		const bucket = surfaces.get(key) ?? [];
-		for (const value of values) if (!bucket.includes(value)) bucket.push(value);
+		for (const value of values) pushUnique(bucket, value);
 		surfaces.set(key, bucket);
 	}
 	if (!surfaces.has(toolName)) surfaces.set(toolName, []);
