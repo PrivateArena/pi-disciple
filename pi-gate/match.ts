@@ -187,7 +187,14 @@ export function beginRegexRound(): void {
 	regexRoundStart = Date.now();
 }
 
-const REGEX_MAX_VALUE = 4096;
+/**
+ * The longest string a bounded regex probe reads. Exported as {@link REGEX_PROBE_LIMIT} because anything a
+ * `re:` rule is meant to judge has to fit inside it — a longer value is silently cut from the end, which is
+ * where a scanned message tail keeps the interesting part.
+ */
+export const REGEX_PROBE_LIMIT = 4096;
+
+const REGEX_MAX_VALUE = REGEX_PROBE_LIMIT;
 
 /** Regex sources whose match ran past the budget — surfaced by `/gatec status` (a slow rule is a bug). */
 export const regexPatternTimeouts = new Set<string>();

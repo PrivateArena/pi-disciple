@@ -19,8 +19,19 @@ import { isFullyDenied, loadPolicy, type Policy, recomputeActive, resolveConfigP
 import { writeDefaultConfig } from "./config-file.ts";
 import { clearSession, createSessionGrants, resetPersisted, type PersistedScope } from "./grants.ts";
 import { handleToolCall, attachNote, type GateState, type PendingNotes } from "./handle.ts";
+import {
+	activeRuleIds,
+	builtinRuleIds,
+	createGuardBudget,
+	effectiveGuardAction,
+	guardTurnEnd,
+	refillGuardBudget,
+	resetGuardCounters,
+	resetGuardSession,
+	type GuardTurnState,
+} from "./guard.ts";
 import { ALLOW_ALL_WINDOW_MS, type AllowAll } from "./policy.ts";
-import { DEFAULT_GATE_CONFIG, type GrantRule } from "./schema.ts";
+import { DEFAULT_GATE_CONFIG, GUARD_BUILTIN_RULE_IDS, type GrantRule } from "./schema.ts";
 import { regexPatternTimeouts } from "./match.ts";
 
 export default function piGate(pi: ExtensionAPI) {
@@ -29,6 +40,7 @@ export default function piGate(pi: ExtensionAPI) {
 	const hiddenByGate = new Set<string>();
 	const subagentCalls = new Map<string, { role: string; task: string }>();
 	const pendingNotes: PendingNotes = new Map();
+	const guardBudget = createGuardBudget();
 	let offForSession = false;
 	let allowAll: AllowAll | undefined;
 	let allowAllTimer: ReturnType<typeof setTimeout> | undefined;
@@ -81,7 +93,8 @@ export default function piGate(pi: ExtensionAPI) {
 	const footer = (ctx: ExtensionContext) => {
 		const on = !disabled() && policy?.config.enabled !== false;
 		if (!on) return ctx.ui.setStatus("pi-gate", "gate: off");
-		const base = `gate: on · ${policy?.files.length ?? 0} file(s)`;
+		const nudged = guardBudget.reminders > 0 ? ` · guard: ${guardBudget.reminders} reminder(s)` : "";
+		const base = `gate: on · ${policy?.files.length ?? 0} file(s)${nudged}`;
 		if (!allowAll) return ctx.ui.setStatus("pi-gate", base);
 		const mode = allowAll.until === null ? "allow-everything: session" : `allow-everything: ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`;
 		ctx.ui.setStatus("pi-gate", `${base} · ${mode}`);
@@ -105,6 +118,83 @@ export default function piGate(pi: ExtensionAPI) {
 		footer(ctx);
 	};
 
+	/** The guard judges output, not permissions: it needs the fresh policy too, plus the session's tool names. */
+	const guardState = (ctx: ExtensionContext): GuardTurnState => ({
+		policy: refresh(ctx),
+		toolNames: new Set(pi.getActiveTools().map((name) => name.toLowerCase())),
+		budget: guardBudget,
+	});
+
+	/** One block about the guard for `/gatec status`: what it does, what it saw, which rules are live. */
+	const guardStatusLine = (ctx: ExtensionContext): string => {
+		const current = policy ?? refresh(ctx);
+		const guard = current.config.guard;
+		const action = effectiveGuardAction(guard, guardBudget);
+		const overridden = guardBudget.action !== undefined && guardBudget.action !== guard.action ? ` (session override of "${guard.action}")` : "";
+		const off = [...guard.disableRules, ...guardBudget.disabled];
+		const problems = current.errors.filter((error) => error.includes("gate.guard"));
+		return [
+			`guard: ${action === "off" ? "off" : `${action}${overridden}`}`,
+			`reminders: ${guardBudget.reminders}/${guard.maxReminders} (refilled by a real tool call, or by /gatec guard reset)`,
+			guardBudget.last ? `last: ${guardBudget.last.label} (${guardBudget.last.rules.join(", ")})` : "last: nothing caught",
+			`rules: ${activeRuleIds(guard, guardBudget.disabled).join(", ")}`,
+			off.length ? `switched off: ${off.join(", ")}` : "",
+			guard.rules.length ? `configured rules: ${guard.rules.map((rule) => `${rule.id} ${rule.pattern}`).join(" · ")}` : "",
+			guard.allowPatterns.length ? `vetoes: ${guard.allowPatterns.join(" · ")}` : "",
+			problems.length ? `guard config problems:\n${problems.map((error) => `  · ${error}`).join("\n")}` : "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	};
+
+	/** `/gatec guard …`: session-only knobs, so a false positive is answerable mid-run without editing config. */
+	const guardCommand = async (parts: string[], ctx: ExtensionContext): Promise<void> => {
+		const current = policy ?? refresh(ctx);
+		const verb = (parts[0] ?? "").toLowerCase();
+		const knownRule = (id: string): boolean => GUARD_BUILTIN_RULE_IDS.includes(id) || current.config.guard.rules.some((rule) => rule.id === id);
+		if (verb === "off" || verb === "notify" || verb === "remind") {
+			guardBudget.action = verb;
+			ctx.ui.notify(`[gate] guard is "${verb}" for this session (${guardBudget.reminders} reminder(s) already spent)`, "info");
+			return;
+		}
+		if (verb === "disable" || verb === "enable") {
+			const id = parts[1]?.trim();
+			if (!id) {
+				ctx.ui.notify(`[gate] /gatec guard ${verb} <rule-id> — built-in rules: ${builtinRuleIds().join(", ")}`, "warning");
+				return;
+			}
+			if (!knownRule(id)) {
+				ctx.ui.notify(`[gate] no guard rule named "${id}" — /gatec guard lists the ones there are`, "warning");
+				return;
+			}
+			if (verb === "disable") guardBudget.disabled.add(id);
+			else guardBudget.disabled.delete(id);
+			ctx.ui.notify(`[gate] guard rule ${id} ${verb === "disable" ? "off" : "on"} for this session`, "info");
+			return;
+		}
+		if (verb === "reset") {
+			resetGuardCounters(guardBudget);
+			ctx.ui.notify("[gate] guard reminder budget cleared", "info");
+			return;
+		}
+		if (verb === "default") {
+			resetGuardSession(guardBudget);
+			ctx.ui.notify("[gate] guard session overrides cleared (the config file is back in charge)", "info");
+			return;
+		}
+		await ctx.ui.editor(
+			"/gatec guard",
+			[
+				guardStatusLine(ctx),
+				"",
+				"/gatec guard off|notify|remind — what to do about a malformed call, for this session only",
+				"/gatec guard disable|enable <rule-id> — switch one detector, for this session only",
+				"/gatec guard reset — refill the reminder budget",
+				"/gatec guard default — drop every session override",
+			].join("\n"),
+		);
+	};
+
 	const state = (ctx: ExtensionContext): GateState => ({
 		// Reload per call: `loadPolicy` is mtime-stamped, so config edits apply without a restart (step 5).
 		policy: refresh(ctx),
@@ -124,6 +214,7 @@ export default function piGate(pi: ExtensionAPI) {
 		hiddenByGate.clear();
 		subagentCalls.clear();
 		pendingNotes.clear();
+		resetGuardSession(guardBudget);
 		allowAll = undefined;
 		if (allowAllTimer) clearTimeout(allowAllTimer);
 		allowAllTimer = undefined;
@@ -146,6 +237,7 @@ export default function piGate(pi: ExtensionAPI) {
 		hiddenByGate.clear();
 		subagentCalls.clear();
 		pendingNotes.clear();
+		resetGuardSession(guardBudget);
 		allowAll = undefined;
 		if (allowAllTimer) clearTimeout(allowAllTimer);
 		allowAllTimer = undefined;
@@ -154,7 +246,19 @@ export default function piGate(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (disabled()) return;
-		return handleToolCall(event, ctx, state(ctx));
+		const result = await handleToolCall(event, ctx, state(ctx));
+		// The model made a call that worked: the guard's budget is for the trouble it is in, not for the run.
+		if (!result?.block) refillGuardBudget(guardBudget);
+		return result;
+	});
+
+	// The output guard: a call the model wrote as text instead of making would end the run as an answer.
+	// The footer follows it, because "why did it keep going?" is asked while the run is still going.
+	pi.on("turn_end", (event, ctx) => {
+		if (disabled()) return;
+		const result = guardTurnEnd(event, ctx, guardState(ctx));
+		footer(ctx);
+		return result;
 	});
 
 	// "Allow with reason": the note the human typed goes on the result of the call it approved.
@@ -166,7 +270,7 @@ export default function piGate(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("gatec", {
-		description: "Permission gate: status | grants | reload | allow [off|5min|session] | reset grants [project|global] | off | on",
+		description: "Permission gate: status | grants | reload | allow [off|5min|session] | guard [off|notify|remind|disable <rule>|enable <rule>|reset|default] | reset grants [project|global] | off | on",
 		async handler(args: string, ctx: ExtensionContext) {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			const sub = (parts[0] ?? "status").toLowerCase();
@@ -213,6 +317,10 @@ export default function piGate(pi: ExtensionAPI) {
 				);
 				return;
 			}
+			if (sub === "guard") {
+				await guardCommand(parts.slice(1), ctx);
+				return;
+			}
 			if (sub === "grants") {
 				const current = policy ?? refresh(ctx);
 				const persisted = current.rules.filter((rule) => rule.origin === "grant");
@@ -236,6 +344,7 @@ export default function piGate(pi: ExtensionAPI) {
 				`session grants: ${sessionGrants.map((g) => `${g.surface} "${g.pattern}"`).join(", ") || "none"}`,
 				`allow-everything: ${!allowAll ? "off" : allowAll.until === null ? "on for this session" : `on for ${Math.max(0, Math.round((allowAll.until - Date.now()) / 1000))}s`} (absolute: no call reaches the dialog; only a \`deny\` rule or a \`hardDeny\` entry still blocks)`,
 				`hidden tools: ${[...hiddenByGate].join(", ") || "none"}`,
+				guardStatusLine(ctx),
 				`rules: ${current.rules.length} · visible tools: ${recomputeActive(tools, current).length}/${tools.length}`,
 				`bash surface: ${JSON.stringify(current.config.permission.bash ?? DEFAULT_GATE_CONFIG.permission.bash)}`,
 				`network surface: ${JSON.stringify(current.config.permission.network ?? DEFAULT_GATE_CONFIG.permission.network)} · hardDeny: ${current.hardDeny.length ? current.hardDeny.map((rule) => `"${rule.pattern}"`).join(", ") : "none"} (blocks even with allow-everything on)`,

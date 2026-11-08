@@ -72,6 +72,7 @@ function stubCtx(choice: number, log: { titles: string[] }, stub: StubPi): Exten
 				return options[choice];
 			},
 			input: async () => "x",
+			editor: async () => undefined,
 			notify: (message: string) => stub.notices.push(message),
 			setStatus: (_key: string, text?: string) => stub.statuses.push(text),
 		},
@@ -84,9 +85,14 @@ const call = (toolName: string, input: Record<string, unknown>, callId: string):
 const ASK_ALL: unknown = { "*": "ask", path: { "*": "allow" }, bash: { "*": "ask" }, external_directory: "ask" };
 
 /** Boot the real extension on a temp agent dir + project, and start one session. */
-async function boot(permission: unknown = ASK_ALL): Promise<{ stub: StubPi; log: { titles: string[] } }> {
+async function boot(permission: unknown = ASK_ALL, guard?: unknown): Promise<{ stub: StubPi; log: { titles: string[] } }> {
 	fixture = makeFixture();
-	writeGlobalConfig(fixture, gateDoc(permission));
+	writeGlobalConfig(
+		fixture,
+		guard === undefined
+			? gateDoc(permission)
+			: { gate: { enabled: true, reviewLog: false, promptTimeoutMs: 0, permission, guard } },
+	);
 	clearPolicyCache();
 	const stub = stubPi();
 	piGate(stub.pi);
@@ -212,5 +218,120 @@ describe("extension wiring keeps the switch it was given", () => {
 		await answer(stub, log, ONCE, call("bash", { command }, "c1"));
 		expect(log.titles[0]).toContain(command);
 		expect(log.titles[0]).not.toContain("truncated");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// the output guard, through the real wiring
+// ---------------------------------------------------------------------------
+
+const LEAK = "<tool_call>\n<\n</function>\n</tool_call>";
+
+/** The turn a broken emission ends: an assistant message, no tool call, and the run would stop there. */
+const leakedTurn = (entryId: string) => ({
+	type: "turn_end",
+	turnIndex: 2,
+	outcome: "completed",
+	toolResults: [],
+	messageEntryId: entryId,
+	toolResultEntryIds: [],
+	entries: [],
+	continue: false,
+	context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: false },
+	message: {
+		role: "assistant",
+		content: [{ type: "thinking", thinking: "Now I will write the file." }, { type: "text", text: LEAK }],
+		api: "openai-completions",
+		provider: "local",
+		model: "qwen3.8-flash-next",
+		stopReason: "stop",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		timestamp: 0,
+	},
+});
+
+describe("the guard runs from the extension's own turn_end handler", () => {
+	it("appends the reminder and asks for another turn, and says so in the footer", async () => {
+		const { stub } = await boot();
+		const result = (await stub.emit("turn_end", stubCtx(ONCE, { titles: [] }, stub), leakedTurn("m1"))) as {
+			entries?: { type: string; customType: string; content: { text: string }[] }[];
+			continue?: boolean;
+		};
+		expect(result.continue).toBe(true);
+		expect(result.entries?.[0]?.type).toBe("custom_message");
+		expect(result.entries?.[0]?.customType).toBe("pi-gate.malformed-tool-call");
+		expect(result.entries?.[0]?.content[0]?.text).toMatch(/Malformed tool call/);
+		expect(stub.notices.join("\n")).toMatch(/reminded the agent/);
+		expect(stub.statuses.at(-1)).toMatch(/guard: 1 reminder/);
+	});
+
+	it("leaves a real answer alone, and a turn that ran tools", async () => {
+		const { stub } = await boot();
+		const quiet = { ...leakedTurn("m2"), message: { ...leakedTurn("m2").message, content: [{ type: "text", text: "Done: 41 tests pass." }] } };
+		expect(await stub.emit("turn_end", stubCtx(ONCE, { titles: [] }, stub), quiet)).toBeUndefined();
+		expect(await stub.emit("turn_end", stubCtx(ONCE, { titles: [] }, stub), { ...leakedTurn("m3"), toolResults: [{ role: "toolResult" }] })).toBeUndefined();
+		expect(stub.notices.join("\n")).not.toMatch(/reminded/);
+	});
+
+	it("spends its budget and then stops, until a real tool call refills it", async () => {
+		const { stub, log } = await boot(ASK_ALL, { maxReminders: 1 });
+		expect(await stub.emit("turn_end", stubCtx(ONCE, log, stub), leakedTurn("a"))).toBeTruthy();
+		expect(await stub.emit("turn_end", stubCtx(ONCE, log, stub), leakedTurn("b"))).toBeUndefined();
+		expect(stub.notices.join("\n")).toMatch(/budget spent/);
+
+		await answer(stub, log, ONCE, call("bash", { command: "ls" }, "c1"));
+		expect(await stub.emit("turn_end", stubCtx(ONCE, log, stub), leakedTurn("c"))).toBeTruthy();
+	});
+
+	it("is switched off with the rest of the gate, and by its own key", async () => {
+		const off = await boot();
+		await off.stub.commands.get("gatec")?.handler("off", stubCtx(ONCE, off.log, off.stub));
+		expect(await off.stub.emit("turn_end", stubCtx(ONCE, off.log, off.stub), leakedTurn("m1"))).toBeUndefined();
+
+		const disabled = await boot(ASK_ALL, { enabled: false });
+		expect(await disabled.stub.emit("turn_end", stubCtx(ONCE, disabled.log, disabled.stub), leakedTurn("m2"))).toBeUndefined();
+		expect(disabled.stub.notices.join("\n")).not.toMatch(/tool call/);
+	});
+
+	it("answers /gatec guard: the state, a session action, and a rule switched off", async () => {
+		const { stub, log } = await boot();
+		const command = stub.commands.get("gatec")!;
+
+		await command.handler("guard", stubCtx(ONCE, log, stub));
+		await command.handler("guard notify", stubCtx(ONCE, log, stub));
+		expect(await stub.emit("turn_end", stubCtx(ONCE, log, stub), leakedTurn("m1"))).toBeUndefined();
+		expect(stub.notices.join("\n")).toMatch(/noticed/);
+
+		await command.handler("guard remind", stubCtx(ONCE, log, stub));
+		await command.handler("guard disable call-tag", stubCtx(ONCE, log, stub));
+		await command.handler("guard disable call-fragment", stubCtx(ONCE, log, stub));
+		expect(await stub.emit("turn_end", stubCtx(ONCE, log, stub), leakedTurn("m2"))).toBeUndefined();
+
+		await command.handler("guard default", stubCtx(ONCE, log, stub));
+		expect(await stub.emit("turn_end", stubCtx(ONCE, log, stub), leakedTurn("m3"))).toBeTruthy();
+
+		await command.handler("guard disable nope", stubCtx(ONCE, log, stub));
+		expect(stub.notices.join("\n")).toMatch(/no guard rule named "nope"/);
+	});
+
+	it("reports a bad guard config on the same path as every other config problem", async () => {
+		const { stub, log } = await boot(ASK_ALL, { action: "yell" });
+		expect(stub.notices.join("\n")).toMatch(/gate\.guard\.action/);
+		expect(await stub.emit("turn_end", stubCtx(ONCE, log, stub), leakedTurn("m1"))).toBeTruthy();
+	});
+
+	it("lists the guard in /gatec status", async () => {
+		const { stub, log } = await boot(ASK_ALL, { rules: [{ id: "mine", pattern: "*" }], disableRules: ["tool-name-tag"] });
+		let shown = "";
+		const ctx = stubCtx(ONCE, log, stub);
+		ctx.ui.editor = async (_title: string, body?: string) => {
+			shown = body ?? "";
+			return undefined;
+		};
+		await stub.commands.get("gatec")?.handler("status", ctx);
+		expect(shown).toMatch(/guard: remind/);
+		expect(shown).toMatch(/rules: .*call-tag/);
+		expect(shown).toMatch(/switched off: tool-name-tag/);
+		expect(shown).toMatch(/mine \*/);
 	});
 });

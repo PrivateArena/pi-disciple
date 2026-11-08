@@ -7,7 +7,7 @@
 
 export type Action = "allow" | "ask" | "deny";
 
-import { regexPatternError } from "./match.ts";
+import { REGEX_PROBE_LIMIT, regexPatternError } from "./match.ts";
 
 /** Precedence order, lowest first: later scopes override earlier ones (last matching pattern wins). */
 export type Scope =
@@ -68,6 +68,66 @@ export interface HardDenyRule {
 	reason?: string;
 }
 
+/**
+ * What the output guard does with a call the model wrote as text instead of making.
+ *
+ * `off` never looks. `notify` tells the human and logs, and lets the run end — the shape is reported but
+ * the model is not interrupted. `remind` additionally appends a reminder and keeps the run going, which is
+ * the only setting that saves the turn.
+ */
+export type GuardAction = "off" | "notify" | "remind";
+
+export function isGuardAction(value: unknown): value is GuardAction {
+	return value === "off" || value === "notify" || value === "remind";
+}
+
+/**
+ * The rule ids the guard ships with — the vocabulary `disableRules` is written against, and what
+ * `/gatec guard` lists. `guard.ts` implements exactly this set; a drift test pins the two together.
+ */
+export const GUARD_BUILTIN_RULE_IDS: readonly string[] = [
+	"call-tag",
+	"call-fragment",
+	"tool-name-tag",
+	"json-call",
+	"json-call-truncated",
+	"special-token",
+	"chat-template-token",
+	"call-in-thinking",
+];
+
+/**
+ * One detector the human can switch off, add to, or re-word. `pattern` is matched against the scanned
+ * tail of the assistant message exactly like every other gate pattern: a glob, or a regex with `re:`.
+ */
+export interface GuardRuleConfig {
+	id: string;
+	pattern: string;
+	/** How the reminder names the shape; defaults to "a call written as message text". */
+	label?: string;
+	/** The instruction the reminder gives; defaults to the built-in one. */
+	advice?: string;
+}
+
+export interface GuardConfig {
+	enabled: boolean;
+	action: GuardAction;
+	/** Reminders per session. Restored by the next real tool call, so a run cannot be nudged to death. */
+	maxReminders: number;
+	/** Characters of message tail the rules read. Capped by the gate's regex probe budget (see `match.ts`). */
+	scanTailChars: number;
+	/** Built-in rule ids to switch off, e.g. `["tool-name-tag"]` when the task is about XML tool syntax. */
+	disableRules: string[];
+	/** Extra detectors, same shape as `hardDeny`: concatenated across config files, never ordered. */
+	rules: GuardRuleConfig[];
+	/** Text these patterns match is *about* tool calls, not leaking one: the guard stays out. */
+	allowPatterns: string[];
+	/** Treat a tag named after one of the session's own tools (`<bash>`, `<read path=>`) as a leaked call. */
+	matchToolNames: boolean;
+	/** When a message has no text at all, look at the end of its thinking for the same shapes. */
+	checkEmptyThinking: boolean;
+}
+
 export interface GateConfig {
 	enabled: boolean;
 	reviewLog: boolean;
@@ -76,6 +136,8 @@ export interface GateConfig {
 	permission: Record<string, Action | Record<string, Action>>;
 	/** Deny rules above the mode and above any matching allow. Config-only; the dialog never writes them. */
 	hardDeny: HardDenyRule[];
+	/** The output guard (`guard.ts`): a tool call that arrived as text and would have ended the run. */
+	guard: GuardConfig;
 }
 
 /**
@@ -237,6 +299,23 @@ export interface SubagentLimits {
 	askToExtend: boolean;
 }
 
+/**
+ * On by default: a call that silently ends the turn costs the whole run, and the guard's own cost is
+ * bounded by {@link GuardConfig.maxReminders}. Every shape test is strict and lives in `guard.ts`; this is
+ * only the switch, the budget and the human's additions.
+ */
+export const DEFAULT_GUARD_CONFIG: GuardConfig = {
+	enabled: true,
+	action: "remind",
+	maxReminders: 3,
+	scanTailChars: REGEX_PROBE_LIMIT,
+	disableRules: [],
+	rules: [],
+	allowPatterns: [],
+	matchToolNames: true,
+	checkEmptyThinking: true,
+};
+
 /** Matches the shipped default config block in the plan (step 17). */
 export const DEFAULT_GATE_CONFIG: GateConfig = {
 	enabled: true,
@@ -284,6 +363,7 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 	 * `grants.ts` — because a rule that blocks past "allow everything" has to be human-authored.
 	 */
 	hardDeny: [],
+	guard: DEFAULT_GUARD_CONFIG,
 };
 
 export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
@@ -318,8 +398,14 @@ export function flattenPermission(permission: GateConfig["permission"]): Permiss
 	return out;
 }
 
+/**
+ * A `gate` block as one config file wrote it: every scalar optional, and `guard` partial for the same reason
+ * — a file that names one guard knob must not be read as having restated the other eight.
+ */
+export type PartialGateConfig = Partial<Omit<GateConfig, "guard">> & { guard?: Partial<GuardConfig> };
+
 export interface ParsedGateConfig {
-	config: Partial<GateConfig>;
+	config: PartialGateConfig;
 	entries: PermissionEntry[];
 	grants: { global: GrantRule[]; project: GrantRule[] };
 	hardDeny: HardDenyRule[];
@@ -332,7 +418,7 @@ export interface ParsedGateConfig {
  */
 export function parseGateConfig(raw: unknown, where: string): ParsedGateConfig {
 	const errors: string[] = [];
-	const config: Partial<GateConfig> = {};
+	const config: PartialGateConfig = {};
 	const grants: ParsedGateConfig["grants"] = { global: [], project: [] };
 
 	if (raw === undefined || raw === null) return { config, entries: [], grants, hardDeny: [], errors };
@@ -398,8 +484,161 @@ export function parseGateConfig(raw: unknown, where: string): ParsedGateConfig {
 
 	const hardDeny = doc.hardDeny === undefined ? [] : parseHardDenyList(doc.hardDeny, `${where}: gate.hardDeny`, errors);
 	if (doc.hardDeny !== undefined) config.hardDeny = hardDeny;
+	if (doc.guard !== undefined) config.guard = parseGuardConfig(doc.guard, `${where}: gate.guard`, errors);
 
 	return { config, entries, grants, hardDeny, errors };
+}
+
+/**
+ * Parse one `gate.guard` block of one config file, returning only the keys that file wrote.
+ *
+ * Written-keys-only is what makes the layering behave: {@link mergeGuardConfigs} then lets a project file
+ * change one number without re-deriving every other key from its own defaults, exactly like the scalar keys
+ * of the rest of `gate`.
+ *
+ * `rules` are matched against message text, so an invalid pattern is refused the way every other gate pattern
+ * is: reported at config-settle, matches nothing, and cannot widen or narrow anything.
+ */
+export function parseGuardConfig(raw: unknown, where: string, errors: string[]): Partial<GuardConfig> {
+	const guard: Partial<GuardConfig> = {};
+	if (!isRecord(raw)) {
+		errors.push(`${where} must be an object, ignored`);
+		return guard;
+	}
+	const doc = raw as Record<string, unknown>;
+	if (doc.enabled !== undefined) {
+		if (typeof doc.enabled === "boolean") guard.enabled = doc.enabled;
+		else errors.push(`${where}.enabled must be a boolean, ignored`);
+	}
+	if (doc.action !== undefined) {
+		if (isGuardAction(doc.action)) guard.action = doc.action;
+		else errors.push(`${where}.action must be "off"|"notify"|"remind", ignored`);
+	}
+	if (doc.maxReminders !== undefined) {
+		if (typeof doc.maxReminders === "number" && Number.isFinite(doc.maxReminders) && doc.maxReminders >= 0) {
+			guard.maxReminders = Math.floor(doc.maxReminders);
+		} else {
+			errors.push(`${where}.maxReminders must be a number >= 0, ignored`);
+		}
+	}
+	if (doc.scanTailChars !== undefined) {
+		if (typeof doc.scanTailChars === "number" && Number.isFinite(doc.scanTailChars) && doc.scanTailChars >= 256) {
+			if (doc.scanTailChars > REGEX_PROBE_LIMIT) {
+				errors.push(`${where}.scanTailChars is capped at ${REGEX_PROBE_LIMIT} (a longer tail would hide its end from an re: rule), using that`);
+				guard.scanTailChars = REGEX_PROBE_LIMIT;
+			} else {
+				guard.scanTailChars = Math.floor(doc.scanTailChars);
+			}
+		} else {
+			errors.push(`${where}.scanTailChars must be a number >= 256, ignored`);
+		}
+	}
+	if (doc.matchToolNames !== undefined) {
+		if (typeof doc.matchToolNames === "boolean") guard.matchToolNames = doc.matchToolNames;
+		else errors.push(`${where}.matchToolNames must be a boolean, ignored`);
+	}
+	if (doc.checkEmptyThinking !== undefined) {
+		if (typeof doc.checkEmptyThinking === "boolean") guard.checkEmptyThinking = doc.checkEmptyThinking;
+		else errors.push(`${where}.checkEmptyThinking must be a boolean, ignored`);
+	}
+	const ids = (key: "disableRules"): string[] | undefined => {
+		const value = doc[key];
+		if (value === undefined) return undefined;
+		if (!Array.isArray(value)) {
+			errors.push(`${where}.${key} must be an array of rule ids, ignored`);
+			return undefined;
+		}
+		const out: string[] = [];
+		for (const id of value) {
+			if (typeof id !== "string" || !id.trim()) {
+				errors.push(`${where}.${key} entries must be non-empty strings, one ignored`);
+				continue;
+			}
+			if (!GUARD_BUILTIN_RULE_IDS.includes(id.trim())) {
+				errors.push(`${where}.${key} names "${id}", which is not a built-in guard rule (built-ins: ${GUARD_BUILTIN_RULE_IDS.join(", ")})`);
+				continue;
+			}
+			out.push(id.trim());
+		}
+		return out;
+	};
+	const disabled = ids("disableRules");
+	if (disabled) guard.disableRules = disabled;
+
+	if (doc.rules !== undefined) {
+		if (!Array.isArray(doc.rules)) errors.push(`${where}.rules must be an array, ignored`);
+		else {
+			const rules: GuardRuleConfig[] = [];
+			doc.rules.forEach((item, i) => {
+				const at = `${where}.rules[${i}]`;
+				if (!isRecord(item) || typeof item.pattern !== "string" || !item.pattern.trim()) {
+					errors.push(`${at} must be {id, pattern, label?, advice?} with a non-empty pattern, ignored`);
+					return;
+				}
+				for (const key of ["id", "label", "advice"] as const) {
+					const value = item[key];
+					if (value !== undefined && typeof value !== "string") errors.push(`${at}.${key} must be a string, ignored`);
+				}
+				const bad = regexPatternError(item.pattern);
+				if (bad) {
+					errors.push(`${at}.pattern ${bad}, ignored`);
+					return;
+				}
+				const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : `rule-${i + 1}`;
+				if (GUARD_BUILTIN_RULE_IDS.includes(id)) errors.push(`${at}.id "${id}" is a built-in guard rule; yours is kept beside it and reported separately`);
+				rules.push({
+					id,
+					pattern: item.pattern,
+					...(typeof item.label === "string" && item.label.trim() ? { label: item.label.trim() } : {}),
+					...(typeof item.advice === "string" && item.advice.trim() ? { advice: item.advice.trim() } : {}),
+				});
+			});
+			guard.rules = rules;
+		}
+	}
+
+	if (doc.allowPatterns !== undefined) {
+		if (!Array.isArray(doc.allowPatterns)) errors.push(`${where}.allowPatterns must be an array, ignored`);
+		else {
+			const patterns: string[] = [];
+			for (const pattern of doc.allowPatterns) {
+				if (typeof pattern !== "string" || !pattern.trim()) {
+					errors.push(`${where}.allowPatterns entries must be non-empty patterns, one ignored`);
+					continue;
+				}
+				const bad = regexPatternError(pattern);
+				if (bad) {
+					errors.push(`${where}.allowPatterns "${pattern}" ${bad}, ignored`);
+					continue;
+				}
+				patterns.push(pattern);
+			}
+			guard.allowPatterns = patterns;
+		}
+	}
+	return guard;
+}
+
+/**
+ * Fold the `gate.guard` blocks the policy read, lowest precedence first, into the one config the guard runs.
+ *
+ * A written scalar is replaced by the later file that wrote one — the same rule as `gate.enabled`. The three
+ * *lists* are concatenated, like `gate.hardDeny`: an extra detector or a veto is an addition, and a project
+ * file must not be able to delete a rule the global file added.
+ */
+export function mergeGuardConfigs(files: readonly (Partial<GuardConfig> | undefined)[]): GuardConfig {
+	const merged: GuardConfig = { ...DEFAULT_GUARD_CONFIG, disableRules: [], rules: [], allowPatterns: [] };
+	for (const guard of files) {
+		if (!guard) continue;
+		for (const key of ["enabled", "action", "maxReminders", "scanTailChars", "matchToolNames", "checkEmptyThinking"] as const) {
+			const value = guard[key];
+			if (value !== undefined) Object.assign(merged, { [key]: value });
+		}
+		merged.disableRules.push(...(guard.disableRules ?? []));
+		merged.rules.push(...(guard.rules ?? []));
+		merged.allowPatterns.push(...(guard.allowPatterns ?? []));
+	}
+	return merged;
 }
 
 /**

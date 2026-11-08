@@ -20,11 +20,14 @@ import {
 	type GateConfig,
 	DEFAULT_GATE_CONFIG,
 	type GrantRule,
+	type GuardConfig,
 	type HardDenyRule,
+	type PartialGateConfig,
 	SCOPE_PRECEDENCE,
 	type Scope,
 	flattenPermission,
 	isAction,
+	mergeGuardConfigs,
 	mostRestrictive,
 	parseGateConfig,
 	type PermissionEntry,
@@ -301,8 +304,14 @@ function buildPolicy(o: {
 	/** Surfaces a config file named, so the defaulted-in ones below do not duplicate or outrank them. */
 	const configuredSurfaces = new Set<string>();
 	const hardDeny: HardDenyRule[] = [];
+	/**
+	 * One `gate.guard` block per file that had one, lowest precedence first. Folded by
+	 * {@link mergeGuardConfigs}: scalars are last-file-wins like every other gate key, the rule lists are
+	 * concatenated, because an extra detector is an addition and not a rival.
+	 */
+	const guardFiles: Partial<GuardConfig>[] = [];
 	let degraded = false;
-	let globalConfig: Partial<GateConfig> = {};
+	let globalConfig: PartialGateConfig = {};
 
 	const absorb = (file: string, scope: "global" | "project") => {
 		const read = readConfigFile(file);
@@ -324,6 +333,7 @@ function buildPolicy(o: {
 		// hardDeny is not a precedence layer, so it is *concatenated*, never ordered: an entry in either
 		// file blocks, and a project file may add to it but never remove a global one (plan step C2).
 		hardDeny.push(...parsed.hardDeny);
+		if (parsed.config.guard) guardFiles.push(parsed.config.guard);
 		if (parsed.grants.project.length) {
 			if (scope === "global") {
 				invalidScopes.push("grants.project");
@@ -378,6 +388,7 @@ function buildPolicy(o: {
 			// The parsed entries, not `globalConfig.hardDeny`: a project file may add one (it is only ever
 			// read when the cwd is trusted), and the effective list is what `/gatec status` has to show.
 			hardDeny,
+			guard: mergeGuardConfigs(guardFiles),
 		},
 		defaultAction,
 		degraded,

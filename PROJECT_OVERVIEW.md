@@ -33,6 +33,7 @@ pi-gate/
   prompt.ts        the 9-choice dialog → AskResult, titles, block text                     step 9
   log.ts           review.jsonl + redact()                                                step 18
   handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
+  guard.ts         the output guard: a tool call the model wrote as text, caught at turn_end    new
   index.ts         wiring: flags, footer, tool visibility, /gatec                          steps 8, 9
 pi-subagent/
   roles.ts         explore | general-purpose | review + applyRoleConfig: config edits them, new ones join the table    step 10
@@ -218,13 +219,52 @@ names**, not the traffic. A DNS answer pointing at a blocked host, an HTTP redir
 in `~/.npmrc`/`pip.conf`/`$HTTPS_PROXY`, and any program resolving a name itself are all outside it. Use
 `gate.hardDeny` for the mode-proof form, and a real network boundary if you need a boundary.
 
+## The output guard: the call the model wrote instead of making
+
+A model on an XML or JSON call dialect (pi's own prompt shows the shape it has to emit) sometimes puts the
+*markup* of a call on the text channel — `<tool_call>\n<\n</function>\n</tool_call>`, an `<invoke name=…>`
+envelope, a `<parameter=path>` fragment, a call-shaped JSON object, or the tail of one cut off mid-argument.
+Pi sees text, so no tool runs and the run **ends as if the agent had answered**: `stopReason: "stop"`, a
+confident sentence about work that never happened, and no error anywhere. `guard.ts` catches that at
+`turn_end`, on the one turn where the model spoke and nothing ran (`toolResults` empty, outcome `completed`,
+stop reason `stop` or `length`), and answers it the only way that saves the turn: it returns Pi's boundary
+result `{ entries: [custom_message], continue: true }`, which appends a short note the model reads as a user
+message and asks Pi for another turn. `verification/guard-turn-end.mjs` proves that against the real chain —
+`pi-gate` loaded as an extension, Pi's own boundary dispatch, a fake OpenAI server playing the broken model —
+and the paired scenario with the guard off is what makes it evidence: without the guard the run stops at the
+markup, with it the reminder is on the wire and the answer arrives one request later.
+
+**A false positive costs the exact thing the guard saves**, so the shape tests are strict and every one of them
+is a test: fenced and inline code is never a call (only a *closed* fence counts, since a truncated emission stops
+inside one), one balanced tag with no payload inside a sentence is prose, a call-shaped JSON object has to parse
+and have nothing but punctuation after it, a truncated one has to leave a brace or a string open *and* name call
+keys, and only the last `scanTailChars` (≤ 4096, the gate's regex probe budget) is read at all. Eight named rules
+(`call-tag`, `call-fragment`, `tool-name-tag`, `json-call`, `json-call-truncated`, `special-token`,
+`chat-template-token`, `call-in-thinking`) report which of them fired, and every one is switchable:
+`gate.guard.disableRules` in the file, `/gatec guard disable <id>` for the session, and `allowPatterns` as a
+human-written veto over the whole turn. `tool-name-tag` is the one dynamic rule — a tag named after a tool the
+session can actually call — so it reads `pi.getActiveTools()` rather than a list nobody maintains.
+
+The budget is what keeps a mistaken rule from becoming a broken session: `maxReminders` (default 3) per
+session, **refilled by the next real tool call**, and one reminder per assistant message however many turns look
+at it. `action: "notify"` reports to the human and lets the run end; `off`, `gate.guard.enabled=false`,
+`/gatec off` and `--no-gate` never look — the guard is part of the gate, not a separate switch. Hits go to
+`logs/guard.jsonl` whatever the action is, because that file is where a false positive is audited. An aborted
+turn is never reminded: a human pressed Escape, and that is not the model's mistake to correct.
+
+**A subagent child is not watched**, for the same structural reason the gate cannot see a child's dialogs: the
+child runs with zero extensions (`PROJECT_OVERVIEW` § *Why nested calls are gated for free*). Its tool calls are
+gated through the parent's pipeline, but its *messages* are produced in a session no parent hook sees, and
+`pi-subagent` shares no imports with `pi-gate` by design. A child that stops on a malformed call loses the turn
+and reports whatever it had; raising its budget is the current answer.
+
 ## Slash commands
 
 Both are suffixed `c` ("command") so they cannot collide with a prompt file or skill of the same name:
 
 | Command | Output |
 | --- | --- |
-| `/gatec [status\|grants\|reload\|allow [off\|5min\|session]\|reset grants [project\|global]\|off\|on]` | gate status editor, grant list, reload, allow-everything, clear grants, switch |
+| `/gatec [status\|grants\|reload\|allow [off\|5min\|session]\|guard [off\|notify\|remind\|disable <rule>\|enable <rule>\|reset\|default]\|reset grants [project\|global]\|off\|on]` | gate status editor, grant list, reload, allow-everything, the guard's session knobs, clear grants, switch |
 | `/subagentc [model\|limits\|roles\|status\|models]` | the effective subagent config, or one section of it |
 
 `/subagentc` (was: "is a child running?") answers what the config actually does — the child model and
@@ -500,12 +540,18 @@ output file); `/subagentc limits` prints the number, its source file and this co
     `child.ts::onCeiling`), which the plan did not have: a ceiling was only ever a verdict there. The mechanism
     lives in `child.ts` (mutable budget, a held ceiling, one offer) and the question in `ceiling.ts`, so the
     child stays testable with no UI and the dialog stays testable with no session.
+20. `pi-gate` guards **output** as well as input (`guard.ts`), which the plan never asked for: the failure it
+    fixes is not a permission problem, but it is a call that never happened, and the gate is the extension that
+    already knows what a call is. It uses Pi's `turn_end` boundary result (`{entries, continue}`) rather than a
+    `tool_call` block, and its own `gate.guard` config block rather than a permission surface — there is nothing
+    to allow, ask or deny.
 
 ## Commands
 
 ```bash
-npm test            # vitest run — 402 tests, no live provider needed
+npm test            # vitest run — 546 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
+node verification/guard-turn-end.mjs    # the guard against the real pi loop: it continues the run, and says why
 node verification/role-sampling-wire.mjs  # a child's real request body, against a fake OpenAI server
 node verification/tui-card.mjs            # the card as pi's own ToolExecutionComponent draws it
 node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)

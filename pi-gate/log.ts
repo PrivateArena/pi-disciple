@@ -33,6 +33,30 @@ export function defaultLogPath(): string {
 	return join(getAgentDir(), "extensions", "pi-gate", "logs", "review.jsonl");
 }
 
+/**
+ * Where guard hits go: a different event kind on a different file, because a malformed call is not a
+ * permission decision and a human reading one log should not have to filter the other out of it.
+ */
+export function defaultGuardLogPath(): string {
+	return join(getAgentDir(), "extensions", "pi-gate", "logs", "guard.jsonl");
+}
+
+export interface GuardLogEntry {
+	ts: string;
+	kind: "malformed-tool-call";
+	/** Every detector that fired, first one named by `label`. */
+	rules: string[];
+	label: string;
+	evidence: string;
+	/** What the gate did about it: `notify` (human only) or `remind` (the model was told and the run went on). */
+	action: string;
+	turnIndex: number;
+	stopReason?: string;
+	model?: string;
+	/** Reminders spent in this session, after this one. */
+	reminders: number;
+}
+
 const SECRET_RE =
 	/(\b[\w-]*(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|authorization|auth)\b\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s;|&]+)/gi;
 
@@ -41,11 +65,19 @@ export function redact(text: string): string {
 	return text.replace(SECRET_RE, "$1<redacted>");
 }
 
-export async function reviewLog(path: string, entry: LogEntry): Promise<void> {
+async function appendLine(path: string, line: string): Promise<void> {
 	try {
 		await mkdir(dirname(path), { recursive: true });
-		await appendFile(path, `${JSON.stringify(entry)}\n`, "utf8");
+		await appendFile(path, `${line}\n`, "utf8");
 	} catch {
 		/* logging must never change a decision */
 	}
+}
+
+export async function reviewLog(path: string, entry: LogEntry): Promise<void> {
+	await appendLine(path, JSON.stringify(entry));
+}
+
+export async function guardLog(path: string, entry: GuardLogEntry): Promise<void> {
+	await appendLine(path, JSON.stringify(entry));
 }
