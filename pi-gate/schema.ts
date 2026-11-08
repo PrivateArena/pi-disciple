@@ -725,6 +725,10 @@ export function parseRolesConfig(raw: unknown, where: string, errors: string[]):
 	const out: RoleConfigMap = {};
 	const folded = new Map<string, string>();
 	for (const [key, value] of Object.entries(raw)) {
+		// A `==` key inside the role table is the file's own documentation convention (see `==commented`), so it
+		// must be inert here too: an unread note may not report an error, because an error makes the config
+		// `degraded` and floors every call in the session.
+		if (isDocKey(key)) continue;
 		if (!isRoleId(key)) {
 			errors.push(`${where}: subagent.roles key "${key}" must match ${ROLE_ID_PATTERN}, ignored`);
 			continue;

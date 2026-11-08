@@ -7,9 +7,10 @@
  * the same clamp, the same error wording.
  */
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { parseSubagentConfig } from "../../pi-gate/schema.ts";
 import { ROLES } from "../roles.ts";
@@ -73,6 +74,15 @@ const CASES: [label: string, config: Record<string, unknown>][] = [
 		},
 	],
 	["a sampling block that says nothing", { roles: { explore: { sampling: {} } } }],
+	[
+		"documentation keys inside the role table",
+		{
+			roles: {
+				"==template": { tools: ["read"], sampling: { temperature: 0.2 } },
+				explore: { maxTurns: 30, "==sampling": "{ temperature: 0.3 }", "==budget": "raised from the built-in" },
+			},
+		},
+	],
 	[
 		"shipped-style documentation keys",
 		{
@@ -163,6 +173,28 @@ describe("subagent.roles in the file", () => {
 		expect(merged.effectiveRoles.auditor).toMatchObject({ allowTools: ["read"], maxTurns: 7 });
 		expect(merged.effectiveRoles.explore.maxTurns).toBe(9);
 		expect(Object.keys(merged.effectiveRoles)).toEqual(["explore", "general-purpose", "review", "auditor", "explorer"]);
+	});
+
+	it("loads the shipped config.json from this repo, error-free and privilege-free", () => {
+		// The reader is what a real session uses, and the shipped file is now a full restatement of the three
+		// built-ins plus inert sampling suggestions: it must parse silently and must add no role, no tool, no retune.
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-sub-shipped-"));
+		mkdirSync(join(agentDir, "extensions", "pi-gate"), { recursive: true });
+		copyFileSync(fileURLToPath(new URL("../../pi-gate/config.json", import.meta.url)), join(agentDir, "extensions", "pi-gate", "config.json"));
+		const loaded = loadSubagentLimits(join(agentDir, "repo"), false, agentDir);
+		expect(loaded.errors).toEqual([]);
+		expect(Object.keys(loaded.effectiveRoles).sort()).toEqual(["explore", "general-purpose", "review"]);
+		for (const name of ["explore", "general-purpose", "review"] as const) {
+			const role = loaded.effectiveRoles[name]!;
+			expect(role.allowTools, name).toEqual(ROLES[name].allowTools);
+			expect(role.description, name).toBe(ROLES[name].description);
+			expect(role.prompt, name).toBe(ROLES[name].prompt);
+			expect(role.sampling, name).toBeUndefined();
+			expect(role.samplingByThinkingLevel, name).toBeUndefined();
+			expect(role.thinkingLevel, name).toBeUndefined();
+		}
+		expect(loaded.limits.maxTurns).toBe(30);
+		expect(loaded.limits.defaultRole).toBe("explore");
 	});
 
 	it("an inherit word clears a pin the other file set", () => {

@@ -74,7 +74,7 @@
     "==network.limit": "this matches the ADDRESS A CALL NAMES, not the traffic: it is a fact extracted from the command line, not a firewall. A DNS answer that points at a blocked host, an HTTP redirect to one, a proxy or index configured in ~/.npmrc / pip.conf / $HTTPS_PROXY, and any program that resolves a name itself are all outside it. Enforce egress at the boundary too if you need a guarantee",
     "==network.floor": "every host fact is floored as network_egress, and only the network surface itself can answer it: bash: \"curl *\": \"allow\" says nothing about which host, exactly as it says nothing about which directory. The one exception is the surface's own untouched default, so a config that never mentions egress is not prompted for it",
     "==permission": "every key is a surface, and every value is either \"allow\"|\"ask\"|\"deny\" (which means \"*\" for that surface) or a { pattern: action } map; surface names are free-form, so any tool can be configured",
-    "==commented": "a key prefixed with \"==\" is documentation: no parser reads it, so it cannot change behaviour, and it survives a grants write that a // comment would not"
+    "==commented": "a key prefixed with \"==\" is documentation: no parser reads it, so it cannot change behaviour, and it survives a grants write that a // comment would not. It works in every map of this file — permission, grants, guard, subagent, and subagent.roles too"
   },
   "subagent": {
     "enabled": true,
@@ -87,17 +87,36 @@
     "maxResultBytes": 65536,
     "keepTranscripts": 20,
     "roles": {
-      "general-purpose": {
-        "maxTurns": 40,
-        "timeoutMinutes": 20
-      },
+      "==templates": "the three entries below are the built-in roles written out whole — tools, description and child prompt copied verbatim from pi-subagent/roles.ts, budgets this file's own choice — so they are also the template for a new role: copy a block, rename the key to a name that is not a built-in, keep tools, and it is callable as subagent(role: \"<name>\") and listed in <delegation> and /subagentc roles. Nothing here retunes a request body: an \"==\" key is documentation, so every suggested sampling bag below is inert until you move it onto a real key",
       "explore": {
+        "tools": ["read", "grep", "find", "ls", "bash"],
+        "description": "Read-only survey of a code base or system",
+        "prompt": "Answer with file paths, line numbers and short quotes. Prefer grep/find over reading whole files.",
         "maxTurns": 30,
-        "timeoutMinutes": 20
+        "timeoutMinutes": 20,
+        "==sampling": "suggested bag for a survey: { \"temperature\": 0.3, \"top_p\": 0.8, \"top_k\": 20 } — an explore is paid for paths and quotes it actually saw, and the model's own temp 1.0 is tuned for conversation, not retrieval. Move it onto a \"sampling\" key (no ==) to send it: merged over this model's own samplingParams from models.json, keys top-level in the body, read by the OpenAI-compatible APIs only",
+        "==samplingByThinkingLevel": "suggested per-level bag for the sweep people run cheap: { \"off\": { \"temperature\": 0.2, \"presence_penalty\": 1.5, \"chat_template_kwargs\": { \"enable_thinking\": false, \"preserve_thinking\": true } } } — presence_penalty is what stops a stream with no thinking tokens from looping, and a bag naming chat_template_kwargs replaces pi's whole object, so repeat preserve_thinking in it (==roles.<name>.sampling.thinking)",
+        "==budget": "30 turns is this file raising the built-in 20; subagent.maxTurns caps it again at min(role, section). The read-only tool list is why this is the safe defaultRole"
+      },
+      "general-purpose": {
+        "tools": ["*"],
+        "description": "Multi-step task with the parent's full tool set",
+        "prompt": "You may edit files. Keep changes minimal and report exactly what you changed.",
+        "maxTurns": 40,
+        "timeoutMinutes": 20,
+        "==sampling": "suggested bag for a bounded edit job: { \"temperature\": 0.6, \"top_p\": 0.9, \"top_k\": 20 } — enough variety to pick a working command, not enough to invent a path. Move it onto \"sampling\" to send it; the \"*\" tools under the parent's gate, not the temperature, are what bound this role",
+        "==samplingByThinkingLevel": "suggested: { \"xhigh\": { \"temperature\": 1.0 }, \"low\": { \"temperature\": 0.5 }, \"off\": { \"temperature\": 0.4, \"presence_penalty\": 1.5 } } — keyed by pi's level words and looked up with the level the run really settles on, so a block written for a rung this model has is folded onto the clamp; the level block wins over the flat one",
+        "==budget": "40 turns is the built-in number and subagent.maxTurns 30 cuts it back to 30 — the section can tighten a role, never raise one"
       },
       "review": {
+        "tools": ["read", "grep", "find", "ls", "bash"],
+        "description": "Critique of existing code, plans or diffs",
+        "prompt": "Report findings only; never modify anything. Lead with the most severe issue and cite file:line.",
         "maxTurns": 30,
-        "timeoutMinutes": 20
+        "timeoutMinutes": 20,
+        "==sampling": "suggested bag for a critique: { \"temperature\": 0.2, \"top_p\": 0.8, \"top_k\": 20 } — a finding has to be about the code that is there, and a review at temp 1.0 is the one that reports a plausible bug. Move it onto \"sampling\" to send it (==roles.<name>.sampling says what lands on the wire)",
+        "==thinkingLevel": "this file sets no level, so a review child thinks at the session's. A written one is requested, not guaranteed: pi clamps it to the rungs models.json declares for this model, and /subagentc roles prints the level as written and as run. A read-only critique is where an explicit \"xhigh\" is worth asking for",
+        "==budget": "30 turns is this file raising the built-in 15: a read-only role may spend turns, it cannot spend privilege"
       }
     },
     "==roles.<name>": {
@@ -148,6 +167,7 @@
     "==roles.<name>.samplingByThinkingLevel": "the same bag keyed by thinking level, merged over .sampling for every level the model declares and looked up with the level the run actually settles on. The card names two presets only: thinking (above) and Instruct/non-thinking, which is the \"off\" block (temp 0.7 / top_p 0.8 / presence_penalty 1.5) — presence_penalty is what keeps a stream with no thinking tokens from looping. xhigh/medium/low all take the card's thinking numbers as written; the differing rungs above are an example of per-effort tuning, not card values, and a level block needs only the keys you change",
     "==roles.<name>.sampling.wire": "keys land top-level in the body, so write chat_template_kwargs and top_k here and never under extra_body — that nesting is the OpenAI SDK's client-side convention, which the SDK flattens before the wire. verification/role-sampling-wire.mjs asserts the bytes a child is really sent",
     "==roles.<name>.sampling.thinking": "thinking on/off is pi's job: thinkingLevel is mapped to the field this model takes (enable_thinking, chat_template_kwargs or reasoning_effort, per models.json compat). Naming reasoning_effort in a bag cancels that and warns at config-settle, and naming chat_template_kwargs replaces pi's whole object — repeat preserve_thinking in it or the child loses the reasoning trace the card asks agents to keep",
-    "==roles.<new-name>": "an entry naming a role that does not exist adds it: it then appears in <delegation> and /subagentc roles and is callable as subagent(role: \"<new-name>\"); names match [a-z][a-z0-9_-]{0,31}, case, spaces, - and _ being equal, so \"Senior Reviewer\" finds \"senior_reviewer\""
+    "==roles.<new-name>": "an entry naming a role that does not exist adds it: it then appears in <delegation> and /subagentc roles and is callable as subagent(role: \"<new-name>\"); names match [a-z][a-z0-9_-]{0,31}, case, spaces, - and _ being equal, so \"Senior Reviewer\" finds \"senior_reviewer\". Copy one of the three written-out role blocks above rather than typing a tools list from memory",
+    "==roles.<name>.docs": "the == keys inside a role entry are the same convention: no parser reads them, and a == key where a role name would go is skipped, not refused, because an unread note must never report a config error — an error makes the file degraded and floors every call"
   }
 }

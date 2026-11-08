@@ -109,9 +109,15 @@ appears in the `<delegation>` prompt section, in `/subagentc roles` with the fil
 callable as `subagent(role: "that-name")`. A new role must declare `tools` (an implicit `"*"` would make
 adding a role an escalation by accident), and its list is filtered against `FORBIDDEN_CHILD_TOOLS` whatever
 it asks for. Names are `[a-z][a-z0-9_-]{0,31}` and matched case/separator-insensitively, so `Senior Reviewer`
-finds `senior_reviewer`; two ids that fold together are refused at the parse. Nothing shipped edits or adds a
-role, because a written `tools` list is live privilege rather than documentation — `/subagentc roles` prints
-the built-ins with the shape to copy.
+finds `senior_reviewer`; two ids that fold together are refused at the parse. The shipped file writes all three
+built-ins out whole — `tools`, `description` and the child `prompt` copied verbatim from `roles.ts`, budgets this
+file's own choice — so the template to copy is in the file, and it still **adds no role and retunes no request**:
+the sampling bags it suggests for each role live under `==` keys, because a written `tools` list is live privilege
+while a documentation key is nothing at all. Two tests pin that restatement against `ROLES` (`schema.test.ts`, and
+the reader's copy in `config-parity.test.ts`), so drift in `roles.ts` fails a test instead of being silently
+overridden by stale config text. The `==` tolerance is deliberate and symmetric: a `==` key where a role name would
+go is *skipped*, not refused, by both parsers, because an unread note must never report a config error — an error
+marks the file `degraded` and floors every call in the session.
 
 The model still never supplies a tool list: it names a role, and every name in the table is human-authored,
 after the parent's gate floored config edits to `ask`.
@@ -549,7 +555,7 @@ output file); `/subagentc limits` prints the number, its source file and this co
 ## Commands
 
 ```bash
-npm test            # vitest run — 546 tests, no live provider needed
+npm test            # vitest run — 559 tests, no live provider needed
 npm run typecheck   # tsc --noEmit
 node verification/guard-turn-end.mjs    # the guard against the real pi loop: it continues the run, and says why
 node verification/role-sampling-wire.mjs  # a child's real request body, against a fake OpenAI server

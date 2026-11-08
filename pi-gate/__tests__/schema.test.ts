@@ -232,8 +232,9 @@ describe("defaults", () => {
 		expect(rawLimits.limits).toEqual(parsed.limits);
 		expect(parsed.errors).toEqual([]);
 		expect(parsed.limits).toEqual({ ...DEFAULT_SUBAGENT_LIMITS, defaultRole: "explore", roles: shipped.subagent.roles });
-		// The written role table re-states the three built-ins and their budgets only: no new role, no new tool,
-		// no rewritten prompt. A shipped file that added privilege would fail here, not in a running session.
+		// The written role table re-states the three built-ins in full and adds nothing: no new role, no new tool,
+		// no rewritten prompt, no sampling bag. A shipped file that added privilege or retuned a request would fail
+		// here, not in a running session.
 		const effective = applyRoleConfig(parsed.limits.roles).roles;
 		expect(Object.keys(effective).sort()).toEqual(["explore", "general-purpose", "review"]);
 		for (const name of ["explore", "general-purpose", "review"] as const) {
@@ -242,6 +243,23 @@ describe("defaults", () => {
 			expect(effective[name].prompt, name).toBe(ROLES[name].prompt);
 			expect(effective[name].maxTurns, name).toBeGreaterThanOrEqual(ROLES[name].maxTurns);
 			expect(effective[name].timeoutMinutes, name).toBe(ROLES[name].timeoutMinutes);
+			// The entries are templates, so they spell out every built-in field the file could tighten — but only
+			// budgets differ from `roles.ts`, and nothing ships a request-body retune.
+			const written = shipped.subagent.roles[name];
+			expect(Object.keys(written).sort(), name).toEqual(["description", "maxTurns", "prompt", "timeoutMinutes", "tools"]);
+			expect(written.tools, name).toEqual(ROLES[name].allowTools);
+			expect(written.description, name).toBe(ROLES[name].description);
+			expect(written.prompt, name).toBe(ROLES[name].prompt);
+			expect(parsed.limits.roles?.[name]?.sampling, name).toBeUndefined();
+			expect(parsed.limits.roles?.[name]?.samplingByThinkingLevel, name).toBeUndefined();
+			expect(parsed.limits.roles?.[name]?.thinkingLevel, name).toBeUndefined();
+			expect(effective[name].sampling, name).toBeUndefined();
+			expect(effective[name].samplingByThinkingLevel, name).toBeUndefined();
+			expect(effective[name].thinkingLevel, name).toBeUndefined();
+			// Every sampling bag the file suggests for this role is a documentation key: a suggestion that reached a
+			// real key would change what children send, which is exactly what these strings let a human decide.
+			const docs = Object.keys(raw.subagent.roles[name]).filter((key) => key.startsWith("=="));
+			expect(docs.join(" "), name).toContain("sampling");
 		}
 	});
 
@@ -253,6 +271,19 @@ describe("defaults", () => {
 });
 
 describe("documentation keys are never config", () => {
+	it("skips `==` keys inside subagent.roles, so a note in the role table is never a config error", () => {
+		// An error means a degraded config, which floors every call in the session: an unread note may not do that.
+		const parsed = parseSubagentConfig({ roles: { "==template": { tools: ["read"] }, explore: { maxTurns: 8 } } }, "test");
+		expect(parsed.errors).toEqual([]);
+		expect(Object.keys(parsed.limits.roles ?? {})).toEqual(["explore"]);
+		// Same inside an entry: documentation beside the live fields.
+		const inEntry = parseSubagentConfig({ roles: { r: { tools: ["read"], "==sampling": "{ temperature: 0.2 }" } } }, "test");
+		expect(inEntry.errors).toEqual([]);
+		expect(inEntry.limits.roles).toEqual({ r: { tools: ["read"] } });
+		// A name that is neither a role nor a doc key is still refused.
+		expect(parseSubagentConfig({ roles: { "Bad Name": { tools: ["read"] } } }, "test").errors).toHaveLength(1);
+	});
+
 	it("skips `==` surfaces in the permission map, so they create no rules", () => {
 		const parsed = parseGateConfig({ gate: { permission: { "*": "ask", "==powershell": { "*": "ask" }, bash: "ask" } } }, "t");
 		expect(parsed.entries.map((entry) => entry.surface)).toEqual(["*", "bash"]);

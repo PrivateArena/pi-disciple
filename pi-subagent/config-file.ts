@@ -177,6 +177,11 @@ function isRoleId(value: unknown): value is string {
 	return typeof value === "string" && ROLE_ID_PATTERN.test(value.trim());
 }
 
+/** Mirror of `pi-gate/schema.ts::isDocKey`: a `==` key is documentation, never config, in any map of this file. */
+function isDocKey(key: string): boolean {
+	return key.startsWith("==");
+}
+
 function normaliseRoleId(value: string): string {
 	return value.trim().toLowerCase();
 }
@@ -191,6 +196,7 @@ function readRoles(raw: unknown, file: string, errors: string[]): RoleConfigMap 
 	const out: RoleConfigMap = {};
 	const folded = new Map<string, string>();
 	for (const [key, value] of Object.entries(raw)) {
+		if (isDocKey(key)) continue; // an unread note must not become a config error, so it is skipped, not refused
 		if (!isRoleId(key)) {
 			errors.push(`${file}: subagent.roles key "${key}" must match ${ROLE_ID_PATTERN}, ignored`);
 			continue;
