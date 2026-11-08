@@ -1,659 +1,223 @@
-# PROJECT_OVERVIEW — pi-disciple
+<!-- codegraph-file-count: 114, last-commit: 707f6be52d5f0fcb453a101e793db1af442baad6 -->
 
-Two independent pi extensions, built to `ARCHITECTURE_PLAN_pi-sub-gate.md`:
+# pi-disciple v1.10.1 — TypeScript (strict ESM) pi extensions
 
-| Extension | One-line | Registered surface |
-| --- | --- | --- |
-| `pi-gate/` | Multi-scope permission gate for every `tool_call`, including nested subagent calls | `tool_call` handler, `/gatec`, `--no-gate`, footer status |
-| `pi-subagent/` | One blocking `subagent(role, task)` tool; the child runs in-process with zero extensions | `subagent` tool, `/subagentc` |
+## Purpose
 
-They share exactly one artifact: `~/.pi/agent/extensions/pi-gate/config.json` (`gate` + `subagent` sections).
-They share no imports — `pi-subagent/config-file.ts` is a deliberate copy of `pi-gate/config-file.ts`.
+Two independent **pi** (coding-agent harness) extensions built to the plan in `.scratch/ARCHITECTURE_PLAN_pi-sub-gate.md`, shipped from one repo and loaded together by `package.json → pi.extensions`. `pi-gate/` is a multi-scope permission gate: it turns every `tool_call` into a policy `Decision` (path / command / network facts → layered rules → dialog) and additionally runs an *output guard* that catches a model writing a tool call as text instead of making it. `pi-subagent/` adds one blocking `subagent(role, task)` tool that runs a child `AgentSession` in-process with zero extensions, a role table, wall-clock/turn ceilings with a human "extend?" dialog, and a report spilled to a transcript file. Language stack: TypeScript only (112 `.ts`, strict, `noEmit`, run directly by pi), plus 7 hand-run `.mjs` live probes in `verification/` and one Python analysis helper.
 
-## Why nested calls are gated for free
-
-The child `AgentSession` gets **shim tools** (`pi-subagent/shims.ts`) whose `execute()` forwards to the
-*parent's* `ExtensionToolContext.executeTool()`. So every child tool call runs inside the parent's tool
-pipeline: `tool_call` fires with `parentToolCallId = <subagentCallId>/<n>`, the parent's config decides,
-and the human answers one dialog in the parent — no cross-process permission forwarding, no second config.
-`FORBIDDEN_CHILD_TOOLS` (`subagent`, `codemode`, `tool_search`) is dropped so a child can neither recurse
-nor collapse 256 sequential calls into one unreviewable batch.
-
-## Module map
-
-Four modules of the gate are facades over a sub-package: `schema.ts`, `match.ts`, `policy.ts` and
-`guard.ts` re-export every symbol they used to declare, so the tests and `pi-subagent` keep importing the
-old paths while the implementations live one-per-concern below them. Nothing in a sub-package imports its
-facade, so there is no cycle; the facade is also where a module's own re-exports (`NETWORK_SURFACE`,
-`severity`) still live.
+## Architecture
 
 ```
-pi-gate/
-  schema.ts        FACADE over config-contract/ — the one public surface pi-subagent may import  step 3
-  config-contract/
-    action-vocabulary.ts  Action/Scope/PermissionEntry/GrantRule/HardDenyRule, isDocKey, isRecord   (leaf)
-    gate-section.ts       GateConfig, DEFAULT_GATE_CONFIG, parseGateConfig, hardDeny + grants lists
-    guard-section.ts      GuardConfig, DEFAULT_GUARD_CONFIG, parseGuardConfig, mergeGuardConfigs
-    role-vocabulary.ts    role names/ids, thinking levels, RoleConfig, the role ceilings
-    sampling-vocabulary.ts SamplingConfig + the .sampling / .samplingByThinkingLevel parsers
-    subagent-section.ts   SubagentLimits, the model pin, parseRolesConfig, parseSubagentConfig
-    tolerant-parse.ts     the readBoolean/readNumber/checkedPattern/trimmed probes every parser shares
-  config-file.ts   read/seed `<scope>/extensions/pi-gate/config.json`, JSONC tolerance    step 19
-  match.ts         FACADE over pattern/ + render/                                         step 4
-  pattern/
-    regex-dialect.ts      the `re:` dialect + the per-round match budget (leaf; config-contract sits on it)
-    glob.ts               wildcardMatch + `~`/`$HOME` expansion
-    rule-shape.ts         isExactRule, isScopedRule — what a rule's shape says about it
-    path-spellings.ts     pathSpellings, isUnder, pathPatternMatches, directoryPattern
-    protected-locations.ts the protected-path and external-directory floors
-    shell-segmentation.ts segmentCommands, peelEnvPrefix, tokenize, hasUnparsedExpansion
-    shell-commands.ts     wrappers, interpreters, arity, normaliseCommand, suggestBashPattern
-    compound-patterns.ts  chained (`&&`/`;`) patterns matched segment by segment
-  render/text.ts   codeSpan, shorten, displaySnippet — the strings the dialog and footer show
-  ordered-unique.ts the first-seen-order list every fact collector shares (a Set would lose the order)  new
-  network.ts       the egress facts: which host a call can reach, and what a domain rule means   new
-  inspect.ts       Facts: surfaces + paths + call ids extracted from a tool call           step 5
-  policy.ts        FACADE over policy-resolution/                                    steps 6, 7
-  policy-resolution/
-    call-decision.ts      Rule, Policy, FactCheck, GrantOffer, Stage, Decision, the surface taxonomy
-    override-mode.ts      "allow everything" mode + matchHardDeny, the layer above the ladder
-    policy-loading.ts     the mtime cache, loadPolicy, buildPolicy, the fallback layer, withSessionGrants
-    surface-matching.ts   patternMatches / matchRule / matchFact — which rule wins for one value
-    fact-evaluation.ts    evaluate, the stages, the floors, decide — the correctness core, kept whole
-    grant-offers.ts       what each dialog click actually writes
-  grants.ts        session (memory) + persisted (config file) grants, review log helpers   step 8
-  prompt.ts        the 9-choice dialog → AskResult, titles, block text                     step 9
-  log.ts           review.jsonl + redact()                                                step 18
-  handle.ts        the tool_call pipeline, injectable deps (FM-5 seam)                    steps 8, 9
-  guard.ts         FACADE over output-guard/                                                  new
-  output-guard/
-    guard-limits.ts       the budgets, ids and message type every other module reads
-    tag-shapes.ts         the call-dialect tag vocabulary + the tag scanner
-    message-scan.ts       one pass per message: code stripped, tags scanned
-    guard-rule.ts         Rule (a detector) and GuardHit (what it found)
-    detectors/            tag-rules · json-rules · protocol-tokens — mutually independent detectors
-    rule-registry.ts      BUILTIN_RULES, builtinRuleIds, how a config-written pattern is matched
-    detection.ts          detectMalformedCall: the veto, the thinking tail, the one hit to report
-    reminder-copy.ts      reminderText + guardNotice
-    session-budget.ts     what was already answered, how much rope is left, the two resets
-    turn-end-pipeline.ts  guardTurnEnd: is this the turn to read, and what `continue` costs
-  index.ts         wiring: flags, footer, tool visibility, /gatec                          steps 8, 9
-pi-subagent/
-  roles.ts         explore | general-purpose | review + applyRoleConfig: config edits them, new ones join the table    step 10
-  model-override.ts subagent.model pin: "provider/id" / "provider:id" / bare id -> Model     step 10
-  sampling.ts      subagent.roles.<name>.sampling/.thinkingLevel: a cloned Model carrying what this child sends    new
-  prompt.ts        child system prompt + task wrapper                                     step 11
-  delegation.ts    the `<delegation>` system prompt section: when to delegate, when not to    step 15
-  shims.ts         parent-pipeline tool shims, queue, 256-call ceiling                    step 12
-  ceiling.ts      the one-time "more rope?" dialog a spent budget asks: the ladder, the title, the answer rules    new
-  child.ts         FACADE over transcript/ + budget/ + run-exit/child-messages; `runChild()` itself - assembly,  steps 13, 14
-                   the subscriber (counters, streaming shape, the two asks), the race, the result
-  run-exit.ts      the outcome vocabulary: `Exit`, its precedence list, `pickEarlier` - an exit is combined,     new
-                   never assigned, because two budgets can be spent at once
-  child-messages.ts pure readers of what a child left behind: content shape, context tokens, error, report, usage  new
-  child-request.ts what child the config asks for: the `subagent.model` pin and the role's sampling/thinking     new
-                   retuning, with the warnings they owe the human - called at their own two positions
-  budget/
-    ceiling-vocabulary.ts  the words a spent budget speaks: reason, ask, grant, answer, report, handler (leaf)   new
-    ceiling-clock.ts       the two budgets, the held ceiling, the one offer - the mechanism, not the dialog     new
-  transcript/
-    paths.ts        where a child's artifacts live and how they are named: one child, one pair of files        new
-    retention.ts    which transcripts survive a run, and what happens to the reports of the ones that do not    new
-    report-spill.ts where a cut report is copied to, so the model can read it without the transcript           new
-  config-file.ts   FACADE over config-contract/, plus what is about the *file*: scopes, order, mtime cache     step 20
-  config-contract/
-    model-pin.ts    the inherit words of `subagent.model`, and the reader turning one into a pin or a refusal  (leaf)
-    role-names.ts   ROLE_ID_PATTERN, the two normalisations, the `==` doc-key rule, the role budget ceilings  (leaf)
-    sampling-bag.ts the thinking-level words, the request-body key rules, and the readers that use them          new
-    roles-table.ts  what one `subagent.roles` entry may trip - error-for-error with `pi-gate/schema.ts`          new
-    tolerant-parse.ts the shared probes (`readBoolean`, `isRecordish`) every parser here is built from           new
-  run-guard.ts     the one-child rule and its `globalThis` slot - the only process-global state here           new
-  report-budget.ts the byte cap on a report: the whole-line head, never cut mid-character                       new
-  card/
-    ui-status.ts  the frontend status vocabulary and the exit -> status bridge                       (leaf)     new
-    details.ts    the `details` a card is drawn from: the `@gotgenes/pi-subagents` names + Pendant header       new
-    progress.ts   a complete `details` for a *running* call - an empty one is not a status a UI can draw       new
-  run.ts           FACADE over run-guard/ + card/ + report-budget, and `composeResult`: status header,        steps 15, 16
-                   report budget + spill file, card fields
-  render.ts        the tool card: call title, status sentence, report body (pi + Pendant)   step 16
-  labels.ts        the strings a card is titled with: role display name, task label, task body — never clipped,
-                   and what the human answered about a spent budget (shared by render.ts and run.ts)
-  config-view.ts   the /subagentc text: effective config, model resolution, roles, catalog  step 20
-  index.ts         the single `subagent` tool + /subagentc                                  steps 15, 16
+pi harness events ──> pi-gate/index.ts ──> handle.ts ──> inspect(extract Facts) ──> fact-evaluation(evaluate)
+turn_end ───────────> output-guard/turn-end-pipeline ──> detection ──> detectors/* ──> reminder message
+grant accepted ─────> grants.ts (session array | file write, locked) ──> policy-loading re-read
+pi.registerTool(subagent) ──> run.ts ──> child.ts (AgentSession + shims) ──> ceiling-clock ──> ceiling dialog
+child tool call ────> shim.execute() ──> parent ExtensionToolContext.executeTool() ──> (back to tool_call above)
 ```
 
-Five `pi-subagent` modules are facades over a sub-package or a split-out module, on the same terms as the
-gate's four above: `child.ts`, `config-file.ts` and `run.ts` re-export every symbol they used to declare, so
-the tests and `verification/` keep importing the old paths while the implementations live one-per-concern below
-them. Production importers were redirected to the real module; nothing in a sub-package imports its facade, and
-nothing in `pi-subagent` gained a runtime import of `pi-gate` - the cross-extension edges stay `import type`.
+## File Tree
 
-## Config
-
-`pi-gate/config.json` is the shipped default. Scopes, lowest precedence first: built-in defaults →
-global file → project file (only when the cwd is trusted) → `grants.global` → `grants.project` →
-session grants. Within a surface, the **last matching pattern wins**; across facts, most-restrictive wins.
-
-`subagent` section is every knob the child has. `model` takes a `provider/id` pin, or one of the inherit
-words (`inherit`, `session`, `parent`, `default`) which mean "no pin" - that is how the shipped file shows
-the key without pinning anything. `maxTurns` / `timeoutMinutes` here are **ceilings**: a run gets
-`min(role, subagent)` turns and minutes, so the section can tighten a role and the shipped 30/20 caps the
-40-turn `general-purpose` role to 30 until you raise it. It also means the section alone cannot *raise* a
-role - `timeoutMinutes: 20` with the built-in 10-minute `explore` budget cuts `explore` at 10 minutes, which
-is why `subagent.roles.<name>.timeoutMinutes` exists. `/subagentc limits` and `/subagentc roles` print the
-ceiling, the role budget and the effective number together so the arithmetic is never guesswork.
-
-**How a deadline is decided** (`budget/ceiling-clock.ts`, `HARD_SETTLE_MS`, `REPORT_GRACE_MS`): at the role's minutes the
-child is *steered* to conclude (that is the whole point of the budget - a conclusion, not a kill); 60 s
-later the hard ceiling fires, and there the clock defers to the work: a run that is **streaming its report**
-(an assistant message with text and no tool call) or **mid tool call** (which means the steer has not even
-reached the model yet - the queue drains only between turns) is not cut - it gets until the report lands, or
-until the report wall (`ceiling + 3 min`) passes. So the longest possible run is `budget + 4 min`, and the
-artifact the delegation was paid for is never destroyed mid-sentence. `aborted` (human Esc) is immediate and
-unconditional; only time-based ceilings defer.
-
-**A spent budget is a question before it is a verdict** (`subagent.askToExtend`, `ceiling.ts`). When the turn
-limit or the time budget is reached, the run asks the human instead of steering to a conclusion: `Reject` (the
-old behaviour, verbatim) or one rung of `+20t/+5m · +40t/+10m · +60t/+15m · +100t/+25m`. The rungs are absolute
-additions, so one dialog means the same thing for a 10-turn `review` and a 200-turn custom role, and no rung
-exceeds what a config could have said anyway. The rule set is the gate's, because the risk is the same one:
-**only an explicit Extend choice extends** — Esc, a dismissed or timed-out dialog (5 min), or no UI at all
-enforces the ceiling unchanged (FM-11); one offer per run, whatever it was answered with, because a run that
-needs a second one was delegated the wrong size; and the title is the question and nothing else — the role,
-which budget ran out, and the counters (`turns: 2/2 · tool calls: 1 · elapsed: 6.5s · last: bash`) the decision
-is actually made on, in three lines. It does **not** print the task: the prompt is on the tool card above and
-in the transcript, only one child can hold the run guard at a time so the dialog can never be ambiguous, and a
-paragraph-long title scrolls `Reject` and the rungs off the screen — which would silently enforce the ceiling on
-a run the human meant to extend. `CeilingAsk.task` still carries it whole for a frontend with room to show it.
-
-Nothing pauses while the question is open, because the SDK has no pause and a slow human should not be billed
-for a stalled run — and a run the human means to extend is a run whose work is worth continuing. The hard
-ceiling therefore *holds* while an offer is pending, up to `CEILING_OFFER_HOLD_MS` (6 min: the backstop behind
-the dialog's own 5-minute timeout, so a broker that never answers cannot make a run unbounded). A granted
-extension restarts **both** budgets from the moment of the answer — +N turns, and the minutes counted from
-now, tool grace included — and the child is told so, in a steer that is deliberately not one of its two
-"conclude now" asks. What happened is reported wherever a human or a model reads: `budget extended by the user
-at the turn limit: +40 turns / +10 min` in the result header and on the card (also on the *running* card, so a
-long borrowed run looks like one), `extension declined by the user at the turn limit` when it was refused, and
-`details.ceiling` for a frontend. An extension never rewrites the exit: a run that needed the human's yes to
-finish still says so.
-
-`subagent.roles` is the role table: an entry naming a built-in edits it field by field (`tools`, `maxTurns`,
-`timeoutMinutes`, `description`, `prompt`), and an entry naming anything else **adds a role** — which then
-appears in the `<delegation>` prompt section, in `/subagentc roles` with the file it came from, and is
-callable as `subagent(role: "that-name")`. A new role must declare `tools` (an implicit `"*"` would make
-adding a role an escalation by accident), and its list is filtered against `FORBIDDEN_CHILD_TOOLS` whatever
-it asks for. Names are `[a-z][a-z0-9_-]{0,31}` and matched case/separator-insensitively, so `Senior Reviewer`
-finds `senior_reviewer`; two ids that fold together are refused at the parse. The shipped file writes all three
-built-ins out whole — `tools`, `description` and the child `prompt` copied verbatim from `roles.ts`, budgets this
-file's own choice — so the template to copy is in the file, and it still **adds no role and retunes no request**:
-the sampling bags it suggests for each role live under `==` keys, because a written `tools` list is live privilege
-while a documentation key is nothing at all. Two tests pin that restatement against `ROLES` (`schema.test.ts`, and
-the reader's copy in `config-parity.test.ts`), so drift in `roles.ts` fails a test instead of being silently
-overridden by stale config text. The `==` tolerance is deliberate and symmetric: a `==` key where a role name would
-go is *skipped*, not refused, by both parsers, because an unread note must never report a config error — an error
-marks the file `degraded` and floors every call in the session.
-
-The model still never supplies a tool list: it names a role, and every name in the table is human-authored,
-after the parent's gate floored config edits to `ask`.
-
-**A role can also retune the request itself** (`subagent.roles.<name>.thinkingLevel`, `.sampling`,
-`.samplingByThinkingLevel`; `pi-subagent/sampling.ts`). A child on a local endpoint otherwise inherits whatever
-the server was launched with — temperature 1.0, top_k 20, top_p 0.95, thinking `xhigh` — and an `explore` sweep
-wants different numbers from a `review`. Like every other role field this is config, never a tool parameter.
-
-They travel on a **cloned `Model`**, because pi already has a native channel for parameters it does not model:
-`Model.samplingParams` is merged into the request body *last* (so it outranks pi's named fields) and
-`Model.samplingParamsByThinkingLevel` over that for the level in effect, and `createAgentSession` uses the model
-object it was handed as given. An extension hook could not have done it: `before_provider_request` is fired by
-the session's *own* runner and a child runs with zero extensions, so a sampling extension installed in the
-parent never sees a child's body — which is why children were the one thing a provider-level `sampling` block
-in such an extension did not cover. `sampling` is a free-form bag (pi's `SamplingParams` is
-`Record<string, unknown>`), so `top_k`, `min_p`, `repetition_penalty`, `do_sample`, `chat_template_kwargs` and
-any future server key pass through untouched, structured values included; only a non-object block, a key that is
-not a field name and a non-finite number are refused, and an out-of-contract `temperature`/`top_p` is warned
-about and sent anyway — the endpoint is not ours to legislate for.
-
-Precedence, per key: the model's own `samplingParams` (`models.json`) < the role's `sampling` < the role's block
-for the thinking level the run uses. The role's flat block is applied at *every* level the model declares,
-because pi clamps the level inside its adapter and a role that asks `xhigh` on a model that stops at `high` must
-still get its own numbers. Keys the role does not name keep the model's values. The role's *own* level blocks need
-one step more, because pi looks a level bag up by the **clamped** level: `sampling.ts::foldLevels` re-keys each
-written level through the clamp before merging, so a block written for `xhigh` still lands on the run when the
-model has no `xhigh` — which is every plain `models.json` entry, since pi advertises `xhigh`/`max` only when
-`thinkingLevelMap` declares them. On a key conflict the block written for the level that is really in force wins,
-and among the folded-in ones the higher written level wins. `thinkingLevel` is a role field
-for the same reason: "thinking xhigh" is not a sampling parameter, it is what selects the level block — and
-`childThinkingLevel` is now pi's own clamp, so it both drops the level for a non-reasoning model and moves it to
-a rung this model has.
-
-The clone is not cosmetic: `ctx.model` *is* the parent session's object, so writing onto it would retune the
-session that delegated the work. Nothing about the change is silent: `sampling: temperature=0.2 · top_k=20` on
-the result card's identity line *and* on the running block (a long retuned run should be checkable before it is
-spent) plus a `thinking: off` or `thinking: high → xhigh (this model has no "high")` part whenever the child did
-not run on the session's own level, a `request:` line per role in `/subagentc roles` and a
-`replaced per role: explore=low → off` line in `/subagentc model`, both saying the level as written *and* as the
-model runs it, and a notify when the child's API is not one of the three OpenAI-compatible ones that read
-these fields at all (pi's own limit). Because the bag is merged over pi's own fields, a key like `model`,
-`max_tokens` or a thinking switch is legal and does override what pi wrote — and the switch is not always
-`reasoning_effort`: pi sends `enable_thinking` to a Qwen-format endpoint and `thinking`, `reasoning`,
-`chat_template_kwargs`, `chat_template_args` or `thinking_token_budget` for the other compat shapes, so all of
-them are named at config-settle time, the way `reasoning_effort` always was; a role naming one is told that it
-overrode a field pi sets itself and that the card will still name the session's
-model; the same warning pass checks every level block too, and `__proto__`-shaped keys are refused before they
-can pollute the bag. `verification/role-sampling-wire.mjs` drives the real chain — tool, `runChild`,
-`createAgentSession`, pi's adapter — against a fake OpenAI server and asserts on the bytes it was actually sent,
-including that override, against two models: one that declares its own `samplingParams`, and a Qwen-shaped one
-whose `thinkingLevelMap` hides rungs, for the fold, the switch warning and the reported level.
-
-**Except when two facts name the same thing.** An `edit` of `/x/a.ts` and the `path` fact `/x/a.ts` are
-one location described twice, so they are judged once, by the most **specific** rule about them: a
-concrete pattern (`path: "/secrets/*"`) beats a named surface's `"*"` (`edit: "ask"`), which beats
-`permission["*"]` — the last of these is only the default action for tools nobody configured, never a
-verdict about a location. That is what makes an in-workspace file operation pass *by default*, even in a
-config whose whole `permission` map is `{"*": "ask"}`: the `path` surface is the gate's statement about
-where the workspace ends, and a tool-name wildcard cannot out-rule it. Facts that name *different*
-things (every shell segment, every redirect target) still combine most-restrictive.
-
-Floors escalate a value to at least `ask` no matter what any rule says: protected paths (the gate's own
-config and code, pi's config files, git hooks, the project's `.pi`), shell wrappers/expansion, external
-directories, and any unparseable config (`degraded`). A floor is answered only by a rule that really
-names the call — an exact rule for protected paths and wrappers, and for an outside path any *scoped*
-rule (a concrete `/dir/*` pattern, which is what a folder grant writes), so `"*": "allow"`-shaped
-shortcuts never walk past them. Floors are **labels** and nothing more: they
-explain an unusual call in the dialog title and in the review log, and they decide nothing once "allow
-everything" is on; see the dialog section.
-
-## Egress, and what a rule pattern can be
-
-**A rule pattern is a glob, or a regex if you say so.** `match.ts::wildcardMatch` is the one matcher: `*`
-across any characters including `/`, `?` one character, `~`/`$HOME` expanded. A pattern starting `re:` is
-instead compiled as a JavaScript regex and matched **unanchored, case-insensitively** — `re:aliyuncs` blocks
-any host containing it — so `bash: "curl https?://([\\w-]+\\.)*aliyuncs\\.com": "deny"` is now a legal rule.
-The sigil is explicit because a glob and a regex cannot be told apart by eye (`*.env` is a valid regex
-matching almost nothing) and a silently-misread rule is a rule that let the wrong call through. Regex rules
-work on every surface and inside compound (chained) patterns. They are **never** an *exact* rule
-(`isExactRule` stays literal), so a regex can never satisfy a floor that demands the human named this call.
-An invalid `re:` is reported at config load and matches nothing — a typo can only ever fail to match, never
-widen. Bounded because a gate that hangs is an outage: source length cap, a wall-clock budget per pattern
-per **call** (`beginRegexRound`, so a slow rule degrades for one call and is not permanently dead), input
-cap, and a refusal of nested-quantifier shapes (`(a+)+`) at load, since `RegExp.test` cannot be interrupted
-once running. `/gatec status` names any pattern that blew its budget.
-
-**`network` is the third fact kind** (`network.ts`, plan step B). `inspect.ts` already knew what a command
-*does* and *where it writes*; it never knew *whom it reaches* — a URL was fed to the path spellings and came
-out as a bogus cwd-relative file. Now a call yields one fact per host: URL arguments, hosts inside quoted
-code strings (`python3 -c "…urlopen('http://…')"`, which the tokeniser alone cannot see), `user@host:/path`,
-the pinned address in `curl --resolve host:port:addr`, and a `url`/`uri`/`endpoint`/`href` parameter of any
-tool. Hosts are canonical (lowercased, port/userinfo/IPv6-brackets stripped, trailing dot dropped, IPv4
-literals in hex/octal/short form resolved to the dotted quad a rule is written against). Loopback is never a
-fact — prompting for `localhost` would train a human to click through an egress dialog. The default is
-`network: {"*": "allow"}`, so an existing config is unaffected; **naming the surface at all is opting in**,
-and `network_egress` is an unconditional floor answerable only by the network surface's own rules (a scoped
-pattern, or the surface's untouched default) — so `bash: "curl *": "allow"` can never become "never ask about
-a host again", exactly as `cat *` never answers a directory. `isMetadataEndpoint` / `METADATA_ENDPOINTS` name
-the credential-bearing endpoints (`169.254.169.254`, Alibaba's `100.100.100.200`, `metadata`, `fd00:ec2::254`)
-that a path rule could never catch, because the path (`/latest/meta-data/`) looks like any download.
-
-**Stated plainly, because it reads like a guarantee and is not one:** this matches **the address a call
-names**, not the traffic. A DNS answer pointing at a blocked host, an HTTP redirect, a proxy or registry set
-in `~/.npmrc`/`pip.conf`/`$HTTPS_PROXY`, and any program resolving a name itself are all outside it. Use
-`gate.hardDeny` for the mode-proof form, and a real network boundary if you need a boundary.
-
-## The output guard: the call the model wrote instead of making
-
-A model on an XML or JSON call dialect (pi's own prompt shows the shape it has to emit) sometimes puts the
-*markup* of a call on the text channel — `<tool_call>\n<\n</function>\n</tool_call>`, an `<invoke name=…>`
-envelope, a `<parameter=path>` fragment, a call-shaped JSON object, or the tail of one cut off mid-argument.
-Pi sees text, so no tool runs and the run **ends as if the agent had answered**: `stopReason: "stop"`, a
-confident sentence about work that never happened, and no error anywhere. `guard.ts` catches that at
-`turn_end`, on the one turn where the model spoke and nothing ran (`toolResults` empty, outcome `completed`,
-stop reason `stop` or `length`), and answers it the only way that saves the turn: it returns Pi's boundary
-result `{ entries: [custom_message], continue: true }`, which appends a short note the model reads as a user
-message and asks Pi for another turn. `verification/guard-turn-end.mjs` proves that against the real chain —
-`pi-gate` loaded as an extension, Pi's own boundary dispatch, a fake OpenAI server playing the broken model —
-and the paired scenario with the guard off is what makes it evidence: without the guard the run stops at the
-markup, with it the reminder is on the wire and the answer arrives one request later.
-
-**A false positive costs the exact thing the guard saves**, so the shape tests are strict and every one of them
-is a test: fenced and inline code is never a call (only a *closed* fence counts, since a truncated emission stops
-inside one), one balanced tag with no payload inside a sentence is prose, a call-shaped JSON object has to parse
-and have nothing but punctuation after it, a truncated one has to leave a brace or a string open *and* name call
-keys, and only the last `scanTailChars` (≤ 4096, the gate's regex probe budget) is read at all. Eight named rules
-(`call-tag`, `call-fragment`, `tool-name-tag`, `json-call`, `json-call-truncated`, `special-token`,
-`chat-template-token`, `call-in-thinking`) report which of them fired, and every one is switchable:
-`gate.guard.disableRules` in the file, `/gatec guard disable <id>` for the session, and `allowPatterns` as a
-human-written veto over the whole turn. `tool-name-tag` is the one dynamic rule — a tag named after a tool the
-session can actually call — so it reads `pi.getActiveTools()` rather than a list nobody maintains.
-
-The budget is what keeps a mistaken rule from becoming a broken session: `maxReminders` (default 3) per
-session, **refilled by the next real tool call**, and one reminder per assistant message however many turns look
-at it. `action: "notify"` reports to the human and lets the run end; `off`, `gate.guard.enabled=false`,
-`/gatec off` and `--no-gate` never look — the guard is part of the gate, not a separate switch. Hits go to
-`logs/guard.jsonl` whatever the action is, because that file is where a false positive is audited. An aborted
-turn is never reminded: a human pressed Escape, and that is not the model's mistake to correct.
-
-**A subagent child is not watched**, for the same structural reason the gate cannot see a child's dialogs: the
-child runs with zero extensions (`PROJECT_OVERVIEW` § *Why nested calls are gated for free*). Its tool calls are
-gated through the parent's pipeline, but its *messages* are produced in a session no parent hook sees, and
-`pi-subagent` shares no imports with `pi-gate` by design. A child that stops on a malformed call loses the turn
-and reports whatever it had; raising its budget is the current answer.
-
-## Slash commands
-
-Both are suffixed `c` ("command") so they cannot collide with a prompt file or skill of the same name:
-
-| Command | Output |
-| --- | --- |
-| `/gatec [status\|grants\|reload\|allow [off\|5min\|session]\|guard [off\|notify\|remind\|disable <rule>\|enable <rule>\|reset\|default]\|reset grants [project\|global]\|off\|on]` | gate status editor, grant list, reload, allow-everything, the guard's session knobs, clear grants, switch |
-| `/subagentc [model\|limits\|roles\|status\|models]` | the effective subagent config, or one section of it |
-
-`/subagentc` (was: "is a child running?") answers what the config actually does — the child model and
-whether it is inherited or pinned, each limit with the file that set it (`loadSubagentLimits` now records
-`origins`), the hard-coded roles with their budgets after the `subagent.maxTurns`/`timeoutMinutes` cap, the
-extension ladder and the window the clock holds for that dialog, transcript paths, the nested-call ceiling, the
-config files read (project vs global, trust state) and any parse errors. `models` lists what a `subagent.model` pin may name, flagging the session model, the
-current pin and models with no auth. `status` is the old one-line answer, which is only ever filled
-*during* a run — extension commands still run while a child blocks the session.
-
-## Child model
-
-By default the child runs on **the model the session is on** (`ctx.model`), and the result header names
-it (`model: local/qwen3.8-flash-next (inherited)`), so the answer never depends on opening transcripts;
-`/subagentc model` shows the same thing before a run, including where the pin was set.
-`subagent.model` pins a different one: `"provider/id"` (pi's CLI form), `"provider:id"`, or a bare id
-(an ambiguous bare id resolves against the parent's provider, else the error names the candidates).
-Gateway ids contain slashes and colons themselves, so a prefix counts as a provider only when the
-registry knows it. A bad pin warns and the child stays on the session model; overriding to a
-non-reasoning model also drops the child's thinking level to `off`. The pin is config, never a tool
-parameter - the model still cannot choose its own child model.
-
-**A call is up to three questions, and gets one dialog each.** *What it does* (its own surface: every shell
-segment, the tool name), *where it goes* (`path`, `external_directory`) and *whom it reaches* (`network`)
-are decided separately and
-asked in that order — `pi-gate: bash · location — … — question 2 of 2`. The split exists because the two
-questions are answered by different rule shapes: `cat *` says nothing about a directory. One merged dialog
-could only ever offer the command rule, so a whitelisted `cat /media/…/config.json | head -200` had its
-command facts all allowed, its only `ask` coming from the boundary fact, and **no choice in the dialog
-could close it** — it asked again on every retry, whatever was clicked. Now the location dialog offers the
-**containing folder** on the surface that asked (`external_directory: /media/…/CraftGang/*`, which also
-covers the folder itself and every sibling file), and one click ends it. The third question is the egress
-one: `network: <host>`, offered as the host, so a rule reads as the domain a human meant. A question is asked at most once
-per call, so a grant that leaves a floor standing cannot loop the human through the same dialog twice:
-answer every question the call raised and the call runs. A file tool's fact *is* a path, so file tools keep
-raising one question; a call that touches a **protected path** is offered as the *exact* command or file
-(never a wildcard, never a cross-cutting `path` rule), which is the only shape that floor accepts.
-
-Dialog choices, in list order: `Allow once` · `Allow with reason…` · `Allow <rule> for this session` ·
-`Allow <rule> for this project (<cwd>)` · `Allow <rule> for all projects` · `Abort` · `Abort with reason…` ·
-`Allow everything for this session` · `Allow everything for 5 minutes`. All three "Allow <rule>" choices
-write the **same** rule — one wildcard per command segment (`git status *`, `cd *`), stored per segment so a
-chained command actually matches later; destructive (`rm`, `sudo`, `chmod`, …) and wrapper segments stay
-exact. For a **file tool the rule is the containing folder** (`/x/y/*`, which also matches `/x/y` itself),
-not the one file: the directory is the unit a human means when they allow a file, and it is what every
-other harness grants on a sandbox escape. A path outside the workspace writes that pattern on
-`external_directory` as well as on the tool's own surface, because `external_directory` is the surface
-that asked — a grant naming only the tool would leave the outside-path question open and ask again
-forever. A dismissed or timed-out dialog aborts (never allows) — and Esc on a note input counts as dismissed,
-so changing one's mind mid-note never grants. No UI (`pi -p`) blocks with the exact rule needed to allow it.
-
-The two note-taking choices are mirrors, and both texts the model sees are short markdown: `Blocked by user
-with note: …` when the call is vetoed, `Allowed by user with note: …` prepended to the tool result when it is
-let through (`handle.ts` `attachNote`, keyed by `toolCallId` — a `tool_call` result has no text channel). The
-note travels with that one call, including a call made inside a subagent, which is what makes
-"allow with reason" usable to steer a running agent instead of only vetoing it. No JSON config snippets and no
-"do not retry" prose in any block text: they read as dares and invite config edits nobody asked for.
-
-**Nothing in the dialog is truncated.** The title shows the whole call, every surfaced fact, and the exact
-rule (`rule: …` line) that a grant choice would write — in full; the TUI word-wraps and scrolls. Only the
-option labels shorten the rule (they have to stay single-line), and the unshortened rule sits right above
-them. pi's own limits are separate and not extension-configurable: the collapsed transcript preview shows
-20 visual lines (`ctrl+o` toggles it), and the bash tool caps what the *model* sees at 2000 lines / 50KB
-while saving the full output to a temp file (`core/tools/truncate.js`) — the same "cut for the model, spill
-for the human" convention the subagent's report budget follows (see *The report is the artifact*).
-
-"Allow everything" (dialog, or `/gatec allow [off|5min|session]`) is **absolute**: while it is active no
-`tool_call` reaches the dialog — other commands, other tools, a file outside the workspace, a hidden
-`$(…)` argument, the gate's own config, pi's `settings.json`/`auth.json`, a git hook, even a config file
-too broken to parse. That is the point: the choice is made by a human who is about to walk away (an
-overnight run), and a switch that keeps asking is not a switch. Two things stay above it, and neither
-can raise a dialog: a `deny` rule blocks (an explicit instruction outranks a mode), and the mode is
-never inferable — not from a config file, not from the model, never across a restart.
-
-**`gate.hardDeny` is the deny that survives the mode** (`policy.ts::matchHardDeny`, checked in `handle.ts`
-*above* the allow early-return and above `allowAllActive`). An ordinary `deny` rule already outranks the
-mode; what `hardDeny` adds is a list that is **not a layer of the precedence ladder**, so no rule can be
-ordered past it and no dialog click can write or widen one — it is config-only, human-authored, and
-concatenated across the global and trusted-project files rather than scope-ordered. It looks at every fact
-of a call (its own surface, every path spelling, every host), because the thing it denies is a *thing*,
-not a surface. It is checked before the `allow` early-return, so a matching allow rule cannot outrank it
-either. What it is **not**: a firewall (see the egress section — it matches the address a call *names*),
-and not a defence against `--no-gate` / `gate.enabled=false` / an agent rewriting this very file while the
-mode is on, all of which stop the whole gate including this list.
-
-The trade-off, stated plainly: with the mode on the agent can rewrite the gate's own config, and that
-edit outlives the session. Floors stay as labels, so a `reviewLog` entry still names why a call looked
-unusual (`floors: ["protected_path"]`). Turning it on notifies, and the footer counts the window down;
-the 5-minute window closes on its own (status line + notify on expiry).
-
-A floor labels what is really there: it is computed from the call, not from whether some rule happened to
-be silent. And a rule whose pattern *is* the command — what "Allow this exact command" writes for a
-wrapper or destructive segment — is a decision about that command and is honoured; otherwise a grant for
-`npx vitest run` would be re-asked forever. Floors over coarse wildcards (`npx *`) still bite.
-
-## Role defaulting, and why the tool gets used at all
-
-`role` is **optional**; an unnamed call runs `subagent.defaultRole` (built in: `general-purpose`). Both earlier
-shapes cost usage: a *required* role made every omitted role a validation failure inside pi, which a model
-remembers as "this tool breaks", and *inferring* a role from the task text would let a regex decide
-capabilities that only the caller knows — the model is the one party holding the intent, and it just declined
-to name one. `general-purpose` is not an escalation: its tool list is the parent's own, and the parent's gate
-still judges each nested call, so a forgotten role adds no permission. `"defaultRole": "explore"` makes
-unnamed delegations read-only instead. Role words are canonicalized in `prepareArguments` (pi's pre-validation
-shim), so `Explore`, `General Purpose` and `gp` run rather than fail; a word that names no role (`browse`) is
-left untouched so the schema error teaches the model the enum. The old `code: "review"` alias is gone: "code"
-reads as "write code", and mapping it to the read-only role would have handed back a child that cannot do
-the task. Whatever role ran is shown as the human's decision, not the model's: `General Purpose (default)`
-on the card and `role: general-purpose (default)` in the result block — and
-`renderCall` tells "the arguments are still streaming" (`context.argsComplete`) apart from "no role arrived",
-which is what used to render a bare title.
-
-`subagent.delegationPrompt` (default `true`) adds a `<delegation>` system prompt section to each run
-(`delegation.ts`; `applyDelegationSection` in `index.ts`). It exists because the tool's own `description` is
-otherwise the only place the *reason* to delegate can live: pi renders `promptGuidelines` as flat bullets at
-the tail of `<rules>`, next to the bash and read tool mechanics — enough to say what a tool is, never enough
-to make a model reach for it. The section states when to delegate (more than about three reads or greps,
-bulky output where only a verdict matters, a bounded change described completely, a second opinion on work
-just done), when not to (one known read or edit, work the user asked to watch, the answer given to the
-user), and what a child needs (every path in `task`, because it sees none of this conversation). It is
-dropped when the tool or the switch is off, and when a handler forced the exact prompt text for the turn.
-**A `customPrompt` does not drop it** — measured with the `pi-system-prompt` package installed, which is what
-most pi setups run: pi renders a custom prompt as the `preamble` section and still appends the addendum,
-project context, skills and cwd, so a prompt package replaces pi's preamble rather than asking for silence
-from everything else. Dropping the section on `customPrompt` had it arriving nowhere at all. The text is
-stable per config, so pi's section diff sends it once and re-sends only on change.
-
-**Known structural limit, unchanged here:** one blocking child. OpenCode/Kilo-style fan-out (several explores
-at once, or background children with a result poll) is the other reason those harnesses delegate more; our
-`globalThis` guard and `executionMode: "sequential"` are load-bearing today — the shims run nested calls
-through the parent's pipeline, where the gate answers one dialog at a time.
-
-## The tool card
-
-Two separate mechanisms feed one card, and only one of them is ours.
-
-**pi's own renderer** (`pi-subagent/render.ts` — `renderCall`/`renderResult`) is what the terminal TUI and
-`/export` HTML use: a title line, one sentence about the run — `Agent completed in 21.0s (5 turns, 6 tool
-uses, 4.2k token).` — then `role · model · Agent ID`, the transcript path, and the child's report (10 lines
-collapsed with a "more lines" hint built from the expand keybinding, never a hardcoded `ctrl+o`; **whole**
-when expanded — expanding is the human asking for the rest, so there is no second clip). `details.report`
-holds the child's *complete* answer on its own, so the card never re-parses the model-facing text and never
-shows less than the child wrote. pi calls a renderer with `{ content, details }` only — never `usage` — which
-is why the token total is also carried in `details.tokens`.
-
-**The call block leads with the role and prints the whole prompt** (`labels.ts` builds the strings, so the
-TUI and the frontend `details` cannot drift): `Explore` in bold, then the complete task under it, exactly as
-sent. The role is the *first* line because a title is drawn in whatever width the transcript indent leaves,
-and a tail is what wraps and what truncates; a title that began with a fixed phrase and appended the role
-(`Launch subagent · explore`) buried the only variable part of the line. Nothing clips the task: a
-delegation prompt is the human's instruction to a child they cannot watch, and an ellipsis where the rest of
-the prompt should be makes the call unauditable (`taskLabel` flattens it to one line for single-line header
-slots, `taskBody` prints it verbatim; `ctrl+o` scrolling is pi's affordance and is enough). The prompt is
-there from the first render, before the child starts, and it is the same text at every state of the call —
-the states are the *role*'s, not the prompt's, and there are three because pi renders while the arguments
-stream: role named, role not yet arrived (`Launch subagent`, nothing invented), and role not sent at all
-(`General Purpose (default)`). The running result block does not repeat the task — the call block above it
-carries it whole.
-
-**What a non-TUI frontend (Pendant) reads is `details`, not the renderers** — it never invokes them, so a
-correct `Text` component buys nothing there. Worse: Pendant *claims our tool by name* — its subagent panel
-recognizes a tool called `subagent`, gives it its own subagent card, and "its `renderCall` and `renderResult`
-renderers are not used" (verified against the Pendant user guide shipped in the VSIX, `12-subagents.md`).
-That card takes the agent's *name* from the launch **arguments** — `agent` or `name` for the recognized
-`subagent` tool — and the label from `task`/`description`/`prompt`; our schema is `{ role, task }`, so
-Pendant found no name and titled the card with its generic fallback. That is why no role appeared in the
-card no matter what `formatCallBlock` returned. Two documented levers fix it from our side: `agent` in
-`details` (the key the panel vocabulary uses for a step's agent), and `details.pendant = { title, subtitle }`,
-which replaces the tool's name and the muted text after it in the header — read when the call finishes, and
-ignored by pi's terminal. `subtitle` carries the **entire prompt on one line**: Pendant's own rule for a
-header label is that it never shortens it in the data, only on screen, and "the whole label appears as its
-tooltip" — which is where a human reads what the child was told to do. `run.ts` emits both, plus the field
-names and status vocabulary
-`@gotgenes/pi-subagents` established (`AgentDetails`/`GetResultDetails`: `displayName`, `subagentType`, one-line
-`description`, `toolUses`, `durationMs`, `tokens`, `agentId`, `modelName`, `preview`, `uiStatus`), our own
-`exit`/`elapsedMs`/`toolCalls`, and `status` (`completed`/`running`/`stopped`/`aborted`/`error`) — a `status`
-it has no branch for leaves the card in its activity list with `No activity reported yet` where the result
-belongs, which was the original bug. Making the *live* Pendant card name the role would need an argument
-named `agent` or `subagent_type`, which the tool does not have and `prepareArguments` cannot fake: pi renders
-the assistant message's own arguments, not the prepared ones.
-`verification/probe-subagent-render.mjs` prints both `details` shapes and drives the renderers through the
-real pi Theme and real pi-tui components; `verification/tui-card.mjs` drives pi's real `ToolExecutionComponent`
-through streaming, running, finished and expanded, because the unit tests' fake theme cannot fail the way a
-frontend or a wrapping terminal does. Every `onUpdate` still carries a complete `SubagentDetails`
-(`status: "running"`, turns, tool uses, activity, model) and a 2s heartbeat re-emits it, so a child that thinks
-for minutes without a tool event keeps reporting activity.
-
-**Known limit, unchanged:** the *live* Pendant header still cannot name the role or show the prompt, because
-that card builds its header from the launch **arguments** and `details.pendant` is only read at completion.
-Fixing it needs an argument named `agent`/`subagent_type`, which the tool does not have and
-`prepareArguments` cannot fake (pi renders the assistant message's own arguments, not the prepared ones).
-
-## The report is the artifact: the model gets it whole
-
-A delegation buys one thing — the child's answer. Cutting that answer and pointing at the transcript was
-the old behaviour (`maxResultBytes: 20000`, footer "the full result is in the transcript"), and it was
-counter-productive in exactly the case it was meant to bound: the parent then read a multi-hundred-KB
-session JSONL to recover a tail it had already paid for, costing far more than the bytes it was spared. So
-in `composeResult`:
-
-- **Up to `subagent.maxResultBytes` (default now 64 KB) the report is returned whole**, line count
-  irrelevant — pi's `truncateHead` also enforces 2000 lines by default, and a report is prose, not tool
-  output, so the byte cap is passed as the only cap.
-- **Beyond it, the head goes to the model and the *complete* report is written beside the transcript** as
-  `<id>.report.md` (pi's own convention for cut tool output: name a file that holds only that output). The
-  footer states the sizes, names the file and says *not* to re-read the transcript. If the spill file
-  cannot be written (no transcript path, read-only home), the footer falls back to the transcript.
-- One enormous line (a pasted blob) cannot swallow the budget: `truncateHead` never returns a partial line,
-  so a 13-byte heading would be "the head" of a 20 KB budget. Past half the budget the cut moves to a byte
-  boundary, on a UTF-8 character start (`sliceBytes`) — pi's bash tool makes the same trade.
-- `details.report` is always the **whole** report: the byte cap bounds what the *model* is sent, never what
-  the human is shown.
-
-The cap is therefore a safety valve, not a budget — a report past 64 KB is a child that dumped a survey
-instead of reporting one, and that is the case the file is for. The spill file sits in the agent dir, so
-reading it is an `external_directory` call and the gate asks once (as it does for pi's own truncated bash
-output file); `/subagentc limits` prints the number, its source file and this contract.
-
-## Deviations from the plan (all verified against pi 1.4.0 types)
-
-1. `typebox@1.3.27` instead of `@sinclair/typebox` — pi aliases both; `StringEnum` comes from `@earendil-works/pi-ai`.
-2. `ToolCallEventBase` has **no `cwd`** in 1.4.0 (plan A3) — the handlers use `ctx.cwd`.
-3. Shipped defaults add `"subagent": "allow"`: the child's own calls are gated, so gating the delegation
-   too would double-prompt for a call that is only a container.
-4. Child retry is **enabled but bounded** (`maxRetries: 2`, `maxAgentDelayMs: 5000`) instead of off: the
-   free upstream 503s routinely, and the hard ceiling (now deferrable for a report, see Config) bounds the run.
-5. `reviewLog` records allow decisions too, not only ask resolutions (FM-17 audit value).
-6. Two extra modules: `pi-gate/handle.ts` (testable pipeline seam) and `pi-subagent/run-guard.ts` + `pi-subagent/run.ts` (guard, then result
-   mapping), so `index.ts` stays wiring only.
-7. The built-in default permission map is a real rule layer (`scope: "builtin"`) **only** when no config
-   file supplies `permission` — otherwise a machine with no config would prompt for every call, reads
-   included. A config that sets `permission` fully owns that layer, so its own `"*"` default still applies.
-8. `FactCheck.floor` is set for the `external_directory` fallback too (the type always had the variant, the
-   evaluator never assigned it) — an unlabelled floor would be invisible in a dialog title. Floors are
-   computed from the call itself (`protected_path`, `protected_read`, `wrapper`, `external_directory`,
-   `degraded_config`). They used to be split into `HARD_FLOORS`/`SOFT_FLOORS` and consulted by
-   `allowAllBypasses()`, which made protected paths and a broken config un-silenceable; that split is
-   gone (see the dialog section) — a floor now labels, it never overrules the mode.
-9. `protectedPathGlobs` guards the agent dir's *code and config* (`extensions/*`, `bin`, `npm`, `git`,
-   `settings.json`, `auth.json`, `models.json`, `SYSTEM.md`, …) rather than `~/.pi/agent/*` — flooring the
-   whole dir made every transcript or log read look like a threat. A protected path reached by a read-only
-   tool floors as `protected_read`, by anything that can write as `protected_path`; both are labels now.
-10. `@earendil-works/pi-tui` is a peer dependency: `render.ts` needs pi's `Text` component to return a
-    `Component` from `renderCall`/`renderResult`.
-11. The slash commands are `/gatec` and `/subagentc` (the plan had `/gate` and `/subagents`) — the `c`
-    keeps them clear of same-named prompt files and skills. `/subagentc` also grew from "is a child
-    running?" into the config browser: the tool blocks, so by the time a human can look, there is never
-    a running child to show.
-12. Rule matching carries a **specificity** (`policy.ts` `SPECIFICITY`), and facts are grouped by the
-    value they name before the call's action is combined. Without it `permission["*"] = "ask"` — a default
-    for unconfigured tools — silently outruled the `path` rules for every file tool that the config does
-    not name, so in-workspace `edit`/`write` prompted on machines whose config omitted those keys.
-13. Folder-wide grants (`match.ts` `directoryPattern` + `GrantOffer.alsoSurfaces`): one click on a file
-    allows its directory, and an outside directory gets the rule on `external_directory` too. Before
-    this, no grant of any shape could silence an outside path — the tool-surface grant let the
-    `external_directory` fact keep asking, so "Allow this file for all projects" changed nothing.
-14. The two-question evaluation (`policy.ts` `Stage`/`buildStages`/`offerLocationGrant`, the stage loop in
-    `handle.ts`, `GrantOffer.surfacePatterns`): a check joins the location stage when its value *is* a path
-    spelling, which is why file tools stay single-dialog while shell calls touching the outside get two.
-    `answersFloor` also accepts a call whose own rules are all exact ("the human named this call"), which
-    is what finally makes a protected-path call grantable from the dialog. The `degraded_config` floor is
-    raised only on the command stage — a broken config is one question, not one per fact.
-15. `subagent.role` is optional, with `subagent.defaultRole` (built in: `general-purpose`) filling an unnamed
-    call, and `resolveCallRole` never reads the task text. The plan's step 15 had the parameter required.
-16. `prepareArguments` canonicalizes role spellings. pi exposes it as the compatibility hook run before
-    validation, so it is where an alias belongs — not in a widened enum the model could abuse.
-17. A `delegation` system prompt section (`subagent.delegationPrompt`), injected from `before_agent_start` by
-    mutating `event.systemPromptOptions.sections`. The plan kept pi-subagent silent on the parent's prompt;
-    without it the whole delegation policy is two `<rules>` bullets.
-18. `promptGuidelines` is three bullets, not the plan's two under 160 characters in total (each bullet is
-    under 160). The role list, the self-contained-task rule and the context argument do not fit in two.
-19. A spent budget asks the human for a one-time extension (`subagent.askToExtend`, `pi-subagent/ceiling.ts`,
-    `child.ts::onCeiling`), which the plan did not have: a ceiling was only ever a verdict there. The mechanism
-    lives in `budget/ceiling-clock.ts` (mutable budget, a held ceiling, one offer) and the question in `ceiling.ts`, so the
-    child stays testable with no UI and the dialog stays testable with no session.
-20. `pi-gate` guards **output** as well as input (`guard.ts`), which the plan never asked for: the failure it
-    fixes is not a permission problem, but it is a call that never happened, and the gate is the extension that
-    already knows what a call is. It uses Pi's `turn_end` boundary result (`{entries, continue}`) rather than a
-    `tool_call` block, and its own `gate.guard` config block rather than a permission surface — there is nothing
-    to allow, ask or deny.
-
-## Commands
-
-```bash
-npm test            # vitest run — 559 tests, no live provider needed
-npm run typecheck   # tsc --noEmit
-node verification/guard-turn-end.mjs    # the guard against the real pi loop: it continues the run, and says why
-node verification/role-sampling-wire.mjs  # a child's real request body, against a fake OpenAI server
-node verification/tui-card.mjs            # the card as pi's own ToolExecutionComponent draws it
-node verification/rpc-gate-dialog.mjs "Allow once" /tmp/scratch   # dialog coverage (needs a provider)
-node verification/rpc-ceiling-dialog.mjs "Extend by 40 turns"     # the ceiling dialog, granted
-node verification/rpc-ceiling-dialog.mjs "Reject"                # …and refused: the old behaviour
-node verification/rpc-ceiling-dialog.mjs dismiss                 # …and unanswered: Esc enforces (FM-11)
+```
+pi-disciple/
+  package.json  tsconfig.json   pi.extensions = [pi-gate/index.ts, pi-subagent/index.ts]; ES2022/NodeNext, strict, noEmit, erasableSyntaxOnly
+  pi-gate/
+    index.ts  handle.ts  inspect.ts  network.ts  prompt.ts  grants.ts  log.ts  config-file.ts  ordered-unique.ts
+    schema.ts  match.ts  policy.ts  guard.ts        facades: re-export the sub-packages, no logic
+    config-contract/        parsed config sections + shared vocabularies (7 files)
+    pattern/                regex / glob / path / shell-segmentation primitives (8 files)
+    policy-resolution/      Rule/Policy/Decision types, loading, evaluation, grant offers (6 files)
+    output-guard/           turn_end malformed-call detection + detectors/ (12 files)
+    render/text.ts          dialog/footer text
+  pi-subagent/
+    index.ts  run.ts  child.ts  child-request.ts  child-messages.ts  shims.ts  roles.ts  config-view.ts
+    config-file.ts  ceiling.ts  render.ts  delegation.ts  prompt.ts  labels.ts  model-override.ts  sampling.ts
+    report-budget.ts  run-guard.ts  run-exit.ts
+    budget/  card/  transcript/  config-contract/                                (13 files)
+  verification/  .scratch/     7 live .mjs RPC/TUI probes (not in `npm test`); plan doc + .py helper
 ```
 
-Live smoke (uses the configured provider, run from a scratch dir):
+Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (32 source, 13 tests), other 9. Both are ≤ 60, so neither gets its own overview file.
 
-```bash
-pi --extension ./pi-gate/index.ts --extension ./pi-subagent/index.ts -p "…"
-node /tmp/rpc-driver.mjs "Allow once"     # answers the gate dialog over --mode rpc
+## Component Roles
+
+### pi-gate (permission gate)
+
+| File / Module | Role | LOC | Key Exports (with signatures) |
+|---|---|---|---|
+| pi-gate/index.ts | Extension entry: registers `--no-gate` flag, `/gatec`, the footer, and all five event handlers. | ~354 | `piGate(pi: ExtensionAPI)` |
+| pi-gate/handle.ts | The permission pipeline for one `tool_call`: hard-deny → policy → allow-all → ask → apply grant → log. | ~338 | `handleToolCall(event, ctx, state: GateState, deps?: GateDeps): Promise<ToolCallEventResult \| undefined>`; `attachNote(event: ToolResultEvent, notes: PendingNotes): ToolResultEventResult \| undefined`; `observeSubagentCall(state, event): void`; `subagentOwner(state, parentToolCallId?): {role, task} \| undefined`; `setAllowAll(state, allowAll: AllowAll): void` |
+| pi-gate/inspect.ts | Turns a tool call into `Facts` (surfaces, path spellings, shell segments, hosts) via per-surface extractors. | ~256 | `extract(toolName, input: Record<string,unknown> \| undefined, cwd, call: {callId, parentCallId?}): Facts`; `shellSegments(facts): string[]`; `isShellTool(toolName): boolean`; `segmentEnvPrefix(seg): string[]`; `redirectTargets(seg): string[]` |
+| pi-gate/network.ts | Egress facts: parse a host out of any token spelling, decide loopback/metadata, match domain rules. | ~390 | `parseNetworkTarget(token): NetworkTarget \| undefined`; `networkTargets(seg, cwd): string[]`; `hostDomainMatches(pattern, host): boolean`; `canonicalIpv4(value): string \| undefined`; `isMetadataEndpoint(host): boolean` |
+| pi-gate/prompt.ts | The human half: dialog title/options, grant summary text, block reasons, and `ask()`. | ~177 | `ask(ctx, decision: Decision, options: {cwd, signal?, timeoutMs?, sub?, io?, note?}): Promise<AskResult>`; `blockReason(decision, kind: "policy_deny"\|"hard_deny"\|"user_abort"\|"no_ui", instruction?): string`; `neededOffers(decision): GrantOffer[]`; `ruleLine(decision): string` |
+| pi-gate/grants.ts | Session-scoped grants array + persisted grant files under an in-process file lock. | ~182 | `createSessionGrants(): GrantRule[]`; `appendSession(grants, offer): GrantRule[]`; `appendPersisted(offer, scope: "global"\|"project", cwd): Promise<WriteResult>`; `resetPersisted(kind, cwd): Promise<WriteResult>`; `hasSessionGrant(grants, surface, value): GrantRule \| undefined` |
+| pi-gate/config-file.ts | Read/seed `<scope>/extensions/pi-gate/config.json` with JSONC tolerance and mtime probe. | ~124 | `readConfigFile(file): ConfigFileRead`; `getGlobalConfigFile(agentDir?): string`; `getProjectConfigFile(cwd): string`; `writeDefaultConfig(file, text): {created, error?}`; `stripJsonComments(text): string` |
+| pi-gate/log.ts | Redacted JSONL review + guard logs under `extensions/pi-gate/logs/`. | ~89 | `reviewLog(path, entry: LogEntry): Promise<void>`; `guardLog(path, entry: GuardLogEntry): Promise<void>`; `redact(text): string`; `defaultLogPath(): string` |
+| pi-gate/ordered-unique.ts | First-seen-order dedupe list the fact collectors share (a `Set` would lose the order). | ~15 | `pushUnique<T>(list: T[], value: T): boolean` |
+| pi-gate/schema.ts | Facade over `config-contract/` — the **only** module pi-subagent may import (type-only). | ~19 | no exports declared; `export * from "./config-contract/*"` |
+| pi-gate/policy.ts | Facade over `policy-resolution/`, keeps module-level re-exports. | ~32 | no exports declared; `export * from "./policy-resolution/*"` |
+| pi-gate/match.ts | Facade over `pattern/` + `render/`. | ~22 | no exports declared; `export * from "./pattern/*"` |
+| pi-gate/guard.ts | Facade over `output-guard/`; doc-only prose explaining the guard. | ~38 | no exports declared; `export * from "./output-guard/*"` |
+| pi-gate/policy-resolution/call-decision.ts | The decision vocabulary: every interface the pipeline passes around. | ~170 | `interface Rule extends PermissionEntry`; `interface Policy`; `interface FactCheck`; `interface GrantOffer`; `interface Decision`; `type Stage = "command"\|"location"\|"network"`; `isLocationSurface(surface): boolean`; `isNetworkSurface(surface): boolean` |
+| pi-gate/policy-resolution/fact-evaluation.ts | Core evaluator: facts → per-fact rule match → stage decisions → one call action. | ~301 | `evaluate(facts: Facts, policy: Policy): Decision`; `evaluateCall(toolName, input, cwd, call, policy): Decision`; `decideCall(stages, policy): {action, matched?}`; `isFullyDenied(toolName, policy): boolean`; `hiddenTools(toolNames, policy): string[]`; `recomputeActive(toolNames, policy): string[]` |
+| pi-gate/policy-resolution/policy-loading.ts | Build a `Policy` from builtin + global + project + grants layers, cached by file mtime. | ~203 | `loadPolicy(cwd, trusted, agentDir): Policy`; `buildPolicy({cwd, trusted, agentDir, globalFile, projectFile}): Policy`; `withSessionGrants(policy, grants: readonly GrantRule[]): Policy`; `resolveConfigPaths(cwd, trusted, agentDir?): {globalFile, projectFile}`; `clearPolicyCache(): void` |
+| pi-gate/policy-resolution/grant-offers.ts | Derive the rule a "allow next time" choice should write, per surface class. | ~131 | `offerGrant(facts, policy?): GrantOffer \| undefined`; `offerLocationGrant(facts, policy, checks): GrantOffer \| undefined`; `offerNetworkGrant(facts, policy, checks): GrantOffer \| undefined` |
+| pi-gate/policy-resolution/surface-matching.ts | One rule lookup for one (surface, value) pair across the precedence ladder. | ~50 | `patternMatches(surface, pattern, value, segments?): boolean`; `matchRule(surface, value, policy, isToolSurface, segments?): Rule \| undefined`; `matchFact(...): {rule?, specificity}` |
+| pi-gate/policy-resolution/override-mode.ts | The layer above the ladder: hard-deny list and timed "allow all" window. | ~67 | `matchHardDeny(facts, policy): {rule: HardDenyRule, value} \| undefined`; `allowAllActive(allowAll: AllowAll \| undefined, now: number): boolean` |
+| pi-gate/pattern/shell-segmentation.ts | Bash-aware split: segments, heredocs, `$(…)`, env prefixes, quoting. | ~185 | `segmentCommands(command): string[]`; `tokenize(seg): string[]`; `peelEnvPrefix(seg): {command, stripped}`; `hasUnparsedExpansion(seg): boolean` |
+| pi-gate/pattern/shell-commands.ts | Command identity: wrappers, interpreters, destructive heads, pattern suggestions. | ~151 | `normaliseCommand(seg): string`; `suggestBashPattern(seg): string`; `commandName(seg): string`; `isWrappedSegment(seg, inPipeline?): boolean`; `isDestructiveHead(seg): boolean` |
+| pi-gate/pattern/regex-dialect.ts | The `re:` pattern dialect, with ReDoS shape rejection and a per-round match budget. | ~145 | `isRegexPattern(pattern): boolean`; `compileRegexPattern(pattern): RegExp \| undefined`; `regexPatternError(pattern): string \| undefined`; `beginRegexRound(): void` |
+| pi-gate/pattern/path-spellings.ts | Every spelling of a path a rule could name (relative, absolute, realpath). | ~93 | `pathSpellings(p, cwd): string[]`; `pathPatternMatches(pattern, spelling): boolean`; `directoryPattern(spelling): string`; `realpathNearest(p): string \| undefined` |
+| pi-gate/pattern/protected-locations.ts | The always-ask floors: protected config/paths, and writes outside the cwd. | ~55 | `protectedPathGlobs(cwd, agentDir): string[]`; `isProtectedPath(spellings, globs): boolean`; `isExternalPath(spellings, cwd): boolean` |
+| pi-gate/pattern/glob.ts | `*`/`**` matching plus `~` expansion; the leaf every matcher bottoms out in. | ~66 | `wildcardMatch(pattern, value): boolean`; `expandHome(p): string` |
+| pi-gate/pattern/compound-patterns.ts | Chained (`&&`, `;`) patterns matched segment by segment. | ~45 | `compoundPatternParts(pattern): string[] \| undefined`; `matchesSegmentPattern(patternSegments, segments): boolean` |
+| pi-gate/pattern/rule-shape.ts | What a rule's text says about it (exact vs. scoped). | ~25 | `isExactRule(rule: {pattern}, value): boolean`; `isScopedRule(rule?: {surface, pattern}): boolean` |
+| pi-gate/config-contract/action-vocabulary.ts | The 3-value action alphabet shared by both extensions. | ~76 | `type Action = "allow"\|"ask"\|"deny"`; `type Scope`; `interface PermissionEntry`, `GrantRule`, `HardDenyRule`; `mostRestrictive(a, b): Action`; `isRecord(v): v is Record<string,unknown>` |
+| pi-gate/config-contract/gate-section.ts | Parse/flatten the `gate` section: permission, hardDeny, grants. | ~226 | `parseGateConfig(raw, where): ParsedGateConfig`; `flattenPermission(permission): PermissionEntry[]`; `parseHardDenyList(raw, where, errors): HardDenyRule[]`; `parseGrantList(raw, where, errors): GrantRule[]` |
+| pi-gate/config-contract/guard-section.ts | Parse/deep-merge the `gate.guard` section. | ~215 | `parseGuardConfig(raw, where, errors): Partial<GuardConfig>`; `mergeGuardConfigs(files): GuardConfig`; `type GuardAction = "off"\|"notify"\|"remind"` |
+| pi-gate/config-contract/subagent-section.ts | Parse the `subagent` section: limits, model pin, role table. | ~229 | `parseSubagentConfig(raw, where?): ParsedSubagentConfig`; `parseRolesConfig(raw, where, errors): RoleConfigMap \| undefined`; `parseModelValue(value): ModelValue`; `normalizeRoleWord(input): SubagentRoleName \| undefined` |
+| pi-gate/config-contract/role-vocabulary.ts | Role names/ids, thinking-level words, the `RoleConfig` shape. | ~80 | `type SubagentRoleName = "explore"\|"general-purpose"\|"review"`; `interface RoleConfig`; `type RoleConfigMap`; `isThinkingLevelWord(v): v is ThinkingLevelWord`; `foldRoleId(value): string` |
+| pi-gate/config-contract/sampling-vocabulary.ts | Tolerant parse of `.sampling` / `.samplingByThinkingLevel` bags. | ~102 | `type SamplingValue`; `parseRoleSampling(value, id, where, errors): Pick<RoleConfig,"sampling"\|"samplingByThinkingLevel"\|"thinkingLevel">`; `parseSamplingBlock(value, where, errors): SamplingConfig \| undefined` |
+| pi-gate/config-contract/tolerant-parse.ts | The typed-read probes every parser shares; a bad key is an error, not a throw. | ~46 | `readBoolean(doc, key, label, errors): boolean \| undefined`; `readNumber(doc, key, label, min, errors): number \| undefined`; `checkedPattern(pattern, label, errors): string \| undefined` |
+| pi-gate/output-guard/turn-end-pipeline.ts | The `turn_end` handler: detect, budget, notify or inject a reminder. | ~139 | `guardTurnEnd(event: TurnEndEvent, ctx, state: GuardTurnState, deps?: GuardTurnDeps): TurnEndEventResult \| undefined`; `effectiveGuardAction(config, budget): GuardAction` |
+| pi-gate/output-guard/detection.ts | Rule dispatch: run the active detectors in order, return the first hit. | ~83 | `detectMalformedCall(input: GuardInput): GuardHit \| undefined`; `activeRuleIds(config, sessionDisabled?): string[]` |
+| pi-gate/output-guard/detectors/tag-rules.ts | XML dialect: `<tool_call>`, `<invoke name=>`, `<parameter>` fragments. | ~92 | `callTags(scan: Scan): Tag[]`; `isCallNamePrefix(name): boolean`; `isToolNamePrefix(name, scan): boolean` |
+| pi-gate/output-guard/detectors/json-rules.ts | JSON dialect: call-shaped objects and truncated call tails. | ~152 | `isCallShapedJson(value, depth?): boolean`; `jsonCandidates(text): {source, end}[]`; `isTruncatedCall(text): boolean` |
+| pi-gate/output-guard/detectors/protocol-tokens.ts | Literal protocol-token rules (the `<tool_call>`-style markers). | ~29 | no exports (rules register through `rule-registry.ts`) |
+| pi-gate/output-guard/message-scan.ts | Pre-scan a message once: strip code fences, collect tags, resolve tool names. | ~41 | `buildScan(text, toolNames: ReadonlySet<string>, config): Scan`; `stripCode(text): string` |
+| pi-gate/output-guard/tag-shapes.ts | Tag lexer shared by the tag rules. | ~72 | `scanTags(text): Tag[]`; `normaliseTagName(name): string`; `hasArgumentShape(tag): boolean` |
+| pi-gate/output-guard/rule-registry.ts | id → rule table, and the user's own patterns grafted onto it. | ~41 | `builtinRuleIds(): string[]`; `matchConfiguredPattern(pattern, text): string \| undefined` |
+| pi-gate/output-guard/session-budget.ts | Per-session reminder/notice budget with refill. | ~46 | `createGuardBudget(): GuardBudget`; `refillGuardBudget(budget): void`; `resetGuardSession(budget): void`; `resetGuardCounters(budget): void` |
+| pi-gate/output-guard/guard-rule.ts | The `Rule` / `GuardHit` contracts one detector implements. | ~22 | `interface Rule`; `interface GuardHit` |
+| pi-gate/output-guard/guard-limits.ts | Tuning constants and the guarded message type id. | ~28 | `GUARD_MESSAGE_TYPE`, `REMINDABLE_STOP_REASONS`, `THINKING_TAIL_CHARS`, `JSON_CANDIDATE_LIMIT`, `THINKING_RULE_ID` |
+| pi-gate/output-guard/reminder-copy.ts | The reminder/notice text a detected call produces. | ~25 | `reminderText(hit: GuardHit, truncated: boolean): string`; `guardNotice(hit, action: GuardAction): string` |
+| pi-gate/render/text.ts | Markdown-safe text for dialogs and footer. | ~41 | `codeSpan(value): string`; `shorten(value, maxChars): string`; `displaySnippet(value, maxChars): string` |
+| pi-gate/__tests__/ (13 files) | Vitest suites: unit + `wiring.test.ts` boots the real extension against a fake `ExtensionAPI`; `stages.test.ts` asserts stage behaviour. | ~2.6k | n/a |
+
+### pi-subagent (delegation tool)
+
+| File / Module | Role | LOC | Key Exports (with signatures) |
+|---|---|---|---|
+| pi-subagent/index.ts | Extension entry: `subagent` tool (TypeBox params), `/subagentc`, `before_agent_start` delegation section. | ~359 | `piSubagent(pi: ExtensionAPI)`; `applyDelegationSection(options: PromptSectionsLike, limits, roles?): string`; `prepareRoleArgs(args): ToolArgs` |
+| pi-subagent/run.ts | Turns a `ChildResult` into the tool result the parent model reads, with the byte budget applied. | ~106 | `composeResult(result: ChildResult, role: RoleId, maxResultBytes, elapsedMs, extra?: Partial<SubagentDetails>): AgentToolResult<SubagentDetails>` |
+| pi-subagent/child.ts | Build and run the child `AgentSession` (no extensions, shim tools, ceiling clock, transcript dir). | ~297 | `runChild(input: ChildRunInput): Promise<ChildResult>`; `interface ChildResult`; `interface RunProgress`; `makeNullLoader(systemPrompt, contextFiles?): ResourceLoader`; `settleAbort(session, signal): Promise<void>` |
+| pi-subagent/child-request.ts | Resolve the child's model + thinking level + sampling from the role, honouring `inherit` pins. | ~102 | `resolveChildRequest({role, sessionModel, overridden, sessionThinkingLevel, onWarning}): ChildRequest`; `resolveModelPin(pin, registry, sessionModel, onWarning): ChildModelPin` |
+| pi-subagent/child-messages.ts | Read the child transcript back: final text, usage totals, context pressure. | ~91 | `lastAssistantText(messages): string`; `totalUsage(messages): Usage \| undefined`; `lastAssistantError(messages): string \| undefined`; `contextTokens(message): number` |
+| pi-subagent/shims.ts | Re-wrap parent tools for the child; `execute()` forwards into the parent pipeline, one at a time. | ~99 | `buildShims(tools: readonly AgentTool[], role: Role, host: ShimHost, limits?): ToolDefinition[]`; `isAllowedForRole(name, role): boolean`; `isDeniedByLimit(name, limits?): boolean`; `createQueue(): <T>(fn: () => Promise<T>) => Promise<T>` |
+| pi-subagent/roles.ts | The role table: built-ins plus config-applied roles, tool sanitisation, per-role ceilings. | ~320 | `resolveCallRole(input, fallback: RoleId, roles?): {role?: Role, roleDefaulted}`; `applyRoleConfig(config: RoleConfigMap \| undefined): AppliedRoleConfig`; `effectiveBudget(role, limits): {turns, minutes}`; `sanitiseTools(tools): {keep, dropped}`; `canonicalRole(input): RoleName \| undefined`; `mergeSamplingByLevel(base, override)` |
+| pi-subagent/config-file.ts | Read the `subagent` section of the shared config (deliberate copy of `pi-gate/config-file.ts`). | ~242 | `loadSubagentLimits(cwd, trusted, agentDir?): LoadedLimits`; `readSubagentSection(file, errors): Record<string,unknown> \| undefined` |
+| pi-subagent/config-view.ts | The `(all)\|model\|limits\|roles\|status\|models` text `/subagentc` prints; the highest fan-out module. | ~308 | `buildConfigView(input: ConfigViewInput, section?: ConfigSection): string`; `buildModelCatalog(models, opts?): string`; `formatRunning(running: RunGuard \| undefined, now?): string`; `describeParentTools(tools): string` |
+| pi-subagent/ceiling.ts | The "budget ran out" dialog broker: title, options, answer mapping. | ~141 | `createCeilingBroker(host: CeilingBrokerHost): CeilingAskHandler`; `ceilingTitle(ask): string`; `ceilingAnswerFor(picked): CeilingAnswer`; `ceilingLabels(): string[]` |
+| pi-subagent/budget/ceiling-clock.ts | Wall-clock + turn counter with grant extensions, abort wiring, overflow detection. | ~282 | `createCeilingClock(host: CeilingClockHost): CeilingClock`; `interface CeilingClock`; `interface CeilingCounters` |
+| pi-subagent/budget/ceiling-vocabulary.ts | Ceiling ask/grant/outcome types (no runtime imports). | ~61 | `type CeilingReason = "maxTurns"\|"timeout"`; `interface CeilingAsk`, `CeilingGrant`, `CeilingAnswer`, `CeilingReport`; `type CeilingAskHandler = (ask) => Promise<CeilingAnswer>` |
+| pi-subagent/model-override.ts | Resolve a human-written `provider/model` pin, incl. fuzzy `:`-less splits. | ~116 | `resolveChildModel(reference, registry, parent?): ChildModelResolution`; `parseModelRef(input, isProvider): ModelRef \| undefined`; `childThinkingLevel(model, requested): ThinkingLevel`; `childThinkingLabel(model, asked, effective, roleNamedLevel): string \| undefined` |
+| pi-subagent/sampling.ts | Fold the role's sampling bag for the child's effective thinking level onto the request. | ~147 | `applyRoleSampling(model, role, thinkingLevel): AppliedRoleSampling`; `isSamplingCapable(model): boolean`; `roleThinkingLevel(role, inherited): ThinkingLevel`; `samplingLabel(applied): string` |
+| pi-subagent/delegation.ts | The system-prompt section that teaches the model when to delegate, generated from the live role table. | ~67 | `buildDelegationSection({defaultRole, roles?}): string`; `roleLines(defaultRole, roles): string[]`; `delegationSectionWords(section): number` |
+| pi-subagent/render.ts | Tool-call / tool-result renderers for the TUI card. | ~198 | `renderSubagentCall(args, theme, context?): Text`; `renderSubagentResult(result, options, theme): Text`; `formatStatusLine(details: SubagentDetails, usage, theme): string`; `formatRunStats(details, usage): string` |
+| pi-subagent/card/details.ts | The `SubagentDetails` payload the card and the report both read. | ~143 | `interface SubagentDetails extends SubagentCardFields`; `cardFields(host, run): SubagentCardFields`; `pendantHeader(host): {pendant}`; `previewOf(report, maxChars?): string` |
+| pi-subagent/card/progress.ts | Live progress → card fields while the child runs. | ~61 | `formatProgress(progress: RunProgress, toolCount): string`; `progressDetails(progress, host: ProgressContext): SubagentDetails` |
+| pi-subagent/card/ui-status.ts | Map the run exit onto the card's status word. | ~35 | `uiStatus(exit: Exit): SubagentUiStatus` |
+| pi-subagent/labels.ts | Small display formatters shared by card and config view. | ~85 | `formatCeiling(report?: CeilingReport): string`; `formatDuration(ms): string`; `roleDisplayName(role?): string`; `taskLabel(task?): string` |
+| pi-subagent/transcript/paths.ts | Where a child's session file and spilled report live. | ~20 | `childSessionDir(parentSessionDir): string`; `reportFileFor(transcriptFile): string` |
+| pi-subagent/transcript/report-spill.ts | Write the long report out of the context and leave a path behind. | ~27 | `writeReport(transcriptFile: string \| undefined, report): string \| undefined` |
+| pi-subagent/transcript/retention.ts | Keep the last N child transcripts. | ~52 | `pruneTranscripts(dir, keep): Promise<number>` |
+| pi-subagent/run-guard.ts | GlobalThis-registered mutex: one child run at a time, claimable/releasable. | ~47 | `claimGuard(guard: RunGuard): void`; `currentGuard(): RunGuard \| undefined`; `releaseGuard(callId: string): void` |
+| pi-subagent/run-exit.ts | The terminal reason of a run, in severity order. | ~21 | `type Exit = "done"\|"aborted"\|"timeout"\|"maxTurns"\|"callLimit"\|"overflow"\|"error"`; `pickEarlier(a, b): Exit` |
+| pi-subagent/report-budget.ts | Byte-exact truncation of the report handed to the parent. | ~35 | `reportHead(report, maxBytes): {head, truncated, totalBytes}`; `sliceBytes(text, maxBytes): string` |
+| pi-subagent/prompt.ts | Assemble the child's system prompt (role text + cwd). | ~20 | `buildChildSystemPrompt(role: Role, cwd): string` |
+| pi-subagent/config-contract/ (5 files) | pi-subagent's own mirror of the config readers it needs (`readRoles`, `readRoleSampling`, `readModelValue`, `isRoleId`) so it never imports gate logic. | ~221 | `readRoles(raw, file, errors): RoleConfigMap \| undefined`; `readRoleSampling(value, id, file, errors)`; `readModelValue(value): {model?, error?}` |
+| pi-subagent/__tests__/ (13 files) | Vitest suites; `config-parity.test.ts` asserts the two mirrored parsers still agree. | ~1.8k | n/a |
+
+### root / verification
+
+| File / Module | Role | LOC | Key Exports |
+|---|---|---|---|
+| package.json | Workspace root: `pi.extensions`, peer deps on the pi runtime, vitest/tsc scripts. | 33 | n/a |
+| tsconfig.json | strict, `noEmit`, `verbatimModuleSyntax`, `erasableSyntaxOnly` — type-only cross-extension imports are provably erased. | 20 | n/a |
+| verification/rpc-gate-dialog.mjs | Drive `pi --mode rpc` with pi-gate loaded; assert the real dialog and its answers. | ~98 | script |
+| verification/rpc-subagent-gate.mjs | Assert a child's tool call raises the gate dialog **in the parent**. | ~60 | script |
+| verification/rpc-ceiling-dialog.mjs | Assert the ceiling dialog appears and grants extend the run. | ~115 | script |
+| verification/guard-turn-end.mjs | Live check that `gate.guard` keeps a run alive after a text-form tool call. | ~141 | script |
+| verification/role-sampling-wire.mjs | Live check that a role's `sampling` reaches the child's HTTP request body. | ~213 | script |
+| verification/tui-card.mjs, probe-subagent-render.mjs | What pi's terminal component actually draws for a subagent call. | ~74 / ~131 | script |
+
+## Cross-References
+
+| File | Called by / calls | Why it's central |
+|---|---|---|
+| pi-gate/policy-resolution/policy-loading.ts | ← `handle.ts`, `index.ts`, `fact-evaluation.ts` and 5 test files; → `config-contract/*`, `grants.ts` | Every decision reads the `Policy` this builds; the mtime cache and the layer order live here |
+| pi-gate/policy-resolution/fact-evaluation.ts | ← `handle.ts`, `policy.test.ts`, `stages.test.ts`; → `inspect.ts`, `surface-matching.ts`, `grant-offers.ts`, `protected-locations.ts`, `rule-shape.ts` | The single place where rules, stages and actions meet |
+| pi-gate/inspect.ts | ← `fact-evaluation.ts`, `grant-offers.ts`, `override-mode.ts`; → `network.ts`, `shell-segmentation.ts`, `path-spellings.ts`, `render/text.ts` | Converts arbitrary tool inputs into the typed `Facts` the whole gate consumes |
+| pi-gate/handle.ts | ← `index.ts`; → `grants.ts`, `log.ts`, `prompt.ts`, `override-mode.ts`, `policy-loading.ts`, `render/text.ts` | The one orchestrator: policy, dialog, grant write and log all in one function |
+| pi-subagent/child.ts | ← `index.ts` (via `run.ts`); → `budget/ceiling-clock.ts`, `child-messages.ts`, `prompt.ts`, `run-exit.ts`, `transcript/paths.ts` | Composes the child session: model, shims, ceiling, transcript |
+| pi-subagent/config-view.ts | ← `index.ts`, `config-view.test.ts`; → `model-override.ts`, `roles.ts`, `sampling.ts`, `transcript/paths.ts` | Reads every subsystem's effective state; highest reference count in the repo |
+
+## Data Flow
+
+```
+pi event                pi-gate handler                            result
+  tool_call        ──>  handleToolCall ── extract ── evaluate ──>  {allow | deny(blockReason) | ask}
+                            ask ── ctx.ui.select ── choice ──>    grants.ts (session | appendPersisted, locked)
+                            done ──>  reviewLog(JSONL, redacted)
+  tool_result      ──>  attachNote ──>  notes pending for the next call
+  turn_end         ──>  guardTurnEnd ── detect ──> GuardHit ──>   notify message | injected reminder (keeps run alive)
+
+pi-subagent                direction
+  model ── tool "subagent(role, task)" ──> runChild ── child AgentSession (0 extensions)
+     child tool call ── shim.execute ──> parent executeTool ──> parent tool_call event  (gate sees it, same dialog)
+     ceiling-clock ── ctx.ui.select (parent UI) ── grant/extend ──> clock reset
+     child report ──> report-spill file ──> composeResult (byte budget) ──> parent tool_result
 ```
 
-## Install into the dotfiles repo (plan step 22)
+## Key Architectural Patterns
 
-`config-pi/extensions/{pi-gate,pi-subagent}` + `"dirs": ["extensions"]` on the `pi` entry of the repo
-`config.json`; `npm:@gotgenes/pi-permission-system` removed from `config-pi/settings.json`.
-`zen-ai restore pi` copies both dirs to `~/.pi/agent/extensions/`; pi auto-discovers `index.ts` in each.
+1. **Facade modules**: `schema.ts`, `match.ts`, `policy.ts`, `guard.ts` contain no logic, only `export *` of their sub-package. Tests and `pi-subagent` keep importing the old paths; nothing in a sub-package imports its facade, so there is no cycle.
+2. **Type-only cross-extension coupling**: `pi-subagent` imports `../pi-gate/schema.ts` with `import type` only. `verbatimModuleSyntax` + `erasableSyntaxOnly` make the erasure verifiable, so deleting `pi-gate` leaves `subagent` running with defaults.
+3. **Mirrored, not shared, parsers**: `pi-subagent/config-contract/*` is a deliberate copy of the gate's readers, kept honest by `pi-subagent/__tests__/config-parity.test.ts` — ownership boundary over DRY.
+4. **Facts → stages → one action**: `extract()` produces surface-tagged facts; `buildStages` groups them into `command` / `location` / `network` questions; `decideCall` takes the most restrictive stage. Rules are ordered so "last match wins" always resolves towards the human.
+5. **Shim forwarding instead of IPC**: child tools are `ToolDefinition` wrappers whose `execute()` calls the parent's `ExtensionToolContext.executeTool()`, so nested calls are gated by the parent's policy with no second config or permission channel.
+6. **Injectable I/O seams**: `prompt.ts::AskIO`, `ceiling.ts::CeilingIO`, `turn-end-pipeline.ts::GuardTurnDeps`, `child.ts`'s `ResourceLoader` and `handle.ts::GateDeps` are all defaulted parameter objects, so no test needs a TTY or a live session.
+7. **Ordered-unique collection**: `pushUnique` arrays everywhere instead of `Set`, because the order facts were spelled in is what the dialog and the grant offer show.
+8. **mtime-keyed caches + file lock**: `policy-loading` caches the parsed policy by file mtime; `grants.ts` serialises grant-file writes through `withFileLock` so concurrent sessions cannot lose an append.
 
-**Caveat:** `copyDir` overwrites, so a restore replaces `~/.pi/agent/extensions/pi-gate/config.json` and
-with it any `grants.global` accumulated by clicking "Allow for all projects". Back that file up, or
-re-add grants after a restore.
+## Read Triggers
+
+| If you need to... | Open these files |
+|---|---|
+| Add a new tool surface the gate must judge (e.g. a new MCP tool) | pi-gate/inspect.ts (extractors, `looksLikePath`), pi-gate/policy-resolution/call-decision.ts (`Stage`, surface taxonomy), pi-gate/policy-resolution/surface-matching.ts |
+| Change how a rule pattern is matched (glob/regex/path) | pi-gate/pattern/glob.ts, pi-gate/pattern/regex-dialect.ts, pi-gate/pattern/path-spellings.ts, pi-gate/policy-resolution/surface-matching.ts |
+| Add a config key, or change precedence / defaults | pi-gate/policy-resolution/policy-loading.ts (`buildPolicy`, `orderRules`, `fallbackRulesFor`), config-contract/gate-section.ts, pi-gate/config-contract/tolerant-parse.ts, mirror pi-subagent/config-contract/* |
+| Change the permission dialog (options, wording, timeouts) | pi-gate/prompt.ts (`optionLabels`, `ask`, `blockReason`), pi-gate/handle.ts (`handleToolCall`), pi-gate/render/text.ts |
+| Add a new output-guard detector | pi-gate/output-guard/guard-rule.ts (interface), pi-gate/output-guard/detectors/*.ts as a template, pi-gate/output-guard/rule-registry.ts, pi-gate/config-contract/guard-section.ts (rule id list) |
+| Add or change a subagent role / its ceiling / sampling | pi-subagent/roles.ts, pi-gate/config-contract/role-vocabulary.ts, pi-subagent/sampling.ts, pi-subagent/child-request.ts |
+| Change what the child is allowed to call | pi-subagent/shims.ts (`FORBIDDEN_CHILD_TOOLS`, `isAllowedForRole`), pi-subagent/roles.ts (`sanitiseTools`) |
+| Change budget/timeout behaviour or the extend dialog | pi-subagent/budget/ceiling-clock.ts, pi-subagent/ceiling.ts, pi-subagent/budget/ceiling-vocabulary.ts |
+| Change the TUI card, the report text, or what `/subagentc` prints | pi-subagent/render.ts, pi-subagent/card/details.ts, pi-subagent/card/progress.ts, pi-subagent/run.ts (`composeResult`), pi-subagent/report-budget.ts, pi-subagent/config-view.ts |
+| Change what `/gatec` prints or logs | pi-gate/index.ts (`registerCommand`), pi-gate/log.ts, pi-gate/prompt.ts |
+
+## Dependencies
+
+### Runtime host (peerDependencies, `*` — provided by the pi install, never bundled)
+| Package / Module | Role |
+|---|---|
+| @earendil-works/pi-coding-agent | `ExtensionAPI`, `ExtensionContext`, `AgentSession`, `ToolDefinition`, event types |
+| @earendil-works/pi-ai | `Model<Api>`, `ModelRegistry`, `ThinkingLevel`, `Usage` |
+| @earendil-works/pi-tui | `Text`, `Theme` for the call/result renderers |
+| typebox | TypeBox schema for the `subagent` tool parameters |
+| Node builtins (`node:fs`, `node:path`, `node:os`, `node:readline`) | config read, grant file locking, transcripts, logging |
+
+### Dev toolchain
+| Package / Module | Role | Version |
+|---|---|---|
+| typescript | `tsc --noEmit` typecheck (no emit step; pi loads `.ts` directly) | ^5.9.3 |
+| vitest | unit + wiring suites under `__tests__/` | ^3.2.4 |
+
+## Build & Run
+
+| Command | Purpose |
+|---|---|
+| `npm test` | Full vitest suite (`vitest run`) |
+| `npx vitest run pi-gate/__tests__/stages.test.ts` | One suite while iterating |
+| `npm run typecheck` | `tsc --noEmit` over `pi-gate/**`, `pi-subagent/**` |
+| `node verification/rpc-gate-dialog.mjs` | Live `pi --mode rpc` probe of the real dialog |
+| `pi` with this repo on the extension path | Load both extensions (`pi.extensions` in package.json) |
