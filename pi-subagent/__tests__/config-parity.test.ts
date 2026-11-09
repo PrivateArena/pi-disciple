@@ -12,9 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
-import { parseSubagentConfig } from "../../pi-gate/schema.ts";
+import { parseSubagentConfig, SUBAGENT_TOOL_PROMPT_KEYS, SUBAGENT_TOOL_PROMPT_TOKENS } from "../../pi-gate/schema.ts";
 import { ROLES } from "../roles.ts";
-import { DEFAULT_LIMITS, loadSubagentLimits, MODEL_INHERIT_WORDS, ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "../config-file.ts";
+import { DEFAULT_LIMITS, loadSubagentLimits, MODEL_INHERIT_WORDS, ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING, TOOL_PROMPT_KEYS, TOOL_PROMPT_TOKENS } from "../config-file.ts";
 
 const dirs: string[] = [];
 
@@ -92,6 +92,25 @@ const CASES: [label: string, config: Record<string, unknown>][] = [
 		},
 	],
 	["a prototype-named sampling key", { roles: { r: { tools: ["read"], sampling: { ["__proto__"]: 1, top_k: 5 } } } }],
+	[
+		"a tool prompt block",
+		{ tool: { description: "delegate to {{roleNames}}; default {{defaultRole}}", promptSnippet: "  child sessions ", promptGuidelines: ["one", "two"] } },
+	],
+	["a tool prompt block that is not an object", { tool: ["description"] }],
+	[
+		"tool prompt fields of the wrong shape",
+		{ tool: { description: "", promptSnippet: 7, promptGuidelines: [], other: "x" } },
+	],
+	[
+		"tool prompt placeholders outside the vocabulary",
+		{ tool: { description: "{{role}}", promptGuidelines: ["fine", "{{rleName}}"] } },
+	],
+	["a documentation-only tool prompt block", { tool: { "==description": "suggested rewording", "==comment": "inert" } }],
+	["a tool block with nothing usable", { tool: {} }],
+	["a null tool block", { tool: null }],
+	["a tool block whose every bullet is bad", { tool: { promptGuidelines: ["{{a}}", "{{b}}"], promptSnippet: "kept" } }],
+	["documentation keys beside live ones in a tool block", { tool: { "==description": "suggested rewording", description: "live text" } }],
+	["a token spelling with spaces and case", { tool: { description: "{{ Roles }}", promptSnippet: "{{roles}}" } }],
 ];
 
 describe("the shipped duplication stays honest", () => {
@@ -101,7 +120,7 @@ describe("the shipped duplication stays honest", () => {
 			const where = document(config);
 			const file = loadSubagentLimits(where.cwd, false, where.agentDir);
 			// Same accepted values, key for key.
-			for (const key of ["enabled", "delegationPrompt", "askToExtend", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole"] as const) {
+			for (const key of ["enabled", "delegationPrompt", "askToExtend", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole", "tool"] as const) {
 				if (pure.limits[key] === undefined) continue;
 				expect(file.limits[key], key).toEqual(pure.limits[key]);
 			}
@@ -135,6 +154,9 @@ describe("the shipped duplication stays honest", () => {
 		expect(ROLE_ID_PATTERN.test("general-purpose")).toBe(true);
 		expect(ROLE_ID_PATTERN.test("Good Role")).toBe(false);
 		expect(MODEL_INHERIT_WORDS).toContain("inherit");
+		// The placeholder vocabulary both the parser and the renderer work from, one list per reader.
+		expect(TOOL_PROMPT_TOKENS).toEqual(SUBAGENT_TOOL_PROMPT_TOKENS);
+		expect(TOOL_PROMPT_KEYS).toEqual(SUBAGENT_TOOL_PROMPT_KEYS);
 	});
 });
 

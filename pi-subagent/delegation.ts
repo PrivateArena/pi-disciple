@@ -11,7 +11,7 @@
  * Pure string building; `index.ts` decides whether to inject it.
  */
 
-import { ROLES, type RoleId, type RoleTable } from "./roles.ts";
+import { MAX_LISTED_ROLES, ROLES, type RoleId, type RoleTable } from "./roles.ts";
 
 /** Section name in pi's structured system prompt (`^[a-z][a-z0-9_-]*$`). */
 export const DELEGATION_SECTION = "delegation";
@@ -26,13 +26,10 @@ export interface DelegationPromptInput {
 	roles?: RoleTable;
 }
 
-/** Roles the section lists: the word budget is a real limit, and an unnamed role is unhelpful to list. */
-const MAX_LISTED_ROLES = 8;
-
 /** One line per role, named the way the tool accepts them. */
 function roleLines(defaultRole: RoleId, roles: RoleTable): string[] {
 	const names = Object.keys(roles).filter((name) => roles[name].description);
-	const listed = names.slice(0, MAX_LISTED_ROLES);
+	const listed = names.slice(0, MAX_LISTED_ROLES); // the word budget is a real limit, and an unnamed role is unhelpful to list
 	const lines = listed.map((name) => {
 		const role = roles[name];
 		const tools = role.allowTools.includes("*") ? "may edit" : "reads only";

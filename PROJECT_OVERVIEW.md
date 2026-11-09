@@ -32,9 +32,9 @@ pi-disciple/
     render/text.ts          dialog/footer text
   pi-subagent/
     index.ts  run.ts  child.ts  child-request.ts  child-messages.ts  shims.ts  roles.ts  config-view.ts
-    config-file.ts  ceiling.ts  render.ts  delegation.ts  prompt.ts  labels.ts  model-override.ts  sampling.ts
+    config-file.ts  ceiling.ts  render.ts  delegation.ts  tool-declaration.ts  prompt.ts  labels.ts  model-override.ts  sampling.ts
     report-budget.ts  run-guard.ts  run-exit.ts
-    budget/  card/  transcript/  config-contract/                                (13 files)
+    budget/  card/  transcript/  config-contract/                                (14 files)
   verification/  .scratch/     7 live .mjs RPC/TUI probes (not in `npm test`); plan doc + .py helper
 ```
 
@@ -76,7 +76,7 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (
 | pi-gate/config-contract/action-vocabulary.ts | The 3-value action alphabet shared by both extensions. | ~76 | `type Action = "allow"\|"ask"\|"deny"`; `type Scope`; `interface PermissionEntry`, `GrantRule`, `HardDenyRule`; `mostRestrictive(a, b): Action`; `isRecord(v): v is Record<string,unknown>` |
 | pi-gate/config-contract/gate-section.ts | Parse/flatten the `gate` section: permission, hardDeny, grants. | ~226 | `parseGateConfig(raw, where): ParsedGateConfig`; `flattenPermission(permission): PermissionEntry[]`; `parseHardDenyList(raw, where, errors): HardDenyRule[]`; `parseGrantList(raw, where, errors): GrantRule[]` |
 | pi-gate/config-contract/guard-section.ts | Parse/deep-merge the `gate.guard` section. | ~215 | `parseGuardConfig(raw, where, errors): Partial<GuardConfig>`; `mergeGuardConfigs(files): GuardConfig`; `type GuardAction = "off"\|"notify"\|"remind"` |
-| pi-gate/config-contract/subagent-section.ts | Parse the `subagent` section: limits, model pin, role table. | ~229 | `parseSubagentConfig(raw, where?): ParsedSubagentConfig`; `parseRolesConfig(raw, where, errors): RoleConfigMap \| undefined`; `parseModelValue(value): ModelValue`; `normalizeRoleWord(input): SubagentRoleName \| undefined` |
+| pi-gate/config-contract/subagent-section.ts | Parse the `subagent` section: limits, model pin, role table, tool declaration text. | ~330 | `parseSubagentConfig(raw, where?): ParsedSubagentConfig`; `parseRolesConfig(raw, where, errors): RoleConfigMap \| undefined`; `parseToolPromptConfig(raw, where, errors): SubagentToolPrompt \| undefined`; `parseModelValue(value): ModelValue`; `SUBAGENT_TOOL_PROMPT_TOKENS` |
 | pi-gate/config-contract/role-vocabulary.ts | Role names/ids, thinking-level words, the `RoleConfig` shape. | ~80 | `type SubagentRoleName = "explore"\|"general-purpose"\|"review"`; `interface RoleConfig`; `type RoleConfigMap`; `isThinkingLevelWord(v): v is ThinkingLevelWord`; `foldRoleId(value): string` |
 | pi-gate/config-contract/sampling-vocabulary.ts | Tolerant parse of `.sampling` / `.samplingByThinkingLevel` bags. | ~102 | `type SamplingValue`; `parseRoleSampling(value, id, where, errors): Pick<RoleConfig,"sampling"\|"samplingByThinkingLevel"\|"thinkingLevel">`; `parseSamplingBlock(value, where, errors): SamplingConfig \| undefined` |
 | pi-gate/config-contract/tolerant-parse.ts | The typed-read probes every parser shares; a bad key is an error, not a throw. | ~46 | `readBoolean(doc, key, label, errors): boolean \| undefined`; `readNumber(doc, key, label, min, errors): number \| undefined`; `checkedPattern(pattern, label, errors): string \| undefined` |
@@ -114,6 +114,7 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (
 | pi-subagent/model-override.ts | Resolve a human-written `provider/model` pin, incl. fuzzy `:`-less splits. | ~116 | `resolveChildModel(reference, registry, parent?): ChildModelResolution`; `parseModelRef(input, isProvider): ModelRef \| undefined`; `childThinkingLevel(model, requested): ThinkingLevel`; `childThinkingLabel(model, asked, effective, roleNamedLevel): string \| undefined` |
 | pi-subagent/sampling.ts | Fold the role's sampling bag for the child's effective thinking level onto the request. | ~147 | `applyRoleSampling(model, role, thinkingLevel): AppliedRoleSampling`; `isSamplingCapable(model): boolean`; `roleThinkingLevel(role, inherited): ThinkingLevel`; `samplingLabel(applied): string` |
 | pi-subagent/delegation.ts | The system-prompt section that teaches the model when to delegate, generated from the live role table. | ~67 | `buildDelegationSection({defaultRole, roles?}): string`; `roleLines(defaultRole, roles): string[]`; `delegationSectionWords(section): number` |
+| pi-subagent/tool-declaration.ts | The tool's model-facing text — description, snippet, rules bullets — built from the live role table and `subagent.tool`, whose shipped values the config file also spells out. | ~120 | `buildToolDeclaration({roles, defaultRole}, overrides?): ToolDeclaration`; `expandToolTokens(text, tokens): string`; `DEFAULT_TOOL_PROMPT`; `DEFAULT_ROLE_PARAMETER_DESCRIPTION` |
 | pi-subagent/render.ts | Tool-call / tool-result renderers for the TUI card. | ~198 | `renderSubagentCall(args, theme, context?): Text`; `renderSubagentResult(result, options, theme): Text`; `formatStatusLine(details: SubagentDetails, usage, theme): string`; `formatRunStats(details, usage): string` |
 | pi-subagent/card/details.ts | The `SubagentDetails` payload the card and the report both read. | ~143 | `interface SubagentDetails extends SubagentCardFields`; `cardFields(host, run): SubagentCardFields`; `pendantHeader(host): {pendant}`; `previewOf(report, maxChars?): string` |
 | pi-subagent/card/progress.ts | Live progress → card fields while the child runs. | ~61 | `formatProgress(progress: RunProgress, toolCount): string`; `progressDetails(progress, host: ProgressContext): SubagentDetails` |
@@ -126,7 +127,7 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (
 | pi-subagent/run-exit.ts | The terminal reason of a run, in severity order. | ~21 | `type Exit = "done"\|"aborted"\|"timeout"\|"maxTurns"\|"callLimit"\|"overflow"\|"error"`; `pickEarlier(a, b): Exit` |
 | pi-subagent/report-budget.ts | Byte-exact truncation of the report handed to the parent. | ~35 | `reportHead(report, maxBytes): {head, truncated, totalBytes}`; `sliceBytes(text, maxBytes): string` |
 | pi-subagent/prompt.ts | Assemble the child's system prompt (role text + cwd). | ~20 | `buildChildSystemPrompt(role: Role, cwd): string` |
-| pi-subagent/config-contract/ (5 files) | pi-subagent's own mirror of the config readers it needs (`readRoles`, `readRoleSampling`, `readModelValue`, `isRoleId`) so it never imports gate logic. | ~221 | `readRoles(raw, file, errors): RoleConfigMap \| undefined`; `readRoleSampling(value, id, file, errors)`; `readModelValue(value): {model?, error?}` |
+| pi-subagent/config-contract/ (6 files) | pi-subagent's own mirror of the config readers it needs (`readRoles`, `readRoleSampling`, `readModelValue`, `readToolPrompt`, `isRoleId`) so it never imports gate logic. | ~290 | `readRoles(raw, file, errors): RoleConfigMap \| undefined`; `readToolPrompt(raw, where, errors): SubagentToolPrompt \| undefined`; `readRoleSampling(value, id, file, errors)`; `readModelValue(value): {model?, error?}`; `TOOL_PROMPT_TOKENS` |
 | pi-subagent/__tests__/ (13 files) | Vitest suites; `config-parity.test.ts` asserts the two mirrored parsers still agree. | ~1.8k | n/a |
 
 ### root / verification
@@ -192,6 +193,7 @@ pi-subagent                direction
 | Change the permission dialog (options, wording, timeouts) | pi-gate/prompt.ts (`optionLabels`, `ask`, `blockReason`), pi-gate/handle.ts (`handleToolCall`), pi-gate/render/text.ts |
 | Add a new output-guard detector | pi-gate/output-guard/guard-rule.ts (interface), pi-gate/output-guard/detectors/*.ts as a template, pi-gate/output-guard/rule-registry.ts, pi-gate/config-contract/guard-section.ts (rule id list) |
 | Add or change a subagent role / its ceiling / sampling | pi-subagent/roles.ts, pi-gate/config-contract/role-vocabulary.ts, pi-subagent/sampling.ts, pi-subagent/child-request.ts |
+| Reword what the model is told about the subagent tool | `subagent.tool` in config.json (placeholders in `==tool.tokens`), pi-subagent/tool-declaration.ts, pi-subagent/index.ts (`prepareLoadout`, `applyToolPromptDeclaration`) |
 | Change what the child is allowed to call | pi-subagent/shims.ts (`FORBIDDEN_CHILD_TOOLS`, `isAllowedForRole`), pi-subagent/roles.ts (`sanitiseTools`) |
 | Change budget/timeout behaviour or the extend dialog | pi-subagent/budget/ceiling-clock.ts, pi-subagent/ceiling.ts, pi-subagent/budget/ceiling-vocabulary.ts |
 | Change the TUI card, the report text, or what `/subagentc` prints | pi-subagent/render.ts, pi-subagent/card/details.ts, pi-subagent/card/progress.ts, pi-subagent/run.ts (`composeResult`), pi-subagent/report-budget.ts, pi-subagent/config-view.ts |

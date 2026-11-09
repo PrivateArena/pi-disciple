@@ -79,6 +79,14 @@ export const ROLES: Record<RoleName, Role> = {
 export const ROLE_ORDER: readonly RoleName[] = ["explore", "general-purpose", "review"];
 
 /**
+ * How many roles a piece of model-facing prose lists before it says "and N more": the bound `delegation.ts`
+ * renders its role list by, and the one `tool-declaration.ts` expands `{{roles}}`/`{{roleNames}}` by. One constant
+ * because the two lists have to agree about where a role stops being named — a role in one and not the other is
+ * the drift this extension exists to avoid.
+ */
+export const MAX_LISTED_ROLES = 8;
+
+/**
  * The role an unnamed call gets (`subagent.defaultRole` decides; this is the built-in).
  * `general-purpose` is not an escalation — its tool list is the parent's own, and the parent's gate still
  * judges every nested call — whereas defaulting to a read-only role would silently refuse the edits a

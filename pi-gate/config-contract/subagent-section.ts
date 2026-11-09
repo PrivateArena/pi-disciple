@@ -44,6 +44,85 @@ export function parseModelValue(value: unknown): ModelValue {
 	return { model: text };
 }
 
+/**
+ * The model-facing declaration of the `subagent` tool (`subagent.tool`): pi's three registration strings, which
+ * the shipped defaults hard-code. Absent, or with nothing usable in it, means the shipped text exactly.
+ *
+ * Each value may use the placeholders of {@link SUBAGENT_TOOL_PROMPT_TOKENS}, which are filled from the
+ * *effective* role table on every request — so a role added under `subagent.roles` reaches the tool description,
+ * the parameter list and the `<rules>` bullets without any of them being written twice. An unknown placeholder is
+ * an error rather than literal text, because `{{role}}` sent to the model is a typo nobody reads.
+ */
+export interface SubagentToolPrompt {
+	/** The tool `description`: the field a model weighs when it chooses a tool. */
+	description?: string;
+	/** The one-line `promptSnippet` of the `<available_tools>` list; a tool without one is not listed at all. */
+	promptSnippet?: string;
+	/** The `promptGuidelines` bullets this tool appends to `<rules>`. */
+	promptGuidelines?: string[];
+}
+
+/** The keys of a `subagent.tool` block, in the order the parser reports them. */
+export const SUBAGENT_TOOL_PROMPT_KEYS = ["description", "promptSnippet", "promptGuidelines"] as const satisfies readonly (keyof SubagentToolPrompt)[];
+
+/** The placeholders `subagent.tool` text may use; filled by `pi-subagent/tool-declaration.ts`. */
+export const SUBAGENT_TOOL_PROMPT_TOKENS = ["roles", "roleNames", "defaultRole"] as const;
+
+/** One `{{token}}` occurrence, and whether this vocabulary answers to it. */
+export function unknownToolPromptToken(text: string): string | undefined {
+	for (const match of text.matchAll(/\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g)) {
+		if (!(SUBAGENT_TOOL_PROMPT_TOKENS as readonly string[]).includes(match[1]!)) return match[0];
+	}
+	return undefined;
+}
+
+/**
+ * Parse one `subagent.tool` block. Never throws; a bad field contributes one error and is dropped, so a typo in
+ * the description cannot delete the tool's guidance wholesale. Mirror: `pi-subagent/config-contract/tool-prompt.ts`.
+ */
+export function parseToolPromptConfig(raw: unknown, where: string, errors: string[]): SubagentToolPrompt | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (!isRecord(raw)) {
+		errors.push(`${where}: subagent.tool must be an object of ${SUBAGENT_TOOL_PROMPT_KEYS.join(", ")}, ignored`);
+		return undefined;
+	}
+	const out: SubagentToolPrompt = {};
+	for (const [key, value] of Object.entries(raw)) {
+		if (isDocKey(key)) continue; // an unread note may not become a config error
+		if (!(SUBAGENT_TOOL_PROMPT_KEYS as readonly string[]).includes(key)) {
+			errors.push(`${where}: subagent.tool.${key} is not a tool prompt key (${SUBAGENT_TOOL_PROMPT_KEYS.join(", ")}), ignored`);
+			continue;
+		}
+		if (key === "promptGuidelines") {
+			if (!Array.isArray(value) || !value.length || value.some((line) => typeof line !== "string" || !line.trim())) {
+				errors.push(`${where}: subagent.tool.promptGuidelines must be a non-empty array of non-empty strings, ignored`);
+				continue;
+			}
+			const kept: string[] = [];
+			value.forEach((line, index) => {
+				const token = unknownToolPromptToken(String(line));
+				if (token) errors.push(`${where}: subagent.tool.promptGuidelines[${index}] uses unknown token "${token}" (known: ${SUBAGENT_TOOL_PROMPT_TOKENS.map((name) => `{{${name}}}`).join(", ")}), ignored`);
+				else kept.push(String(line).trim());
+			});
+			if (kept.length) out.promptGuidelines = kept;
+			continue;
+		}
+		const text = value;
+		if (typeof text !== "string" || !text.trim()) {
+			errors.push(`${where}: subagent.tool.${key} must be a non-empty string, ignored`);
+			continue;
+		}
+		const token = unknownToolPromptToken(text);
+		if (token) {
+			errors.push(`${where}: subagent.tool.${key} uses unknown token "${token}" (known: ${SUBAGENT_TOOL_PROMPT_TOKENS.map((name) => `{{${name}}}`).join(", ")}), ignored`);
+			continue;
+		}
+		if (key === "description") out.description = text.trim();
+		else out.promptSnippet = text.trim();
+	}
+	return Object.keys(out).length ? out : undefined;
+}
+
 export interface SubagentLimits {
 	/** Master switch for the `subagent` tool (`subagent.enabled`). */
 	enabled: boolean;
@@ -78,6 +157,11 @@ export interface SubagentLimits {
 	 * the built-in table exactly (`pi-subagent/roles.ts::applyRoleConfig`).
 	 */
 	roles?: RoleConfigMap;
+	/**
+	 * Model-facing overrides of the tool's own declaration (`subagent.tool`): description, snippet, guideline
+	 * bullets. Absent means the shipped text (`pi-subagent/tool-declaration.ts`).
+	 */
+	tool?: SubagentToolPrompt;
 	/**
 	 * Add the `delegation` system prompt section ("when to hand work to a child") to runs of this session
 	 * (`subagent.delegationPrompt`). Without it the only guidance the model gets is the tool's own
@@ -221,6 +305,8 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 	}
 	const roles = parseRolesConfig(raw.roles, where, errors);
 	if (roles) limits.roles = roles;
+	const tool = parseToolPromptConfig(raw.tool, where, errors);
+	if (tool) limits.tool = tool;
 	const delegationPrompt = readBoolean(raw, "delegationPrompt", `${where}: subagent.delegationPrompt`, errors);
 	if (delegationPrompt !== undefined) limits.delegationPrompt = delegationPrompt;
 	const askToExtend = readBoolean(raw, "askToExtend", `${where}: subagent.askToExtend`, errors);

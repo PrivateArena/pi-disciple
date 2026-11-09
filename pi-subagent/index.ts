@@ -10,10 +10,10 @@
  * `ctx.executeTool()`, so every nested call runs in the parent's tool pipeline, where pi-gate lives.
  */
 
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ToolLoadout, type ToolLoadoutChanges } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { type Static, Type } from "typebox";
-import { canonicalRole, effectiveBudget, type RoleId, resolveCallRole, ROLE_ORDER, setConfiguredDefaultRole, type RoleTable } from "./roles.ts";
+import { applyRoleConfig, canonicalRole, effectiveBudget, type RoleId, resolveCallRole, setConfiguredDefaultRole, type RoleTable, DEFAULT_ROLE_NAME } from "./roles.ts";
 import { buildShims, type ShimHost } from "./shims.ts";
 import { runChild } from "./child.ts";
 import type { RunProgress } from "./child.ts";
@@ -21,11 +21,12 @@ import type { CeilingReport } from "./budget/ceiling-vocabulary.ts";
 import { childSessionDir } from "./transcript/paths.ts";
 import { pruneTranscripts } from "./transcript/retention.ts";
 import { createCeilingBroker } from "./ceiling.ts";
-import { loadSubagentLimits, EXTENSION_CONFIG_SLUG } from "./config-file.ts";
+import { loadSubagentLimits, type LoadedLimits, EXTENSION_CONFIG_SLUG } from "./config-file.ts";
 import { resolveChildModel } from "./model-override.ts";
 import { resolveChildRequest, resolveModelPin } from "./child-request.ts";
 import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type SubagentCommandArg } from "./config-view.ts";
 import { buildDelegationSection, DELEGATION_SECTION } from "./delegation.ts";
+import { buildToolDeclaration, type ToolDeclaration } from "./tool-declaration.ts";
 import { claimGuard, currentGuard, releaseGuard } from "./run-guard.ts";
 import { formatProgress, progressDetails } from "./card/progress.ts";
 import { composeResult } from "./run.ts";
@@ -33,6 +34,48 @@ import { renderSubagentCall, renderSubagentResult } from "./render.ts";
 
 /** How often a running child re-announces itself, even when it emitted no event. */
 const PROGRESS_TICK_MS = 2000;
+
+/**
+ * The declaration in force: the model-facing strings of this tool, rebuilt from the config's `subagent.tool`
+ * overrides and the *effective* role table.
+ *
+ * It is rebuilt at every `before_agent_start` — the one place that knows both the real cwd and the real trust
+ * level, and where the config is already loaded — because pi snapshots a registered tool's `description`,
+ * `promptSnippet` and `promptGuidelines` when the extension loads. A role the human added after that load is
+ * callable either way (the schema takes a string, `execute` validates it against the table), and this holder is
+ * what makes it *visible* in the prose without a restart. `loadSubagentLimits` is mtime-cached, so this costs
+ * nothing when the file did not change. What still speaks the load-time text is the `role` parameter's schema and
+ * any prompt read outside a run (`session.systemPrompt`), which is why the parameter lists no default and the
+ * description repeats the list.
+ */
+let declaration = renderDeclaration();
+
+/** Build the declaration from a loaded config: the overrides, over the shipped text, over this table. */
+function declare(loaded: Pick<LoadedLimits, "limits" | "effectiveRoles">): ToolDeclaration {
+	return buildToolDeclaration({ roles: loaded.effectiveRoles, defaultRole: loaded.limits.defaultRole }, loaded.limits.tool);
+}
+
+/**
+ * Read the config and build the declaration. Everything is inside the `try`, including `process.cwd()` and
+ * `getAgentDir()`: this runs at module load, and an extension whose import throws registers nothing at all.
+ * The fallback is the shipped text over the built-in table, which is what a machine with no config gets.
+ */
+function renderDeclaration(cwd?: string, trusted = false): ToolDeclaration {
+	try {
+		return declare(loadSubagentLimits(cwd ?? process.cwd(), trusted));
+	} catch {
+		return buildToolDeclaration({ roles: applyRoleConfig(undefined).roles, defaultRole: DEFAULT_ROLE_NAME });
+	}
+}
+
+/**
+ * Where a registered tool may put a description it rebuilt after registration: pi applies `prepareLoadout` to the
+ * declared tools of every request, so a description here replaces the one the process registered
+ * (`agent-session.js::_applyToolLoadout`).
+ */
+function applyDeclaredDescription(_loadout: ToolLoadout): ToolLoadoutChanges {
+	return { descriptions: { subagent: declaration.description } };
+}
 
 type ToolArgs = Static<typeof parameters>;
 
@@ -43,27 +86,10 @@ const parameters = Type.Object({
 	// A string, not an enum: the legal names come from the config (`subagent.roles`), which is read per call,
 	// while a registered schema is fixed for the process — a stale enum would refuse a role the human had just
 	// added. `execute` refuses a name no role answers to and lists the ones that do. Built-ins stay in the
-	// description, which is where a model actually looks.
-	role: Type.Optional(
-		Type.String({
-			description: `explore = read-only survey, general-purpose = the parent's own tool set, review = critique only${
-				extraRoleHint() ? `, and subagent.roles in the config adds ${extraRoleHint()}` : ", plus any role the config defines under subagent.roles"
-			}. Omit it for the configured default role. Any other name is refused, and the error lists the roles that exist.`,
-		}),
-	),
+	// description, which is where a model actually looks — rendered from the table, never hand-written.
+	role: Type.Optional(Type.String({ description: declaration.roleParameterDescription })),
 	task: Type.String({ description: "Self-contained brief; the child sees no conversation history, so put every file path, symbol and constraint in the text" }),
 });
-
-/** Role names beyond the built-ins that the global config adds, for the parameter description. */
-function extraRoleHint(): string {
-	try {
-		return Object.keys(loadSubagentLimits(process.cwd(), false).effectiveRoles)
-			.filter((name) => !ROLE_ORDER.some((builtIn) => builtIn === name))
-			.join(", ");
-	} catch {
-		return "";
-	}
-}
 
 /**
  * Canonicalize a role the model spelled loosely ("Explore", "general purpose", "gp"). An unknown word is
@@ -83,6 +109,28 @@ interface PromptSectionsLike {
 	/** Deliberately not consulted: see the function's comment. */
 	customPrompt?: string;
 	forceSystemPrompt?: string;
+}
+
+interface PromptDeclarationLike extends PromptSectionsLike {
+	/** One-line `<available_tools>` entries, keyed by tool name. */
+	toolSnippets?: Record<string, string>;
+	/** `<rules>` bullets contributed by each tool, keyed by tool name. */
+	toolGuidelines?: Record<string, string[]>;
+}
+
+/**
+ * Put this run's declaration into the prompt options: pi snapshots `promptSnippet`/`promptGuidelines` at
+ * registration (`agent-session.js::_toolPromptSnippets`), and the options are the mutable copy of that snapshot,
+ * read again when the sections are built — which happens after `before_agent_start` returns.
+ *
+ * Only the two prompt fields travel this way. The tool *description* goes through `prepareLoadout` (it is part of
+ * the declaration, not the prompt), and the `role` parameter's schema text goes through neither: a registered
+ * schema is fixed for the process, which is why its role list is rendered once at load and repeated, current,
+ * in the description.
+ */
+export function applyToolPromptDeclaration(options: PromptDeclarationLike, current: ToolDeclaration): void {
+	options.toolSnippets = { ...(options.toolSnippets ?? {}), subagent: current.promptSnippet };
+	options.toolGuidelines = { ...(options.toolGuidelines ?? {}), subagent: current.promptGuidelines };
 }
 
 /**
@@ -117,21 +165,14 @@ export default function piSubagent(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent",
 		label: "subagent",
-		description:
-			"Run a one-shot child session in an isolated context and wait for its answer. The child shares none of this conversation, and only " +
-			"its final report comes back: the searching, reading and bulky output it produced never enters your context. That is what it is for. " +
-			"Reach for it when an answer needs more than about three reads or greps, when a command's output is bulky and only its verdict matters, " +
-			"for a bounded change you can describe completely, and for a review of work you just did — not for a single read or edit you can do " +
-			"yourself. One child at a time; the call blocks until it finishes. The child's tool calls go through this session's permission checks, so a " +
-			"denial reaches the child as an error.",
-		promptSnippet: "Delegate open-ended search, surveys, bulky command output or a bounded sub-task to an isolated child session (saves context)",
-		promptGuidelines: [
-			"Prefer subagent(role, task) over reading many files inline: the child's report costs one message, its searches never enter your context",
-			"The child sees none of this conversation: name every path, symbol and command in the task text, and say what shape the report should take",
-			"role: explore (read-only survey), general-purpose (may edit; also what an unnamed call gets), review (findings only)",
-		],
+		// The three strings below are the shipped defaults unless `subagent.tool` rewords them, and their role
+		// lists come from the role table rather than from prose (`tool-declaration.ts`).
+		description: declaration.description,
+		promptSnippet: declaration.promptSnippet,
+		promptGuidelines: declaration.promptGuidelines,
 		parameters,
 		prepareArguments: prepareRoleArgs,
+		prepareLoadout: applyDeclaredDescription,
 		executionMode: "sequential",
 		// The tool draws its own call title and result block, so the report is rendered instead of
 		// falling back to the raw result text (see render.ts).
@@ -281,6 +322,11 @@ export default function piSubagent(pi: ExtensionAPI) {
 	// for should not be offered at all.
 	pi.on("before_agent_start", async (event, ctx: ExtensionContext) => {
 		const loaded = loadSubagentLimits(ctx.cwd, ctx.isProjectTrusted());
+		// Refresh the declaration before anything below can change the active tools, so the loadout hook and the
+		// prompt sections of this run both speak of the table this cwd actually has.
+		// A process-global holder: `prepareLoadout` is handed the tool set, never a cwd. Same shape as
+		// `setConfiguredDefaultRole` below, and one session per process is what pi gives us.
+		declaration = declare(loaded);
 		const active = pi.getActiveTools();
 		const has = active.includes("subagent");
 		if (!loaded.limits.enabled && has) pi.setActiveTools(active.filter((name) => name !== "subagent"));
@@ -289,6 +335,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 		}
 		setConfiguredDefaultRole(loaded.limits.defaultRole);
 		applyDelegationSection(event.systemPromptOptions, loaded.limits, loaded.effectiveRoles);
+		applyToolPromptDeclaration(event.systemPromptOptions, declaration);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -339,6 +386,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 						origins: loaded.origins,
 						effectiveRoles: loaded.effectiveRoles,
 						roleOrigins: loaded.roleOrigins,
+						toolOrigins: loaded.toolOrigins,
 						files: loaded.files,
 						defaultConfigFile: join(getAgentDir(), "extensions", EXTENSION_CONFIG_SLUG, "config.json"),
 						errors: loaded.errors,

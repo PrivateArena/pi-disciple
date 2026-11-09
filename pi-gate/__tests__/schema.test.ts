@@ -231,7 +231,10 @@ describe("defaults", () => {
 		const parsed = parseSubagentConfig(shipped.subagent, "shipped config.json");
 		expect(rawLimits.limits).toEqual(parsed.limits);
 		expect(parsed.errors).toEqual([]);
-		expect(parsed.limits).toEqual({ ...DEFAULT_SUBAGENT_LIMITS, defaultRole: "explore", roles: shipped.subagent.roles });
+		expect(parsed.limits).toEqual({ ...DEFAULT_SUBAGENT_LIMITS, defaultRole: "explore", roles: shipped.subagent.roles, tool: shipped.subagent.tool });
+		// The tool declaration is spelled out so a human can reword it here instead of in code — and only the three
+		// strings pi renders from a registered tool may appear; `registration.test.ts` checks their text.
+		expect(Object.keys(shipped.subagent.tool).sort()).toEqual(["description", "promptGuidelines", "promptSnippet"]);
 		// The written role table re-states the three built-ins in full and adds nothing: no new role, no new tool,
 		// no rewritten prompt, no sampling bag. A shipped file that added privilege or retuned a request would fail
 		// here, not in a running session.

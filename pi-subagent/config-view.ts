@@ -20,7 +20,7 @@ import { samplingLabel } from "./sampling.ts";
 import { CEILING_OFFER_HOLD_MS, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./budget/ceiling-clock.ts";
 import { childSessionDir } from "./transcript/paths.ts";
 import { CEILING_DIALOG_TIMEOUT_MS, EXTENSION_STEPS } from "./ceiling.ts";
-import type { SubagentLimits } from "./config-file.ts";
+import type { SubagentLimits, SubagentToolPrompt } from "./config-file.ts";
 import type { RunGuard } from "./run-guard.ts";
 
 // `effectiveBudget` moved to `roles.ts`, the module that owns the budgets it caps, and is re-exported here for its callers.
@@ -41,6 +41,8 @@ export interface ConfigViewInput {
 	effectiveRoles?: RoleTable;
 	/** Which config file defined or edited each role; missing = `roles.ts`. */
 	roleOrigins?: Record<string, string>;
+	/** Which config file reworded each field of `subagent.tool`; missing = the shipped declaration. */
+	toolOrigins?: Partial<Record<keyof SubagentToolPrompt, string>>;
 	files: string[];
 	/** Where the section would live if no file had it yet: `<agentDir>/extensions/pi-disciple/config.json`. */
 	defaultConfigFile: string;
@@ -164,6 +166,11 @@ function limitsSection(input: ConfigViewInput): string[] {
 		limits.askToExtend
 			? `  One dialog per run is allowed at a spent budget, and the clock holds for it up to ${CEILING_OFFER_HOLD_MS / 60_000} min; a granted extension restarts\n  both budgets from the answer, so the longest run grows by the extension the human chose.`
 			: `  subagent.askToExtend is off: a spent budget is a spent budget, and no dialog is asked.`,
+		// The declaration's source is invisible otherwise: pi snapshots a registered tool at load, so a config edit
+		// lands in the next run's text, and this line says which fields come from the file and which from the code.
+		limits.tool
+			? `  tool text: from subagent.tool — ${Object.keys(limits.tool).map((key) => `${key} · ${input.toolOrigins?.[key as keyof SubagentToolPrompt] ?? "config"}`).join(" · ")} (fields it omits keep the shipped text)`
+			: `  tool text: shipped (pi-subagent/tool-declaration.ts; subagent.tool rewords description / promptSnippet / promptGuidelines — see ==tool in the config)`,
 	];
 }
 

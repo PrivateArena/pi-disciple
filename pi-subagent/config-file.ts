@@ -15,13 +15,14 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { applyRoleConfig, canonicalRole, DEFAULT_ROLE_NAME, type AppliedRoleConfig, type RoleTable } from "./roles.ts";
-import type { RoleConfigMap, SubagentLimits } from "../pi-gate/schema.ts";
+import type { RoleConfigMap, SubagentLimits, SubagentToolPrompt } from "../pi-gate/schema.ts";
 import { readModelValue } from "./config-contract/model-pin.ts";
 import { isRoleId, normaliseRoleId } from "./config-contract/role-names.ts";
 import { readRoles } from "./config-contract/roles-table.ts";
+import { readToolPrompt } from "./config-contract/tool-prompt.ts";
 import { readBoolean } from "./config-contract/tolerant-parse.ts";
 
-export type { SubagentLimits };
+export type { SubagentLimits, SubagentToolPrompt };
 
 /**
  * The facade over the `config-contract/` package: the *vocabulary* of the `subagent` section — the
@@ -34,7 +35,7 @@ export type { SubagentLimits };
 export { MODEL_INHERIT_WORDS } from "./config-contract/model-pin.ts";
 export { ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "./config-contract/role-names.ts";
 export { THINKING_LEVEL_WORDS } from "./config-contract/sampling-bag.ts";
-
+export { TOOL_PROMPT_KEYS, TOOL_PROMPT_TOKENS } from "./config-contract/tool-prompt.ts";
 /** Mirrors `EXTENSION_CONFIG_SLUG` in `pi-gate/config-file.ts`; the directory is named for the package, not for one extension. */
 export const EXTENSION_CONFIG_SLUG = "pi-disciple";
 
@@ -60,6 +61,11 @@ export interface LoadedLimits {
 	effectiveRoles: RoleTable;
 	/** Per-role source file, so `/subagentc roles` can say where a role came from. */
 	roleOrigins: Record<string, string>;
+	/**
+	 * Per-field source of the `subagent.tool` rewording. Per key because the block itself merges per key — a
+	 * project file that reworded only the snippet must not be credited with the global `description`.
+	 */
+	toolOrigins: Partial<Record<keyof SubagentToolPrompt, string>>;
 	files: string[];
 	errors: string[];
 }
@@ -68,9 +74,9 @@ const KEYS: readonly (keyof SubagentLimits)[] = ["maxTurns", "timeoutMinutes", "
 
 /**
  * Read the numeric limits, the `enabled` switch, the `model` pin, the default role, the delegation prompt
- * switch, the ceiling-extension switch and the `roles` table; anything else in the section is ignored. A
- * malformed value contributes an error and leaves that field at its previous value, so a typo tightens nothing
- * and cannot disable the tool.
+ * switch, the ceiling-extension switch, the `roles` table and the `tool` declaration; anything else in the
+ * section is ignored. A malformed value contributes an error and leaves that field at its previous value, so a
+ * typo tightens nothing and cannot disable the tool.
  */
 
 const cache = new Map<string, { stamp: string; loaded: LoadedLimits }>();
@@ -87,6 +93,7 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 		origins: {},
 		effectiveRoles: {} as RoleTable,
 		roleOrigins: {},
+		toolOrigins: {},
 		files: [],
 		errors: [],
 	};
@@ -139,6 +146,24 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 			}
 			loaded.limits = { ...loaded.limits, roles: merged };
 			loaded.origins.roles = file;
+		}
+		const tool = readToolPrompt(section.tool, file, loaded.errors);
+		if (tool) {
+			// Per key, last file wins — the same merge `roles` uses, so a project file may reword one string.
+			const merged: SubagentToolPrompt = { ...loaded.limits.tool };
+			if (tool.description !== undefined) {
+				merged.description = tool.description;
+				loaded.toolOrigins.description = file;
+			}
+			if (tool.promptSnippet !== undefined) {
+				merged.promptSnippet = tool.promptSnippet;
+				loaded.toolOrigins.promptSnippet = file;
+			}
+			if (tool.promptGuidelines !== undefined) {
+				merged.promptGuidelines = tool.promptGuidelines;
+				loaded.toolOrigins.promptGuidelines = file;
+			}
+			loaded.limits = { ...loaded.limits, tool: merged };
 		}
 		const askToExtend = readBoolean(section, "askToExtend", `${file}: subagent.askToExtend`, loaded.errors);
 		if (askToExtend !== undefined) {
