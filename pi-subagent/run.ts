@@ -64,9 +64,15 @@ export function composeResult(
 	const childSessionId = result.childSessionId ?? extra.childSessionId;
 	const spillFile = cut.truncated ? writeReport(sessionFile, report) : undefined;
 	const status = result.exit === "done" ? "DONE" : `INCOMPLETE (${result.exit})`;
+	// A run a human ended is the one result whose explanation outranks its own header: the sentence comes from
+	// the client that stopped it, verbatim, and a bare `INCOMPLETE (aborted)` is what invites a retry of the
+	// command that was just refused. Nothing is invented when there is none — an ordinary run says nothing.
+	const stoppedBy =
+		typeof extra.stoppedBy === "string" && extra.stoppedBy.trim() ? extra.stoppedBy.trim() : undefined;
 	const ceilingNote = formatCeiling(result.ceiling);
 	const header =
 		`[subagent ${role} · ${status} · ${result.turns} turns · ${result.toolCalls} tool calls · ${(elapsedMs / 1000).toFixed(1)}s]` +
+		(stoppedBy ? `\n${stoppedBy}` : "") +
 		(extra.model ? `\nmodel: ${extra.model}` : "") +
 		(extra.thinking ? `\nthinking: ${extra.thinking}` : "") +
 		(ceilingNote ? `\n${ceilingNote}` : "") +

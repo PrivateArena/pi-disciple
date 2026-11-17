@@ -140,4 +140,10 @@ export interface SubagentDetails extends SubagentCardFields {
 	report?: string;
 	/** Where the complete report was written, when the model-facing copy had to be cut. */
 	reportFile?: string;
+	/**
+	 * The human's own words, when a client stopped this run through the stop API rather than letting it
+	 * finish. Placed verbatim in the model-facing result, so the caller owns the wording (see stop-api.ts);
+	 * absent on every run that ended on its own.
+	 */
+	stoppedBy?: string;
 }

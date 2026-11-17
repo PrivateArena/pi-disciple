@@ -28,6 +28,8 @@ import { buildConfigView, buildModelCatalog, COMMAND_ARGS, formatRunning, type S
 import { buildDelegationSection, DELEGATION_SECTION } from "./delegation.ts";
 import { buildToolDeclaration, type ToolDeclaration } from "./tool-declaration.ts";
 import { claimGuard, currentGuard, releaseGuard } from "./run-guard.ts";
+import { publishStopApi, registerRun } from "./stop-api.ts";
+import { createStopAsker } from "./stop-dialog.ts";
 import { formatProgress, progressDetails } from "./card/progress.ts";
 import { composeResult } from "./run.ts";
 import { renderSubagentCall, renderSubagentResult } from "./render.ts";
@@ -162,6 +164,10 @@ export function applyDelegationSection(
 }
 
 export default function piSubagent(pi: ExtensionAPI) {
+	// Published at load, before any run exists: a client decides whether to *draw* a stop control by asking
+	// whether this process can honour one, and mid-run is the one moment it cannot ask (see stop-api.ts).
+	publishStopApi();
+
 	pi.registerTool({
 		name: "subagent",
 		label: "subagent",
@@ -209,7 +215,20 @@ export default function piSubagent(pi: ExtensionAPI) {
 			if (parentSignal?.aborted) controller.abort();
 			else parentSignal?.addEventListener("abort", () => controller.abort(), { once: true });
 
-			claimGuard({ callId: toolCallId, role: role.name, defaulted, startedAt: Date.now(), abort: () => controller.abort() });
+			const startedAt = Date.now();
+			claimGuard({ callId: toolCallId, role: role.name, defaulted, startedAt, abort: () => controller.abort() });
+			// The same run, addressable by a client that is not this extension. Registered beside the guard, not
+			// after it: a child the guard will not start is a child nothing should be able to stop.
+			const liveRun = registerRun({
+				callId: toolCallId,
+				role: role.name,
+				task: args.task,
+				startedAt,
+				abort: () => controller.abort(),
+				// The question, asked in whatever room the run is in: a real dialog in a terminal, an
+				// `extension_ui_request` under an RPC client. Same helper shape as the budget offer's.
+				askStop: createStopAsker({ hasUI: ctx.hasUI, ui: ctx.ui, signal: controller.signal }),
+			});
 
 			// The ceiling itself is enforced where the nested calls actually run (`child.ts`, on the child's own
 			// tool counter); the parent only tallies to report the number on the card.
@@ -236,7 +255,6 @@ export default function piSubagent(pi: ExtensionAPI) {
 			const childLevel = childRequest.thinkingLevel;
 			const thinkingText = childRequest.thinking;
 			const samplingText = childRequest.sampling;
-			const startedAt = Date.now();
 			// A granted extension goes on the live card, so a run that got more rope looks like one.
 			let ceiling: CeilingReport | undefined;
 			let latest: RunProgress = { turns: 0, toolCalls: 0, elapsedMs: 0 };
@@ -310,10 +328,14 @@ export default function piSubagent(pi: ExtensionAPI) {
 					task: args.task,
 					roleDefaulted: defaulted,
 					activity: latest.lastTool ?? "reported",
+					// Taken here rather than at the moment of the stop, so a human who clicked just as the child
+					// reported still gets their words read by the parent instead of a run that looks self-ended.
+					stoppedBy: liveRun.takeStop(),
 				});
 			} finally {
 				clearInterval(heartbeat);
 				releaseGuard(toolCallId);
+				liveRun.release();
 			}
 		},
 	});

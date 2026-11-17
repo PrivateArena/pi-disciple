@@ -33,12 +33,12 @@ pi-disciple/
   pi-subagent/
     index.ts  run.ts  child.ts  child-request.ts  child-messages.ts  shims.ts  roles.ts  config-view.ts
     config-file.ts  ceiling.ts  render.ts  delegation.ts  tool-declaration.ts  prompt.ts  labels.ts  model-override.ts  sampling.ts
-    report-budget.ts  run-guard.ts  run-exit.ts
+    report-budget.ts  run-guard.ts  stop-api.ts  stop-dialog.ts  run-exit.ts
     budget/  card/  transcript/  config-contract/                                (14 files)
-  verification/  .scratch/     7 live .mjs RPC/TUI probes (not in `npm test`); plan doc + .py helper
+  verification/  .scratch/     8 live .mjs RPC/TUI probes + `stop-client.ts` (a stop-API client) (not in `npm test`); plan doc + .py helper
 ```
 
-Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (32 source, 13 tests), other 9. Both are ≤ 60, so neither gets its own overview file.
+Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 49 (34 source, 15 tests), other 11. Both are ≤ 60, so neither gets its own overview file.
 
 ## Component Roles
 
@@ -124,6 +124,8 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 45 (
 | pi-subagent/transcript/report-spill.ts | Write the long report out of the context and leave a path behind. | ~27 | `writeReport(transcriptFile: string \| undefined, report): string \| undefined` |
 | pi-subagent/transcript/retention.ts | Keep the last N child transcripts. | ~52 | `pruneTranscripts(dir, keep): Promise<number>` |
 | pi-subagent/run-guard.ts | GlobalThis-registered mutex: one child run at a time, claimable/releasable. | ~47 | `claimGuard(guard: RunGuard): void`; `currentGuard(): RunGuard \| undefined`; `releaseGuard(callId: string): void` |
+| pi-subagent/stop-api.ts | The per-run stop another extension can call: same `globalThis`/`Symbol.for` channel as the guard, addressed by the parent's `subagent` tool call id. | ~250 | `SUBAGENT_STOP_KEY`; `publishStopApi(): SubagentStopApi`; `registerRun(run: LiveRun): LiveRunHandle` (`takeStop()`, `release()`); `api.stop({callId, reason, answered}): Promise<SubagentStopResult>`; `stopNote(reason)` | 
+| pi-subagent/stop-dialog.ts | The "may I end this child?" question a stop asks when no human has answered yet. | ~100 | `stopDialogTitle(q: StopQuestion): string`; `stopLabels()`; `createStopAsker({hasUI, ui, signal, timeoutMs})`; `STOP_KEEP_LABEL`/`STOP_STOP_LABEL` |
 | pi-subagent/run-exit.ts | The terminal reason of a run, in severity order. | ~21 | `type Exit = "done"\|"aborted"\|"timeout"\|"maxTurns"\|"callLimit"\|"overflow"\|"error"`; `pickEarlier(a, b): Exit` |
 | pi-subagent/report-budget.ts | Byte-exact truncation of the report handed to the parent. | ~35 | `reportHead(report, maxBytes): {head, truncated, totalBytes}`; `sliceBytes(text, maxBytes): string` |
 | pi-subagent/prompt.ts | Assemble the child's system prompt (role text + cwd). | ~20 | `buildChildSystemPrompt(role: Role, cwd): string` |

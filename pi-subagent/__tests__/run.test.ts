@@ -53,6 +53,20 @@ describe("result mapping", () => {
 		expect(result.details.truncated).toBe(false);
 	});
 
+	it("puts a human's stop reason above the report, in the caller's own words", () => {
+		const stopped = composeResult(child({ exit: "aborted", turns: 9 }), "review", 20_000, 5_000, {
+			stoppedBy: "Stopped by user with note: the dev server is already on :3000",
+		});
+		const text = (stopped.content[0] as { text: string }).text;
+		// First line after the bracket header: a bare `INCOMPLETE (aborted)` is what reads as a crash.
+		expect(text.split("\n")[1]).toBe("Stopped by user with note: the dev server is already on :3000");
+		expect(stopped.details.stoppedBy).toBe("Stopped by user with note: the dev server is already on :3000");
+		// An ordinary run says nothing about stopping, and blank is not a reason.
+		const blank = composeResult(child(), "review", 20_000, 5_000, { stoppedBy: "   " });
+		expect((blank.content[0] as { text: string }).text).not.toContain("Stopped by user");
+		expect(blank.details.stoppedBy?.trim() ?? "").toBe("");
+	});
+
 	it("says the thinking level a child really ran at, when it is not the session's", () => {
 		const moved = composeResult(child(), "explore", 20_000, 1000, { model: "local/x (inherited)", thinking: 'high → xhigh (this model has no "high")' });
 		const text = (moved.content[0] as { text: string }).text;

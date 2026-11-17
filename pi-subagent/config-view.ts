@@ -263,7 +263,7 @@ export function formatRunning(running: RunGuard | undefined, now: number = Date.
 	if (!running) return "running: none (the tool is blocking, so this line is only ever filled during a run)";
 	const seconds = Math.max(0, Math.round((now - running.startedAt) / 1000));
 	const role = `${running.role}${running.defaulted ? " (default role)" : ""}`;
-	return `running: ${role} for ${seconds}s (call ${running.callId}) · abort with Esc/Ctrl-C, which stops the child too`;
+	return `running: ${role} for ${seconds}s (call ${running.callId}) · Esc/Ctrl-C aborts the whole turn, while a client that can name a call stops this one by that id`;
 }
 
 function filesSection(input: ConfigViewInput): string[] {
