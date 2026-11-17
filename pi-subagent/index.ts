@@ -20,7 +20,7 @@ import type { RunProgress } from "./child.ts";
 import type { CeilingReport } from "./budget/ceiling-vocabulary.ts";
 import { childSessionDir } from "./transcript/paths.ts";
 import { pruneTranscripts } from "./transcript/retention.ts";
-import { createCeilingBroker } from "./ceiling.ts";
+import { createCeilingBroker, resolveExtensionSteps } from "./ceiling.ts";
 import { loadSubagentLimits, type LoadedLimits, EXTENSION_CONFIG_SLUG } from "./config-file.ts";
 import { resolveChildModel } from "./model-override.ts";
 import { resolveChildRequest, resolveModelPin } from "./child-request.ts";
@@ -286,12 +286,13 @@ export default function piSubagent(pi: ExtensionAPI) {
 
 			// A spent budget is a question before it is a verdict: one dialog per run, and only an explicit "Extend"
 			// answer raises it. Switched off, or with no UI, nothing is asked and the ceiling lands exactly as it did
-			// before this existed.
+			// before this existed. The rungs are the config's (`subagent.extendOptions`), settled once per call.
 			const onCeiling = limits.askToExtend
 				? createCeilingBroker({
 						hasUI: ctx.hasUI,
 						ui: ctx.ui,
 						signal: controller.signal,
+						steps: resolveExtensionSteps(limits.extendOptions, limits.disableExtendTurns),
 						onOutcome: (reason, answer) => {
 							if (answer.outcome !== "granted" || !answer.grant) return;
 							ceiling = { reason, outcome: "granted", turns: answer.grant.turns, minutes: answer.grant.minutes };

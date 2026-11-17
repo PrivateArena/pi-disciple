@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_GATE_CONFIG, DEFAULT_SUBAGENT_LIMITS, flattenPermission, parseGateConfig, parseSubagentConfig, ROLE_TURNS_CEILING } from "../schema.ts";
+import { DEFAULT_GATE_CONFIG, DEFAULT_SUBAGENT_LIMITS, flattenPermission, parseGateConfig, parseSubagentConfig, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "../schema.ts";
 import { applyRoleConfig, ROLES } from "../../pi-subagent/roles.ts";
 
 describe("parseGateConfig", () => {
@@ -83,6 +83,36 @@ describe("parseSubagentConfig", () => {
 		const junk = parseSubagentConfig({ askToExtend: "yes" }, "test");
 		expect(junk.limits.askToExtend).toBeUndefined();
 		expect(junk.errors.join(" ")).toContain("subagent.askToExtend must be a boolean");
+	});
+
+	it("parses a written extension ladder, rung by rung", () => {
+		// Written rungs are merged over the shipped ladder by `pi-subagent/ceiling.ts`; the parser only checks shape,
+		// so one bad rung cannot take the good ones with it.
+		const good = parseSubagentConfig({ extendOptions: [{ turns: 50, minutes: 15 }, { turns: ROLE_TURNS_CEILING, minutes: ROLE_TIMEOUT_CEILING_MINUTES }] }, "test");
+		expect(good.errors).toEqual([]);
+		expect(good.limits.extendOptions).toEqual([{ turns: 50, minutes: 15 }, { turns: ROLE_TURNS_CEILING, minutes: ROLE_TIMEOUT_CEILING_MINUTES }]);
+
+		const bad = parseSubagentConfig({ extendOptions: [{ turns: 50 }, "30", { turns: 0, minutes: 5 }, { turns: 500, minutes: 5 }, { turns: 40, minutes: 999 }, { turns: 30, minutes: 8 }] }, "test");
+		expect(bad.limits.extendOptions).toEqual([{ turns: 30, minutes: 8 }]);
+		expect(bad.errors.join(" ")).toContain("subagent.extendOptions[0].minutes must be a number in 1..120");
+		expect(bad.errors.join(" ")).toContain("subagent.extendOptions[1] must be { turns, minutes }");
+		// The same ceilings a role budget may not cross: one click cannot out-grant this file.
+		expect(bad.errors.join(" ")).toContain(`subagent.extendOptions[3].turns must be a number in 1..${ROLE_TURNS_CEILING}`);
+		expect(bad.errors.join(" ")).toContain("subagent.extendOptions[4].minutes must be a number in 1..120");
+
+		for (const value of [[], "20/5", { turns: 50, minutes: 15 }, null]) {
+			const refused = parseSubagentConfig({ extendOptions: value }, "test");
+			expect(refused.limits.extendOptions, JSON.stringify(value)).toBeUndefined();
+			if (value !== null) expect(refused.errors.join(" "), JSON.stringify(value)).toContain("subagent.extendOptions must be a non-empty array");
+		}
+	});
+
+	it("parses the rungs subagent.disableExtendTurns drops", () => {
+		expect(parseSubagentConfig({ disableExtendTurns: [60, 100] }, "test").limits.disableExtendTurns).toEqual([60, 100]);
+		const bad = parseSubagentConfig({ disableExtendTurns: [0, "60", 9999] }, "test");
+		expect(bad.limits.disableExtendTurns).toBeUndefined();
+		expect(bad.errors).toHaveLength(3);
+		expect(parseSubagentConfig({ disableExtendTurns: [] }, "test").errors.join(" ")).toContain("must be a non-empty array of turn counts");
 	});
 });
 

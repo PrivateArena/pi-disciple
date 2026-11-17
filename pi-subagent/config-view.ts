@@ -19,7 +19,7 @@ import { effectiveBudget, ROLES, type Role, type RoleTable } from "./roles.ts";
 import { samplingLabel } from "./sampling.ts";
 import { CEILING_OFFER_HOLD_MS, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./budget/ceiling-clock.ts";
 import { childSessionDir } from "./transcript/paths.ts";
-import { CEILING_DIALOG_TIMEOUT_MS, EXTENSION_STEPS } from "./ceiling.ts";
+import { CEILING_DIALOG_TIMEOUT_MS, offeredSteps, resolveExtensionSteps } from "./ceiling.ts";
 import type { SubagentLimits, SubagentToolPrompt } from "./config-file.ts";
 import type { RunGuard } from "./run-guard.ts";
 
@@ -146,7 +146,7 @@ function limitsSection(input: ConfigViewInput): string[] {
 		[
 			"askToExtend",
 			limits.askToExtend
-				? `yes — a spent budget asks the human once per run (Esc, a timed-out dialog or no UI enforces it; ${CEILING_DIALOG_TIMEOUT_MS / 60_000} min to answer): ${extensionLadder()}`
+				? `yes — a spent budget asks the human once per run (Esc, a timed-out dialog or no UI enforces it; ${CEILING_DIALOG_TIMEOUT_MS / 60_000} min to answer): ${extensionLadder(limits)}`
 				: "no — a spent budget ends the run as it always did",
 		],
 		["maxTurns", `${limits.maxTurns} (a ceiling: a role gets min(role.maxTurns, this))`],
@@ -174,9 +174,17 @@ function limitsSection(input: ConfigViewInput): string[] {
 	];
 }
 
-/** The extension ladder the ceiling dialog offers, in one line. */
-function extensionLadder(): string {
-	return EXTENSION_STEPS.map((step) => `+${step.turns}t/+${step.minutes}m`).join(" · ");
+/**
+ * The extension ladder this config offers, in one line — the rungs the dialog will actually show, so a view that
+ * advertised a trimmed-off rung would be promising rope the question cannot offer. The shipped rungs are
+ * `ceiling.ts`'s; a config that wrote `subagent.extendOptions` / `.disableExtendTurns` is credited for the result,
+ * because the merged list is otherwise indistinguishable from the default one.
+ */
+function extensionLadder(limits: SubagentLimits): string {
+	const rungs = offeredSteps(resolveExtensionSteps(limits.extendOptions, limits.disableExtendTurns))
+		.map((step) => `+${step.turns}t/+${step.minutes}m`)
+		.join(" · ");
+	return limits.extendOptions || limits.disableExtendTurns ? `${rungs} (subagent.extendOptions)` : rungs;
 }
 
 /** Stable marker for the roles block, shared with the command tests. */
@@ -250,7 +258,7 @@ function runtimeSection(input: ConfigViewInput): string[] {
 		`nested calls: ${NESTED_CALL_CEILING} per child (further calls are rejected) · forbidden in children: ${FORBIDDEN_CHILD_TOOLS.join(", ")}`,
 		`one child at a time: a second subagent call fails while one runs (globalThis guard, run.ts)`,
 		`delegation prompt: ${input.limits.delegationPrompt ? "on — a <delegation> system prompt section states when to hand work to a child (subagent.delegationPrompt)" : "off — subagent.delegationPrompt: false"}`,
-		`budget extension: ${input.limits.askToExtend ? `on — a spent budget asks the human once per run (${extensionLadder()})` : "off — subagent.askToExtend: false"}`,
+		`budget extension: ${input.limits.askToExtend ? `on — a spent budget asks the human once per run (${extensionLadder(input.limits)})` : "off — subagent.askToExtend: false"}`,
 	];
 }
 

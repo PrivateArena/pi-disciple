@@ -194,4 +194,22 @@ describe("the ceiling switch", () => {
 		expect(view).toContain("no — a spent budget ends the run as it always did");
 		expect(view).toContain("subagent.askToExtend is off");
 	});
+
+	it("shows the ladder a config wrote, merged over the shipped rungs", () => {
+		// A retuned rung and an added one, with the two smallest shipped rungs dropped: what the view prints is what
+		// the dialog will show, which is the only way to check a merge without spending a run to reach a ceiling.
+		const limits = { ...DEFAULT_LIMITS, extendOptions: [{ turns: 20, minutes: 10 }, { turns: 150, minutes: 45 }], disableExtendTurns: [40, 60] };
+		const view = buildConfigView(input({ limits, origins: { extendOptions: "/repo/.pi/extensions/pi-disciple/config.json" } }));
+		expect(view).toContain("+20t/+10m · +100t/+25m · +150t/+45m (subagent.extendOptions)");
+		expect(view).not.toContain("+40t/+10m");
+	});
+
+	it("stops the printed ladder where the dialog stops", () => {
+		// Six written rungs over the four shipped ones is a ladder the cap trims: what `/subagentc` prints must be
+		// what the ceiling will offer, or the view promises rope a question cannot offer.
+		const crowded = { ...DEFAULT_LIMITS, extendOptions: [150, 160, 170, 180, 190, 200].map((turns) => ({ turns, minutes: 60 })) };
+		const view = buildConfigView(input({ limits: crowded }));
+		expect(view).toContain("+60t/+15m · +100t/+25m · +150t/+60m · +160t/+60m · +170t/+60m · +180t/+60m · +190t/+60m · +200t/+60m (subagent.extendOptions)");
+		expect(view).not.toContain("+20t/+5m");
+	});
 });

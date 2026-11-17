@@ -15,14 +15,16 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { applyRoleConfig, canonicalRole, DEFAULT_ROLE_NAME, type AppliedRoleConfig, type RoleTable } from "./roles.ts";
-import type { RoleConfigMap, SubagentLimits, SubagentToolPrompt } from "../pi-gate/schema.ts";
+import { mergeExtensionSteps, offeredSteps, resolveExtensionSteps } from "./ceiling.ts";
+import type { ExtendOption, RoleConfigMap, SubagentLimits, SubagentToolPrompt } from "../pi-gate/schema.ts";
 import { readModelValue } from "./config-contract/model-pin.ts";
 import { isRoleId, normaliseRoleId } from "./config-contract/role-names.ts";
 import { readRoles } from "./config-contract/roles-table.ts";
 import { readToolPrompt } from "./config-contract/tool-prompt.ts";
+import { MAX_EXTEND_OPTIONS, readDisableExtendTurns, readExtendOptions } from "./config-contract/extend-options.ts";
 import { readBoolean } from "./config-contract/tolerant-parse.ts";
 
-export type { SubagentLimits, SubagentToolPrompt };
+export type { SubagentLimits, SubagentToolPrompt, ExtendOption };
 
 /**
  * The facade over the `config-contract/` package: the *vocabulary* of the `subagent` section — the
@@ -36,6 +38,7 @@ export { MODEL_INHERIT_WORDS } from "./config-contract/model-pin.ts";
 export { ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "./config-contract/role-names.ts";
 export { THINKING_LEVEL_WORDS } from "./config-contract/sampling-bag.ts";
 export { TOOL_PROMPT_KEYS, TOOL_PROMPT_TOKENS } from "./config-contract/tool-prompt.ts";
+export { MAX_EXTEND_OPTIONS } from "./config-contract/extend-options.ts";
 /** Mirrors `EXTENSION_CONFIG_SLUG` in `pi-gate/config-file.ts`; the directory is named for the package, not for one extension. */
 export const EXTENSION_CONFIG_SLUG = "pi-disciple";
 
@@ -175,6 +178,18 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 			loaded.limits = { ...loaded.limits, delegationPrompt };
 			loaded.origins.delegationPrompt = file;
 		}
+		const extendOptions = readExtendOptions(section.extendOptions, file, loaded.errors);
+		if (extendOptions) {
+			// Merged by `turns` across files, the way `roles` merges per id: a project file may retune one rung of
+			// the ladder the global file wrote without restating the rest of it.
+			loaded.limits = { ...loaded.limits, extendOptions: mergeExtensionSteps(loaded.limits.extendOptions ?? [], extendOptions) };
+			loaded.origins.extendOptions = file;
+		}
+		const disableExtendTurns = readDisableExtendTurns(section.disableExtendTurns, file, loaded.errors);
+		if (disableExtendTurns) {
+			loaded.limits = { ...loaded.limits, disableExtendTurns: [...(loaded.limits.disableExtendTurns ?? []), ...disableExtendTurns] };
+			loaded.origins.disableExtendTurns = file;
+		}
 	}
 	finish(loaded);
 	cache.set("limits", { stamp, loaded });
@@ -182,8 +197,9 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 }
 
 /**
- * Settle the assembled document against the table it describes: an unspellable `defaultRole` and a new role
- * that arrived without `tools` are each reported once, here, rather than at every call.
+ * Settle the assembled document against the table it describes: an unspellable `defaultRole`, a new role that
+ * arrived without `tools` and a ladder longer than the dialog can show are each reported once, here, rather than
+ * at every call.
  */
 function finish(loaded: LoadedLimits): void {
 	const applied: AppliedRoleConfig = applyRoleConfig(loaded.limits.roles);
@@ -195,6 +211,41 @@ function finish(loaded: LoadedLimits): void {
 		loaded.limits = { ...loaded.limits, defaultRole: DEFAULT_ROLE_NAME };
 		delete loaded.origins.defaultRole;
 	}
+	settleLadder(loaded);
+}
+
+/**
+ * Bound the ladder the two written lists add up to. The question is a `select`, and a rung scrolled off the
+ * screen cannot be chosen, so the surplus is reported and the largest rungs kept — the point of writing more of
+ * them is more rope, not less — and a list that removed every rung is reported too, because a dialog with
+ * nothing to offer is the ceiling switch left half-on.
+ *
+ * The settled ladder is written back as kept rungs *plus* a drop list naming everything that went, because that
+ * is the only shape that survives a second merge: `resolveExtensionSteps` merges over the shipped ladder, so the
+ * shipped rungs the cap removed have to be asked for by name to stay removed. The dialog therefore offers exactly
+ * what `/subagentc` printed, however many files wrote the list.
+ */
+function settleLadder(loaded: LoadedLimits): void {
+	const ladder = resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns);
+	if (!ladder.length) {
+		loaded.errors.push(`subagent.disableExtendTurns removes every rung of the ceiling dialog — the shipped ladder stands`);
+		loaded.limits = { ...loaded.limits, disableExtendTurns: undefined };
+		delete loaded.origins.disableExtendTurns;
+		return;
+	}
+	const kept = offeredSteps(ladder);
+	if (kept.length === ladder.length) return;
+	const dropped = ladder.slice(0, ladder.length - kept.length);
+	loaded.errors.push(
+		`subagent.extendOptions: the ceiling dialog offers at most ${MAX_EXTEND_OPTIONS} rungs and this config writes ${ladder.length} — dropping ${dropped
+			.map((step) => `${step.turns}t/${step.minutes}m`)
+			.join(", ")}`,
+	);
+	loaded.limits = {
+		...loaded.limits,
+		extendOptions: kept,
+		disableExtendTurns: [...(loaded.limits.disableExtendTurns ?? []), ...dropped.map((step) => step.turns)],
+	};
 }
 
 function readSubagentSection(file: string, errors: string[]): Record<string, unknown> | undefined {

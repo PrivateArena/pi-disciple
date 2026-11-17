@@ -12,9 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
-import { parseSubagentConfig, SUBAGENT_TOOL_PROMPT_KEYS, SUBAGENT_TOOL_PROMPT_TOKENS } from "../../pi-gate/schema.ts";
+import { parseSubagentConfig, MAX_EXTEND_OPTIONS as GATE_MAX, ROLE_TIMEOUT_CEILING_MINUTES as GATE_RUNG_MINUTES_CEILING, ROLE_TURNS_CEILING as GATE_RUNG_TURNS_CEILING, SUBAGENT_TOOL_PROMPT_KEYS, SUBAGENT_TOOL_PROMPT_TOKENS } from "../../pi-gate/schema.ts";
 import { ROLES } from "../roles.ts";
-import { DEFAULT_LIMITS, loadSubagentLimits, MODEL_INHERIT_WORDS, ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING, TOOL_PROMPT_KEYS, TOOL_PROMPT_TOKENS } from "../config-file.ts";
+import { resolveExtensionSteps } from "../ceiling.ts";
+import { DEFAULT_LIMITS, loadSubagentLimits, MAX_EXTEND_OPTIONS, MODEL_INHERIT_WORDS, ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING, TOOL_PROMPT_KEYS, TOOL_PROMPT_TOKENS } from "../config-file.ts";
 
 const dirs: string[] = [];
 
@@ -52,6 +53,16 @@ const CASES: [label: string, config: Record<string, unknown>][] = [
 	["roles not an object", { roles: ["explore"] }],
 	["everything at once", { enabled: false, delegationPrompt: false, maxTurns: 2, model: "session", roles: { auditor: { tools: ["read"], maxTurns: 3 } } }],
 	["a non-boolean ceiling switch", { askToExtend: "yes" }],
+	["a written extension ladder", { extendOptions: [{ turns: 50, minutes: 15 }, { turns: 20, minutes: 10 }] }],
+	[
+		"ladder rungs of the wrong shape",
+		{ extendOptions: [{ turns: 50 }, { minutes: 10 }, 20, { turns: 0, minutes: 5 }, { turns: 500, minutes: 5 }, { turns: 40, minutes: 900 }, { turns: 30, minutes: 8 }] },
+	],
+	["a ladder that is not an array", { extendOptions: { turns: 50, minutes: 15 } }],
+	["an empty ladder", { extendOptions: [] }],
+	["dropped ladder rungs", { disableExtendTurns: [60, 100] }],
+	["a bad drop list", { disableExtendTurns: [0, "60", 9999] }],
+	["a drop list that is not an array", { disableExtendTurns: 60 }],
 	[
 		"role sampling",
 		{
@@ -120,7 +131,7 @@ describe("the shipped duplication stays honest", () => {
 			const where = document(config);
 			const file = loadSubagentLimits(where.cwd, false, where.agentDir);
 			// Same accepted values, key for key.
-			for (const key of ["enabled", "delegationPrompt", "askToExtend", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole", "tool"] as const) {
+			for (const key of ["enabled", "delegationPrompt", "askToExtend", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole", "tool", "extendOptions", "disableExtendTurns"] as const) {
 				if (pure.limits[key] === undefined) continue;
 				expect(file.limits[key], key).toEqual(pure.limits[key]);
 			}
@@ -133,7 +144,10 @@ describe("the shipped duplication stays honest", () => {
 				!error.includes("names a new role") &&
 				// The "overrides a field pi sets itself" notices come from `applyRoleConfig`, which only the reader
 				// runs — the pure parser has no role table to settle, so it cannot say them.
-				!error.includes("overrides a field pi sets itself");
+				!error.includes("overrides a field pi sets itself") &&
+				// The ceiling ladder is additionally *settled* by the reader — a list too long for the dialog, or one
+				// that removed every rung — which the pure parser has no dialog to measure against.
+				!error.includes("ceiling dialog");
 			const readerErrors = file.errors.map((error) => stripFile(error, where.file)).filter(shared);
 			const parserErrors = pure.errors.map((error) => error.replace("test: ", "")).filter(shared);
 			for (const error of parserErrors) expect(readerErrors.join(" | "), error).toContain(error);
@@ -157,6 +171,67 @@ describe("the shipped duplication stays honest", () => {
 		// The placeholder vocabulary both the parser and the renderer work from, one list per reader.
 		expect(TOOL_PROMPT_TOKENS).toEqual(SUBAGENT_TOOL_PROMPT_TOKENS);
 		expect(TOOL_PROMPT_KEYS).toEqual(SUBAGENT_TOOL_PROMPT_KEYS);
+		// The bounds a ceiling rung is checked against, same numbers in both readers: a drift would let one reader
+		// accept a rung the other refuses, which is a rung the dialog may never have offered.
+		expect(MAX_EXTEND_OPTIONS).toBe(GATE_MAX);
+		expect(ROLE_TURNS_CEILING).toBe(GATE_RUNG_TURNS_CEILING);
+		expect(ROLE_TIMEOUT_CEILING_MINUTES).toBe(GATE_RUNG_MINUTES_CEILING);
+	});
+});
+
+describe("subagent.extendOptions in the file", () => {
+	it("merges the project ladder over the global one by turns, and merges the drop list in", () => {
+		const where = document({ extendOptions: [{ turns: 50, minutes: 15 }, { turns: 20, minutes: 10 }], disableExtendTurns: [100] });
+		mkdirSync(join(where.cwd, ".pi", "extensions", "pi-disciple"), { recursive: true });
+		writeFileSync(
+			join(where.cwd, ".pi", "extensions", "pi-disciple", "config.json"),
+			JSON.stringify({ subagent: { extendOptions: [{ turns: 200, minutes: 90 }], disableExtendTurns: [60] } }),
+			"utf8",
+		);
+		const loaded = loadSubagentLimits(where.cwd, true, where.agentDir);
+		expect(loaded.errors).toEqual([]);
+		// 20 retuned, 50 and 200 added, 60 and 100 dropped by the two lists, and the dialog sees exactly that.
+		expect(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns).map((step) => [step.turns, step.minutes])).toEqual([
+			[20, 10],
+			[40, 10],
+			[50, 15],
+			[200, 90],
+		]);
+		expect(loaded.origins.extendOptions).toContain("config.json");
+	});
+
+	it("reports a ladder too long for the dialog and keeps the largest rungs", () => {
+		const extra = [150, 160, 170, 180, 190, 200].map((turns) => ({ turns, minutes: 60 }));
+		const where = document({ extendOptions: extra });
+		const loaded = loadSubagentLimits(where.cwd, false, where.agentDir);
+		expect(loaded.errors.join(" ")).toContain(`at most ${MAX_EXTEND_OPTIONS} rungs`);
+		const ladder = resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns);
+		expect(ladder).toHaveLength(MAX_EXTEND_OPTIONS);
+		// The two smallest shipped rungs go, the rope the human wrote for stays, and re-resolving is a no-op.
+		expect(ladder.map((step) => step.turns)).toEqual([60, 100, 150, 160, 170, 180, 190, 200]);
+		expect(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns)).toEqual(ladder);
+	});
+
+	it("reports a drop list that removed every rung and keeps the shipped ladder", () => {
+		const where = document({ disableExtendTurns: [20, 40, 60, 100] });
+		const loaded = loadSubagentLimits(where.cwd, false, where.agentDir);
+		expect(loaded.errors.join(" ")).toContain("removes every rung");
+		expect(loaded.limits.disableExtendTurns).toBeUndefined();
+		expect(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns).map((step) => step.turns)).toEqual([20, 40, 60, 100]);
+	});
+
+	it("leaves the shipped config on the shipped ladder", () => {
+		const where = document({});
+		const loaded = loadSubagentLimits(where.cwd, false, where.agentDir);
+		expect(loaded.limits.extendOptions).toBeUndefined();
+		expect(loaded.limits.disableExtendTurns).toBeUndefined();
+		expect(resolveExtensionSteps().map((step) => [step.turns, step.minutes])).toEqual([
+			[20, 5],
+			[40, 10],
+			[60, 15],
+			[100, 25],
+		]);
+		expect(DEFAULT_LIMITS.extendOptions).toBeUndefined();
 	});
 });
 

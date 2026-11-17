@@ -123,6 +123,85 @@ export function parseToolPromptConfig(raw: unknown, where: string, errors: strin
 	return Object.keys(out).length ? out : undefined;
 }
 
+/**
+ * One rung of the "more rope?" dialog: the turns and minutes a human hands out together. Config writes them as
+ * `{ "turns": 40, "minutes": 10 }`; the ladder itself and what a spent budget does with a rung live in
+ * `pi-subagent/ceiling.ts`, which owns the shipped rungs.
+ */
+export interface ExtendOption {
+	turns: number;
+	minutes: number;
+}
+
+/**
+ * The most rungs the dialog may offer. Its list is pi's `select`, and the ceiling's own rule is that a question
+ * nobody could answer grants nothing (FM-11) — so a ladder long enough to scroll its options off the screen is
+ * that failure by construction, and the surplus is reported and dropped rather than shown.
+ */
+export const MAX_EXTEND_OPTIONS = 8;
+
+/** Bound shared with `subagent.roles`: one click may not hand out more than a role may be configured to spend. */
+function parseExtendRung(value: unknown, label: string, errors: string[]): ExtendOption | undefined {
+	if (!isRecord(value)) {
+		errors.push(`${label} must be { turns, minutes }, ignored`);
+		return undefined;
+	}
+	const rung: ExtendOption = { turns: 0, minutes: 0 };
+	for (const [key, ceiling] of [
+		["turns", ROLE_TURNS_CEILING],
+		["minutes", ROLE_TIMEOUT_CEILING_MINUTES],
+	] as const) {
+		const numberValue = value[key];
+		if (typeof numberValue !== "number" || !Number.isFinite(numberValue) || numberValue <= 0 || numberValue > ceiling) {
+			errors.push(`${label}.${key} must be a number in 1..${ceiling}, ignored`);
+			return undefined;
+		}
+		rung[key] = Math.floor(numberValue);
+	}
+	return rung;
+}
+
+/**
+ * Parse one `subagent.extendOptions` array. Never throws; a bad rung is one error and no rung, so a typo cannot
+ * silently remove the whole ladder. The list merges over the shipped ladder by `turns` — see
+ * `pi-subagent/ceiling.ts::resolveExtensionSteps`. Mirror: `pi-subagent/config-contract/extend-options.ts`.
+ */
+export function parseExtendOptions(raw: unknown, where: string, errors: string[]): ExtendOption[] | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (!Array.isArray(raw) || !raw.length) {
+		errors.push(`${where}: subagent.extendOptions must be a non-empty array of { turns, minutes }, ignored`);
+		return undefined;
+	}
+	const out: ExtendOption[] = [];
+	raw.forEach((value, index) => {
+		const rung = parseExtendRung(value, `${where}: subagent.extendOptions[${index}]`, errors);
+		if (rung) out.push(rung);
+	});
+	return out.length ? out : undefined;
+}
+
+/**
+ * Parse one `subagent.disableExtendTurns` array: the `turns` values of rungs to drop, shipped or config-written.
+ * Never throws; a bad entry is one error and no removal.
+ */
+export function parseDisableExtendTurns(raw: unknown, where: string, errors: string[]): number[] | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (!Array.isArray(raw) || !raw.length) {
+		errors.push(`${where}: subagent.disableExtendTurns must be a non-empty array of turn counts, ignored`);
+		return undefined;
+	}
+	const out: number[] = [];
+	raw.forEach((value, index) => {
+		const label = `${where}: subagent.disableExtendTurns[${index}]`;
+		if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > ROLE_TURNS_CEILING) {
+			errors.push(`${label} must be a number in 1..${ROLE_TURNS_CEILING}, ignored`);
+			return;
+		}
+		out.push(Math.floor(value));
+	});
+	return out.length ? out : undefined;
+}
+
 export interface SubagentLimits {
 	/** Master switch for the `subagent` tool (`subagent.enabled`). */
 	enabled: boolean;
@@ -175,6 +254,17 @@ export interface SubagentLimits {
 	 * than an explicit "Extend" choice — Esc, a dialog nobody answered, no UI — enforces the ceiling unchanged.
 	 */
 	askToExtend: boolean;
+	/**
+	 * Extra or replacement rungs of the extension dialog (`subagent.extendOptions`), merged by `turns` over the
+	 * shipped ladder: a rung naming the `turns` of a shipped one replaces its minutes, an unseen `turns` adds a
+	 * rung. Absent means the shipped ladder exactly (`pi-subagent/ceiling.ts::EXTENSION_STEPS`).
+	 */
+	extendOptions?: ExtendOption[];
+	/**
+	 * `turns` values of rungs to drop (`subagent.disableExtendTurns`), applied after {@link extendOptions} is
+	 * merged, so a project file may remove a rung the global file added.
+	 */
+	disableExtendTurns?: number[];
 }
 
 export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
@@ -311,5 +401,9 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 	if (delegationPrompt !== undefined) limits.delegationPrompt = delegationPrompt;
 	const askToExtend = readBoolean(raw, "askToExtend", `${where}: subagent.askToExtend`, errors);
 	if (askToExtend !== undefined) limits.askToExtend = askToExtend;
+	const extendOptions = parseExtendOptions(raw.extendOptions, where, errors);
+	if (extendOptions) limits.extendOptions = extendOptions;
+	const disableExtendTurns = parseDisableExtendTurns(raw.disableExtendTurns, where, errors);
+	if (disableExtendTurns) limits.disableExtendTurns = disableExtendTurns;
 	return { limits, errors };
 }
