@@ -94,7 +94,9 @@ describe("/subagentc config view", () => {
 		const view = buildConfigView(input());
 		expect(view).toContain("at the role's minutes the child is told to conclude; 60s later the ceiling fires");
 		expect(view).toContain("never cut mid-report or mid-tool-call");
-		expect(view).toContain("Longest possible run: budget + 4 min");
+		// 60s settle + 3min report grace + the 6min the clock will hold an unanswered extension question, then the
+		// 3min tool-less final turn: the hold is the longer bound, and the view must not pretend otherwise.
+		expect(view).toContain("Longest possible run: budget + 10 min");
 	});
 
 	it("expands a role's \"*\" to the parent's callable tools and caps the budget", () => {

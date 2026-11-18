@@ -19,6 +19,8 @@ import { effectiveBudget, ROLES, type Role, type RoleTable } from "./roles.ts";
 import { samplingLabel } from "./sampling.ts";
 import { CEILING_OFFER_HOLD_MS, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./budget/ceiling-clock.ts";
 import { childSessionDir } from "./transcript/paths.ts";
+import { debugLogDir } from "./transcript/turn-log.ts";
+import { FINAL_REPORT_GRACE_MS } from "./final-report.ts";
 import { CEILING_DIALOG_TIMEOUT_MS, offeredSteps, resolveExtensionSteps } from "./ceiling.ts";
 import type { SubagentLimits, SubagentToolPrompt } from "./config-file.ts";
 import type { RunGuard } from "./run-guard.ts";
@@ -137,6 +139,27 @@ function modelSection(input: ConfigViewInput): string[] {
 	return lines;
 }
 
+/**
+ * The wall past the soft budget with no final turn on top of it: the ceiling either waits out the report grace
+ * after the hard settle, or waits out an unanswered extension question — whichever is longer (`ceiling-clock.ts`
+ * re-arms `fireHard` to `offerHoldUntil` before it consults the report wall at all).
+ */
+function worstCeilingMs(limits: SubagentLimits): number {
+	return HARD_SETTLE_MS + REPORT_GRACE_MS + (limits.askToExtend ? CEILING_OFFER_HOLD_MS : 0);
+}
+
+/** The one line that says how long a child may honestly take, and which bound is the binding one. */
+function worstRunLine(limits: SubagentLimits): string {
+	const ceilingMs = worstCeilingMs(limits);
+	const base = `  Longest possible run: budget + ${(ceilingMs / 60_000).toFixed(0)} min past the soft budget`;
+	if (!limits.requireFinalReport) return `${base}; no final report turn, because subagent.requireFinalReport is off.`;
+	const total = (ceilingMs + FINAL_REPORT_GRACE_MS) / 60_000;
+	return [
+		`${base} (the hold for an unanswered extension question outlasts the report grace),`,
+		`  plus ${FINAL_REPORT_GRACE_MS / 60_000} min for the tool-less final report turn a run with no report gets → budget + ${total.toFixed(0)} min.`,
+	].join("\n");
+}
+
 function limitsSection(input: ConfigViewInput): string[] {
 	const limits = input.limits;
 	const rows: [key: keyof SubagentLimits, value: string][] = [
@@ -152,6 +175,18 @@ function limitsSection(input: ConfigViewInput): string[] {
 		["maxTurns", `${limits.maxTurns} (a ceiling: a role gets min(role.maxTurns, this))`],
 		["timeoutMinutes", `${limits.timeoutMinutes} (a ceiling: a role gets min(role.timeoutMinutes, this))`],
 		["maxResultBytes", `${limits.maxResultBytes} (${formatBytes(limits.maxResultBytes)}) — the report comes back whole up to this; beyond it the head is sent and the full report is written next to the transcript as <id>.report.md`],
+		[
+			"requireFinalReport",
+			limits.requireFinalReport
+				? `yes — a child that ends without a report (cut off mid-turn, or a tool call written as text) gets one tool-less turn to write it, up to ${FINAL_REPORT_GRACE_MS / 60_000} min`
+				: "no — a run hands back whatever text it happened to stop on, which may be narration",
+		],
+		[
+			"debugLog",
+			limits.debugLog
+				? `yes — one JSONL per child run in ${debugLogDir(limits.debugLogDir)} (thinking, nested calls, steers, ceiling decisions, the final turn), newest ${limits.keepTranscripts} kept`
+				: "no — nothing is written outside the child's own transcript dir",
+		],
 		["keepTranscripts", `${limits.keepTranscripts} per role dir`],
 		["model", limits.model ? `"${limits.model}"` : "(unset — inherit the session model)"],
 		["roles", limits.roles ? `${Object.keys(limits.roles).join(", ")} — see the roles section below` : "(none — the three built-ins in roles.ts)"],
@@ -162,7 +197,8 @@ function limitsSection(input: ConfigViewInput): string[] {
 		...rows.map(([key, value]) => `  ${key.padEnd(width)}  ${value}  ·  from ${input.origins?.[key] ?? DEFAULT_ORIGIN}`),
 		`  deadline: at the role's minutes the child is told to conclude; ${HARD_SETTLE_MS / 1000}s later the ceiling fires.`,
 		`  A run is never cut mid-report or mid-tool-call — the ceiling waits for that to land, up to`,
-		`  ${REPORT_GRACE_MS / 60_000} min past it. Longest possible run: budget + ${(HARD_SETTLE_MS + REPORT_GRACE_MS) / 60_000} min.`,
+		`  ${REPORT_GRACE_MS / 60_000} min past it, and holds an unanswered extension question for ${CEILING_OFFER_HOLD_MS / 60_000} min.`,
+		worstRunLine(limits),
 		limits.askToExtend
 			? `  One dialog per run is allowed at a spent budget, and the clock holds for it up to ${CEILING_OFFER_HOLD_MS / 60_000} min; a granted extension restarts\n  both budgets from the answer, so the longest run grows by the extension the human chose.`
 			: `  subagent.askToExtend is off: a spent budget is a spent budget, and no dialog is asked.`,

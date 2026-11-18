@@ -15,16 +15,35 @@
 
 import type { Usage } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { looksLikeToolCallText } from "./call-text.ts";
 
 /** Which content kinds an (possibly partial) assistant message carries. */
-export function contentShape(message: AgentMessage): { text: boolean; toolCall: boolean } {
-	const shape = { text: false, toolCall: false };
+export function contentShape(message: AgentMessage): { text: boolean; toolCall: boolean; callText: boolean } {
+	const shape = { text: false, toolCall: false, callText: false };
 	if (message.role !== "assistant") return shape;
 	for (const part of message.content) {
 		if (part.type === "toolCall") shape.toolCall = true;
-		else if (part.type === "text" && part.text.trim()) shape.text = true;
+		else if (part.type === "text" && part.text.trim()) {
+			shape.text = true;
+			// A call written out on the text channel is text that is not an answer, and nothing about the
+			// message says so otherwise (`child.ts` asks this of a message that is still streaming).
+			if (!shape.callText && looksLikeToolCallText(part.text)) shape.callText = true;
+		}
 	}
 	return shape;
+}
+
+/** The text of one assistant message, its thinking and tool calls left out; "" when it said nothing. */
+export function assistantText(message: AgentMessage): string {
+	if (message.role !== "assistant") return "";
+	// A string `content` is a shape pi uses on other roles; on an assistant message it would throw here, and a
+	// throw between the run and its `dispose` costs the run its report.
+	const parts = Array.isArray(message.content) ? message.content : [];
+	return parts
+		.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join("")
+		.trim();
 }
 
 /** Tokens the last assistant response occupied, from its reported usage. */
@@ -33,6 +52,14 @@ export function contextTokens(message: AgentMessage): number {
 	const usage = message.usage;
 	if (!usage) return 0;
 	return usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
+}
+
+/** The last assistant message, however it ended: the shape of the run's final words lives there. */
+export function lastAssistantMessage(messages: readonly AgentMessage[]): AgentMessage | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i]!.role === "assistant") return messages[i];
+	}
+	return undefined;
 }
 
 /** The last assistant message carries the provider failure (`stopReason: "error"`) when a run dies quietly. */
@@ -51,11 +78,7 @@ export function lastAssistantText(messages: readonly AgentMessage[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i]!;
 		if (message.role !== "assistant") continue;
-		const text = message.content
-			.filter((part): part is { type: "text"; text: string } => part.type === "text")
-			.map((part) => part.text)
-			.join("")
-			.trim();
+		const text = assistantText(message);
 		if (text) return text;
 	}
 	return "";

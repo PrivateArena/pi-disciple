@@ -97,8 +97,14 @@ export function formatIdentityLine(details: SubagentDetails, theme: Theme): stri
 	if (details.sampling) parts.push(`sampling: ${details.sampling}`);
 	if (details.childSessionId) parts.push(`Agent ID: ${details.childSessionId}`);
 	if (details.nestedCalls) parts.push(`${details.nestedCalls} nested calls`);
+	// Where the report came from, and the harness's own record of how it was obtained: a run whose text had to be
+	// rescued, and a human who wants to open a file about it, are why these two lines exist.
+	if (details.reportSource && details.reportSource !== "final") parts.push(`report: ${details.reportSource}`);
+	if (details.reminders) parts.push(`${details.reminders} malformed-call reminder${details.reminders === 1 ? "" : "s"}`);
 	const head = theme.fg("muted", parts.join(" · "));
-	return details.childSessionFile ? `${head}\n${theme.fg("muted", `transcript: ${details.childSessionFile}`)}` : head;
+	const log = details.turnLogFile ? `\n${theme.fg("dim", `run log: ${details.turnLogFile}`)}` : "";
+	if (!details.childSessionFile) return `${head}${log}`;
+	return `${head}\n${theme.fg("muted", `transcript: ${details.childSessionFile}`)}${log}`;
 }
 
 /**

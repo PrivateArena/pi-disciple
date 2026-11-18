@@ -10,9 +10,13 @@ import { type Rule } from "../guard-rule.ts";
  *
  * The angle-bracket spellings (`<tool_call>`) are deliberately **not** here — that is a tag, and it is judged
  * by the tag rules, which let one balanced tag named in a sentence alone.
+ *
+ * The third alternative is the prose spelling a model falls back to when it runs out of budget mid-task:
+ * `[Tool call: bash]`, with the tool's name after a colon and no arguments at all. It ran nothing, it ends the
+ * turn, and it is what the child's report then reads like — so it is caught here as well as in `pi-subagent`.
  */
 const SPECIAL_TOKEN_RE =
-	/<\|\s*[a-z0-9_:.-]*(?:tool|call|function|argument|param)[a-z0-9_:.-]*\s*\|>|\[\s*(?:tool_call|tool-call|toolcall|tool_use|function_call|function_calls)\s*\]/i;
+	/<\|\s*[a-z0-9_:.-]*(?:tool|call|function|argument|param)[a-z0-9_:.-]*\s*\|>|\[\s*(?:tool_call|tool-call|toolcall|tool_use|function_call|function_calls)\s*\]|\[\s*(?:tool|function|tooling)[ _-]?(?:call|use|invoke)\w*\s*:\s*[^\]\n]{1,80}\]/i;
 
 export const ruleSpecialToken: Rule = {
 	id: "special-token",

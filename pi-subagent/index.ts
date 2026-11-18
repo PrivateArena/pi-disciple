@@ -19,6 +19,7 @@ import { runChild } from "./child.ts";
 import type { RunProgress } from "./child.ts";
 import type { CeilingReport } from "./budget/ceiling-vocabulary.ts";
 import { childSessionDir } from "./transcript/paths.ts";
+import { debugLogDir } from "./transcript/turn-log.ts";
 import { pruneTranscripts } from "./transcript/retention.ts";
 import { createCeilingBroker, resolveExtensionSteps } from "./ceiling.ts";
 import { loadSubagentLimits, type LoadedLimits, EXTENSION_CONFIG_SLUG } from "./config-file.ts";
@@ -313,14 +314,21 @@ export default function piSubagent(pi: ExtensionAPI) {
 					sessionDir: ctx.sessionManager.getSessionDir(),
 					signal: controller.signal,
 					onCeiling,
+					requireFinalReport: limits.requireFinalReport,
+					debugLog: limits.debugLog,
+					debugLogDir: limits.debugLogDir,
+					callId: toolCallId,
 					onProgress: (progress) => {
 						latest = progress;
 						emitProgress();
 					},
 				});
 				const removed = await pruneTranscripts(childSessionDir(ctx.sessionManager.getSessionDir()), limits.keepTranscripts);
+				// The debug logs are one file per child too, so they follow the same retention as the transcripts.
+				const removedLogs = limits.debugLog ? await pruneTranscripts(debugLogDir(limits.debugLogDir), limits.keepTranscripts) : 0;
 				return composeResult(result, role.name, limits.maxResultBytes, Date.now() - startedAt, {
 					removedTranscripts: removed,
+					removedLogs,
 					nestedCalls: tally.calls,
 					shimTools: shimNames,
 					model: childModel,

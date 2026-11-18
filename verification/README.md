@@ -30,6 +30,9 @@ node verification/role-sampling-wire.mjs
 # the output guard against pi's real loop: a fake model answers with a call envelope as text (no provider, no quota)
 node verification/guard-turn-end.mjs
 
+# the child that writes its call as text: the reminder, the report, and the tool-less final turn (no provider, no quota)
+node verification/subagent-report-guarantee.mjs
+
 They refuse to answer when no option matches the requested label: an earlier version fell back to
 "Allow once" silently and skewed the run. To keep the child `pi` out of your own config — and your
 `grants.global` out of the test — point it at a scratch agent dir holding only credentials:

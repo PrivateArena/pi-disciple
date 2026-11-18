@@ -11,6 +11,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ChildResult } from "../child.ts";
 import type { CeilingReport } from "../budget/ceiling-vocabulary.ts";
+import type { ReportReason, ReportSource } from "../final-report.ts";
 import { clip, roleDisplayName, taskLabel } from "../labels.ts";
 import type { RoleId } from "../roles.ts";
 import type { SubagentUiStatus } from "./ui-status.ts";
@@ -146,4 +147,18 @@ export interface SubagentDetails extends SubagentCardFields {
 	 * absent on every run that ended on its own.
 	 */
 	stoppedBy?: string;
+	/**
+	 * Whether `report` is the child's own final message (`final`), the report of a tool-less turn it was made to
+	 * write after its run could not produce one (`rescued`), or the fragment it was cut off on (`salvaged`).
+	 * Absent on a run that is still going. See `pi-subagent/final-report.ts`.
+	 */
+	reportSource?: ReportSource;
+	/** Why a tool-less final turn was asked for, when one was: `ceiling`, or `malformed` (a call written as text). */
+	reportReason?: ReportReason;
+	/** Times the child was told that a tool call written as text runs nothing (see `call-text.ts`). */
+	reminders?: number;
+	/** The harness's own JSONL record of this run, when `subagent.debugLog` is on. */
+	turnLogFile?: string;
+	/** Debug logs this run pruned, beside `removedTranscripts`. */
+	removedLogs?: number;
 }

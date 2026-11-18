@@ -118,6 +118,14 @@ describe("guard: detecting a call written as text", () => {
 		expect(detect("working on it: [tool_call]")?.rules).toContain("special-token");
 	});
 
+	// The prose spelling a budget-starved local model falls back to: the tool's name after a colon, no arguments,
+	// nothing executed, and the turn over. It is what the child's report then reads like (see pi-subagent/call-text.ts).
+	it("catches a call named in prose between brackets", () => {
+		expect(detect("Now I'll write the code. Starting with deps and lib.rs:\n[Tool call: bash]")?.rules).toContain("special-token");
+		expect(detect("[tool_call: read]")?.rules).toContain("special-token");
+		expect(detect("[FUNCTION_CALL: bash]")?.rules).toContain("special-token");
+	});
+
 	it("catches a chat-template token left in the open", () => {
 		expect(detect("and the next step is:\n<|im_start|>assistant\n")?.rules).toContain("chat-template-token");
 	});

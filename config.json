@@ -12,217 +12,25 @@
       "find": "allow",
       "ls": "allow",
       "path": {
-        "*": "allow"
+        "*": "allow",
+        "*.env": "deny",
+        "*.env.*": "deny",
+        "*.env.example": "allow",
+        "*.pem": "deny",
+        "*.key": "deny",
+        "*id_rsa*": "deny"
       },
       "external_directory": "ask",
       "bash": {
         "*": "ask"
       },
+      "network": {
+        "*": "allow"
+      },
       "subagent": "allow"
     },
     "grants": {
-      "global": [
-        {
-          "surface": "bash",
-          "pattern": "ls *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "head *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "zworkspace *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "tail *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "echo *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "cd *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "sed *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "cat *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "grep *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "zskill *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "find *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "diff *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "git -C *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "zcodegraph *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "wc *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "pwd *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "xargs *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "sort *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "awk *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "du *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "git log *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "git status *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "go version *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "npm run *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "npm test *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "npx vitest *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "which *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "pi *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "for *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "do *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "done *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "git rev-parse *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "npm ls *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "git show *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "rg *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "readlink *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "mkdir *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "jq *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "zbrowser *",
-          "action": "allow"
-        },
-        {
-          "surface": "bash",
-          "pattern": "zsearch *",
-          "action": "allow"
-        }
-      ],
+      "global": [],
       "project": [],
       "==entry": {
         "surface": "bash",
@@ -275,6 +83,11 @@
     "==extendOptions.example": "[{ \"turns\": 50, \"minutes\": 15 }, { \"turns\": 200, \"minutes\": 120 }] — a 50-turn rung of your own plus the largest rung a config may write (200 turns / 120 min, the ceilings subagent.roles is bounded by); the four shipped rungs stay, and 20/5 keeps its minutes because no entry named turns 20. Written whole it is also how you retime the shipped ladder: [{ \"turns\": 20, \"minutes\": 10 }] moves the first rung to 10 minutes and leaves the rest",
     "==disableExtendTurns": "turn counts of rungs to drop, applied after extendOptions merges, so a project file may remove a rung the global file added: [60, 100] removes the two shipped 60- and 100-turn rungs. A list that removes every rung is reported and ignored — the shipped ladder stands",
     "==ceiling.dialog": "the rungs are configurable, the rules are not: Reject is the first choice so a stray Enter ends the run rather than paying for more of it, one offer is allowed per run, and the answer must name a rung that was shown — a label from another ladder grants nothing",
+    "requireFinalReport": true,
+    "==requireFinalReport": "the report is the artifact a delegation pays for, and two endings lose it: the clock's wall came down mid-turn, so the last message is the narration of a step the child never took (\"Now I'll write the code, starting with deps:\"); or the child wrote its next call as text (`[Tool call: bash]`), which runs nothing and ends the run there. With this on, such a child gets one more request on the same session with its tools switched off, so a message is its only move. That turn is bounded by its own 3 minutes, and is never asked of a run you stopped or of one the provider killed. With it off the run hands back whatever text it stopped on — flagged as a fragment either way, never presented as an answer",
+    "debugLog": true,
+    "==debugLog": "one JSONL per child run in subagent.debugLogDir: the child's thinking, every nested call, every steer, the ceiling's decisions and the final report turn — the harness's side of a run, which the child's transcript under <sessionDir>/subagent/ does not record. The newest subagent.keepTranscripts files are kept, as the transcripts are. Off, nothing is written outside the transcript dir",
+    "==debugLogDir": "where those files go; unset means <tmp>/pi-subagent (honouring TMPDIR). A written path is used verbatim, so a project file can point them at a scratch dir it cleans up itself",
     "maxTurns": 30,
     "timeoutMinutes": 20,
     "maxResultBytes": 65536,

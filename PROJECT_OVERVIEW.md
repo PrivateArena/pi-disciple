@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Two independent **pi** (coding-agent harness) extensions built to the plan in `.scratch/ARCHITECTURE_PLAN_pi-sub-gate.md`, shipped from one repo and loaded together by `package.json → pi.extensions`. `pi-gate/` is a multi-scope permission gate: it turns every `tool_call` into a policy `Decision` (path / command / network facts → layered rules → dialog) and additionally runs an *output guard* that catches a model writing a tool call as text instead of making it. `pi-subagent/` adds one blocking `subagent(role, task)` tool that runs a child `AgentSession` in-process with zero extensions, a role table, wall-clock/turn ceilings with a human "extend?" dialog, and a report spilled to a transcript file. Language stack: TypeScript only (112 `.ts`, strict, `noEmit`, run directly by pi), plus 7 hand-run `.mjs` live probes in `verification/` and one Python analysis helper.
+Two independent **pi** (coding-agent harness) extensions built to the plan in `.scratch/ARCHITECTURE_PLAN_pi-sub-gate.md`, shipped from one repo and loaded together by `package.json → pi.extensions`. `pi-gate/` is a multi-scope permission gate: it turns every `tool_call` into a policy `Decision` (path / command / network facts → layered rules → dialog) and additionally runs an *output guard* that catches a model writing a tool call as text instead of making it. `pi-subagent/` adds one blocking `subagent(role, task)` tool that runs a child `AgentSession` in-process with zero extensions, a role table, wall-clock/turn ceilings with a human "extend?" dialog, and a report spilled to a transcript file. Language stack: TypeScript only (117 `.ts`, strict, `noEmit`, run directly by pi), plus 9 hand-run `.mjs` live probes in `verification/` and one Python analysis helper.
 
 ## Architecture
 
@@ -31,14 +31,14 @@ pi-disciple/
     output-guard/           turn_end malformed-call detection + detectors/ (12 files)
     render/text.ts          dialog/footer text
   pi-subagent/
-    index.ts  run.ts  child.ts  child-request.ts  child-messages.ts  shims.ts  roles.ts  config-view.ts
-    config-file.ts  ceiling.ts  render.ts  delegation.ts  tool-declaration.ts  prompt.ts  labels.ts  model-override.ts  sampling.ts
-    report-budget.ts  run-guard.ts  stop-api.ts  stop-dialog.ts  run-exit.ts
-    budget/  card/  transcript/  config-contract/                                (15 files)
-  verification/  .scratch/     8 live .mjs RPC/TUI probes + `stop-client.ts` (a stop-API client) (not in `npm test`); plan doc + .py helper
+    index.ts  run.ts  child.ts  child-request.ts  child-messages.ts  call-text.ts  final-report.ts  shims.ts  roles.ts
+    config-view.ts  config-file.ts  ceiling.ts  render.ts  delegation.ts  tool-declaration.ts  prompt.ts  labels.ts
+    model-override.ts  sampling.ts  report-budget.ts  run-guard.ts  stop-api.ts  stop-dialog.ts  run-exit.ts
+    budget/  card/  transcript/  config-contract/                                (16 files)
+  verification/  .scratch/     9 live .mjs RPC/TUI probes + `stop-client.ts` (a stop-API client) (not in `npm test`); plan doc + .py helper
 ```
 
-Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 50 (35 source, 15 tests), other 11. Both are ≤ 60, so neither gets its own overview file.
+Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 56 (20 root, 20 subsystem, 16 tests), other 1. Both are ≤ 60, so neither gets its own overview file.
 
 ## Component Roles
 
@@ -100,10 +100,12 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 50 (
 | File / Module | Role | LOC | Key Exports (with signatures) |
 |---|---|---|---|
 | pi-subagent/index.ts | Extension entry: `subagent` tool (TypeBox params), `/subagentc`, `before_agent_start` delegation section. | ~359 | `piSubagent(pi: ExtensionAPI)`; `applyDelegationSection(options: PromptSectionsLike, limits, roles?): string`; `prepareRoleArgs(args): ToolArgs` |
-| pi-subagent/run.ts | Turns a `ChildResult` into the tool result the parent model reads, with the byte budget applied. | ~106 | `composeResult(result: ChildResult, role: RoleId, maxResultBytes, elapsedMs, extra?: Partial<SubagentDetails>): AgentToolResult<SubagentDetails>` |
-| pi-subagent/child.ts | Build and run the child `AgentSession` (no extensions, shim tools, ceiling clock, transcript dir). | ~297 | `runChild(input: ChildRunInput): Promise<ChildResult>`; `interface ChildResult`; `interface RunProgress`; `makeNullLoader(systemPrompt, contextFiles?): ResourceLoader`; `settleAbort(session, signal): Promise<void>` |
+| pi-subagent/run.ts | Turns a `ChildResult` into the tool result the parent model reads, with the byte budget applied and the report-source banner. | ~143 | `composeResult(result: ChildResult, role: RoleId, maxResultBytes, elapsedMs, extra?: Partial<SubagentDetails>): AgentToolResult<SubagentDetails>`; `reportNote(source, hasText): {header?, banner?}` |
+| pi-subagent/child.ts | Build and run the child `AgentSession` (no extensions, shim tools, ceiling clock, transcript dir), then guarantee it answers. | ~539 | `runChild(input: ChildRunInput): Promise<ChildResult>`; `interface ChildResult`; `interface RunProgress`; `makeNullLoader(systemPrompt, contextFiles?): ResourceLoader`; `settleAbort(session, signal): Promise<void>`; `callTextReminder(hit)`; `MAX_STEERS`/`MAX_CALL_REMINDERS` |
+| pi-subagent/call-text.ts | Is this *text* a tool call the model wrote out by hand? The dialects, with code spans stripped, and the two windows they are judged on. | ~157 | `looksLikeToolCallText(text): boolean` (reminder path); `endsWithCallMarkup(text): boolean` (report path); `callTextEvidence(text): {id, evidence}?`; `callTextRuleIds(text): string[]`; `stripCode(text): string` |
+| pi-subagent/final-report.ts | The report guarantee: what the run's freshest text is worth, and the one tool-less turn that makes an unanswered child answer. | ~204 | `classifyReport({text, stopReason?, hasToolCall?}): ReportShape`; `planFinalReport({exit, shape, allowed}): ReportPlan`; `requestFinalReport(session, {prompt, graceMs?, signal}): Promise<FinalReportOutcome>` (the grace bounds the whole rescue, not just the request); `finalReportPrompt(reason)`; `FINAL_REPORT_GRACE_MS` |
 | pi-subagent/child-request.ts | Resolve the child's model + thinking level + sampling from the role, honouring `inherit` pins. | ~102 | `resolveChildRequest({role, sessionModel, overridden, sessionThinkingLevel, onWarning}): ChildRequest`; `resolveModelPin(pin, registry, sessionModel, onWarning): ChildModelPin` |
-| pi-subagent/child-messages.ts | Read the child transcript back: final text, usage totals, context pressure. | ~91 | `lastAssistantText(messages): string`; `totalUsage(messages): Usage \| undefined`; `lastAssistantError(messages): string \| undefined`; `contextTokens(message): number` |
+| pi-subagent/child-messages.ts | Read the child transcript back: what a message carries (including call markup on the text channel), final text, usage totals, context pressure. | ~111 | `contentShape(message): {text, toolCall, callText}`; `assistantText(message): string`; `lastAssistantText(messages): string`; `lastAssistantMessage(messages): AgentMessage?`; `totalUsage(messages): Usage \| undefined`; `lastAssistantError(messages): string \| undefined`; `contextTokens(message): number` |
 | pi-subagent/shims.ts | Re-wrap parent tools for the child; `execute()` forwards into the parent pipeline, one at a time. | ~99 | `buildShims(tools: readonly AgentTool[], role: Role, host: ShimHost, limits?): ToolDefinition[]`; `isAllowedForRole(name, role): boolean`; `isDeniedByLimit(name, limits?): boolean`; `createQueue(): <T>(fn: () => Promise<T>) => Promise<T>` |
 | pi-subagent/roles.ts | The role table: built-ins plus config-applied roles, tool sanitisation, per-role ceilings. | ~320 | `resolveCallRole(input, fallback: RoleId, roles?): {role?: Role, roleDefaulted}`; `applyRoleConfig(config: RoleConfigMap \| undefined): AppliedRoleConfig`; `effectiveBudget(role, limits): {turns, minutes}`; `sanitiseTools(tools): {keep, dropped}`; `canonicalRole(input): RoleName \| undefined`; `mergeSamplingByLevel(base, override)` |
 | pi-subagent/config-file.ts | Read the `subagent` section of the shared config (deliberate copy of `pi-gate/config-file.ts`). | ~242 | `loadSubagentLimits(cwd, trusted, agentDir?): LoadedLimits`; `readSubagentSection(file, errors): Record<string,unknown> \| undefined` |
@@ -116,13 +118,14 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 50 (
 | pi-subagent/delegation.ts | The system-prompt section that teaches the model when to delegate, generated from the live role table. | ~67 | `buildDelegationSection({defaultRole, roles?}): string`; `roleLines(defaultRole, roles): string[]`; `delegationSectionWords(section): number` |
 | pi-subagent/tool-declaration.ts | The tool's model-facing text — description, snippet, rules bullets — built from the live role table and `subagent.tool`, whose shipped values the config file also spells out. | ~120 | `buildToolDeclaration({roles, defaultRole}, overrides?): ToolDeclaration`; `expandToolTokens(text, tokens): string`; `DEFAULT_TOOL_PROMPT`; `DEFAULT_ROLE_PARAMETER_DESCRIPTION` |
 | pi-subagent/render.ts | Tool-call / tool-result renderers for the TUI card. | ~198 | `renderSubagentCall(args, theme, context?): Text`; `renderSubagentResult(result, options, theme): Text`; `formatStatusLine(details: SubagentDetails, usage, theme): string`; `formatRunStats(details, usage): string` |
-| pi-subagent/card/details.ts | The `SubagentDetails` payload the card and the report both read. | ~143 | `interface SubagentDetails extends SubagentCardFields`; `cardFields(host, run): SubagentCardFields`; `pendantHeader(host): {pendant}`; `previewOf(report, maxChars?): string` |
+| pi-subagent/card/details.ts | The `SubagentDetails` payload the card and the report both read. | ~162 | `interface SubagentDetails extends SubagentCardFields` (+`reportSource`, `reportReason`, `reminders`, `turnLogFile`); `cardFields(host, run): SubagentCardFields`; `pendantHeader(host): {pendant}`; `previewOf(report, maxChars?): string` |
 | pi-subagent/card/progress.ts | Live progress → card fields while the child runs. | ~61 | `formatProgress(progress: RunProgress, toolCount): string`; `progressDetails(progress, host: ProgressContext): SubagentDetails` |
 | pi-subagent/card/ui-status.ts | Map the run exit onto the card's status word. | ~35 | `uiStatus(exit: Exit): SubagentUiStatus` |
 | pi-subagent/labels.ts | Small display formatters shared by card and config view. | ~85 | `formatCeiling(report?: CeilingReport): string`; `formatDuration(ms): string`; `roleDisplayName(role?): string`; `taskLabel(task?): string` |
 | pi-subagent/transcript/paths.ts | Where a child's session file and spilled report live. | ~20 | `childSessionDir(parentSessionDir): string`; `reportFileFor(transcriptFile): string` |
 | pi-subagent/transcript/report-spill.ts | Write the long report out of the context and leave a path behind. | ~27 | `writeReport(transcriptFile: string \| undefined, report): string \| undefined` |
-| pi-subagent/transcript/retention.ts | Keep the last N child transcripts. | ~52 | `pruneTranscripts(dir, keep): Promise<number>` |
+| pi-subagent/transcript/retention.ts | Keep the last N child transcripts (and, beside a run, the last N debug logs). | ~52 | `pruneTranscripts(dir, keep): Promise<number>` |
+| pi-subagent/transcript/turn-log.ts | One JSONL per child run in `<tmp>/pi-subagent`: thinking, nested calls, steers, ceiling decisions, the final report turn (`subagent.debugLog`), private to the user. | ~125 | `openTurnLog(input): TurnLog` (`line(kind, detail)`, `close(): Promise<void>`); `debugLogDir(override?): string`; `debugLogFileName(startedAt, role, id): string`; `logSlice(text, maxChars?): string`; `logRedact(text): string`; `LOG_RESULT_CHARS` |
 | pi-subagent/run-guard.ts | GlobalThis-registered mutex: one child run at a time, claimable/releasable. | ~47 | `claimGuard(guard: RunGuard): void`; `currentGuard(): RunGuard \| undefined`; `releaseGuard(callId: string): void` |
 | pi-subagent/stop-api.ts | The per-run stop another extension can call: same `globalThis`/`Symbol.for` channel as the guard, addressed by the parent's `subagent` tool call id. | ~250 | `SUBAGENT_STOP_KEY`; `publishStopApi(): SubagentStopApi`; `registerRun(run: LiveRun): LiveRunHandle` (`takeStop()`, `release()`); `api.stop({callId, reason, answered}): Promise<SubagentStopResult>`; `stopNote(reason)` | 
 | pi-subagent/stop-dialog.ts | The "may I end this child?" question a stop asks when no human has answered yet. | ~100 | `stopDialogTitle(q: StopQuestion): string`; `stopLabels()`; `createStopAsker({hasUI, ui, signal, timeoutMs})`; `STOP_KEEP_LABEL`/`STOP_STOP_LABEL` |
@@ -130,14 +133,14 @@ Scopes: `pi-gate` 60 files (13 root, 34 subsystem, 13 tests), `pi-subagent` 50 (
 | pi-subagent/report-budget.ts | Byte-exact truncation of the report handed to the parent. | ~35 | `reportHead(report, maxBytes): {head, truncated, totalBytes}`; `sliceBytes(text, maxBytes): string` |
 | pi-subagent/prompt.ts | Assemble the child's system prompt (role text + cwd). | ~20 | `buildChildSystemPrompt(role: Role, cwd): string` |
 | pi-subagent/config-contract/ (7 files) | pi-subagent's own mirror of the config readers it needs (`readRoles`, `readRoleSampling`, `readModelValue`, `readToolPrompt`, `readExtendOptions`, `isRoleId`) so it never imports gate logic. | ~365 | `readRoles(raw, file, errors): RoleConfigMap \| undefined`; `readToolPrompt(raw, where, errors): SubagentToolPrompt \| undefined`; `readExtendOptions(raw, file, errors): ExtendOption[] \| undefined`; `readDisableExtendTurns(raw, file, errors): number[] \| undefined`; `readRoleSampling(value, id, file, errors)`; `readModelValue(value): {model?, error?}`; `MAX_EXTEND_OPTIONS`; `TOOL_PROMPT_TOKENS` |
-| pi-subagent/__tests__/ (13 files) | Vitest suites; `config-parity.test.ts` asserts the two mirrored parsers still agree. | ~1.8k | n/a |
+| pi-subagent/__tests__/ (16 files) | Vitest suites; `config-parity.test.ts` asserts the two mirrored parsers still agree, and `call-text.test.ts` that the child's call-markup dialects stay a subset of the gate's guard. | ~2.2k | n/a |
 
 ### root / verification
 
 | File / Module | Role | LOC | Key Exports |
 |---|---|---|---|
 | package.json | Workspace root: `pi.extensions`, peer deps on the pi runtime, vitest/tsc scripts; ships the root `config.json`. | 33 | n/a |
-| config.json | The shipped default document (both `gate` and `subagent` sections), seeded to `<agentDir>/extensions/pi-disciple/config.json` on a clean install by `pi-gate/index.ts`. | ~173 | n/a |
+| config.json | The shipped default document (both `gate` and `subagent` sections), spelling out every configurable key including `requireFinalReport`, `debugLog`/`debugLogDir`, seeded to `<agentDir>/extensions/pi-disciple/config.json` on a clean install by `pi-gate/index.ts`. | ~209 | n/a |
 | tsconfig.json | strict, `noEmit`, `verbatimModuleSyntax`, `erasableSyntaxOnly` — type-only cross-extension imports are provably erased. | 20 | n/a |
 | verification/rpc-gate-dialog.mjs | Drive `pi --mode rpc` with pi-gate loaded; assert the real dialog and its answers. | ~98 | script |
 | verification/rpc-subagent-gate.mjs | Assert a child's tool call raises the gate dialog **in the parent**. | ~60 | script |
@@ -170,8 +173,10 @@ pi event                pi-gate handler                            result
 pi-subagent                direction
   model ── tool "subagent(role, task)" ──> runChild ── child AgentSession (0 extensions)
      child tool call ── shim.execute ──> parent executeTool ──> parent tool_call event  (gate sees it, same dialog)
+     child call written as text ──> call-text.ts ──> steer reminder (≤ 2), logged to <tmp>/pi-subagent/*.jsonl
      ceiling-clock ── ctx.ui.select (parent UI) ── grant/extend ──> clock reset
-     child report ──> report-spill file ──> composeResult (byte budget) ──> parent tool_result
+     no report (cut off, or markup) ──> final-report.ts ──> one tool-less turn ──> reportSource: rescued
+     child report ──> report-spill file ──> composeResult (byte budget + source banner) ──> parent tool_result
 ```
 
 ## Key Architectural Patterns
@@ -184,6 +189,7 @@ pi-subagent                direction
 6. **Injectable I/O seams**: `prompt.ts::AskIO`, `ceiling.ts::CeilingIO`, `turn-end-pipeline.ts::GuardTurnDeps`, `child.ts`'s `ResourceLoader` and `handle.ts::GateDeps` are all defaulted parameter objects, so no test needs a TTY or a live session.
 7. **Ordered-unique collection**: `pushUnique` arrays everywhere instead of `Set`, because the order facts were spelled in is what the dialog and the grant offer show.
 8. **mtime-keyed caches + file lock**: `policy-loading` caches the parsed policy by file mtime; `grants.ts` serialises grant-file writes through `withFileLock` so concurrent sessions cannot lose an append.
+9. **A result contract, not a hopeful prompt**: a child's report is *classified* (`final-report.ts::classifyReport`) from the message that carries it — completed? carrying a real tool call? written as call markup? — and anything that is not a report either gets one more tool-less turn to produce one, or is labelled `salvaged` in front of the text so no reader takes narration for an answer. `exit` alone never decides it: a run can end "done" on a sentence about work it never did.
 
 ## Read Triggers
 
@@ -194,6 +200,8 @@ pi-subagent                direction
 | Add a config key, or change precedence / defaults | pi-gate/policy-resolution/policy-loading.ts (`buildPolicy`, `orderRules`, `fallbackRulesFor`), config-contract/gate-section.ts, pi-gate/config-contract/tolerant-parse.ts, mirror pi-subagent/config-contract/* |
 | Change the permission dialog (options, wording, timeouts) | pi-gate/prompt.ts (`optionLabels`, `ask`, `blockReason`), pi-gate/handle.ts (`handleToolCall`), pi-gate/render/text.ts |
 | Add a new output-guard detector | pi-gate/output-guard/guard-rule.ts (interface), pi-gate/output-guard/detectors/*.ts as a template, pi-gate/output-guard/rule-registry.ts, pi-gate/config-contract/guard-section.ts (rule id list) |
+| Change what the child is told about its own report | pi-subagent/prompt.ts (the two rules the child gets), pi-subagent/call-text.ts (what a written-out call looks like), pi-subagent/final-report.ts (what happens anyway) |
+| Change the subagent's debug log, its dir or its retention | pi-subagent/transcript/turn-log.ts, `subagent.debugLog`/`.debugLogDir` in config.json, `pi-subagent/config-file.ts` |
 | Add or change a subagent role / its ceiling / sampling | pi-subagent/roles.ts, pi-gate/config-contract/role-vocabulary.ts, pi-subagent/sampling.ts, pi-subagent/child-request.ts |
 | Reword what the model is told about the subagent tool | `subagent.tool` in config.json (placeholders in `==tool.tokens`), pi-subagent/tool-declaration.ts, pi-subagent/index.ts (`prepareLoadout`, `applyToolPromptDeclaration`) |
 | Change what the child is allowed to call | pi-subagent/shims.ts (`FORBIDDEN_CHILD_TOOLS`, `isAllowedForRole`), pi-subagent/roles.ts (`sanitiseTools`) |

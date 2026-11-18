@@ -13,6 +13,8 @@ const child = (overrides: Partial<ChildResult> = {}): ChildResult => ({
 	exit: "done",
 	turns: 4,
 	toolCalls: 7,
+	reportSource: "final",
+	reminders: 0,
 	...overrides,
 });
 
@@ -65,6 +67,51 @@ describe("result mapping", () => {
 		const blank = composeResult(child(), "review", 20_000, 5_000, { stoppedBy: "   " });
 		expect((blank.content[0] as { text: string }).text).not.toContain("Stopped by user");
 		expect(blank.details.stoppedBy?.trim() ?? "").toBe("");
+	});
+
+	it("says so when the text is a fragment rather than a report", () => {
+		const fragment = composeResult(child({ exit: "timeout", text: "Now the platform module.", reportSource: "salvaged" }), "general-purpose", 20_000, 1000);
+		const text = (fragment.content[0] as { text: string }).text;
+		expect(text).toMatch(/report: NONE/);
+		expect(text).toMatch(/⚠ NO FINAL REPORT/);
+		expect(text).toContain("Now the platform module.");
+		expect(fragment.details.reportSource).toBe("salvaged");
+		// A frontend that draws its own REPORT section gets the warning too, because that is where a fragment
+		// is read as an answer — while the card's one-line preview stays the child's own words.
+		expect(fragment.details.report).toMatch(/NO FINAL REPORT/);
+		expect(fragment.details.preview).toBe("Now the platform module.");
+	});
+
+	it("warns about a fragment when there is no text at all", () => {
+		const empty = composeResult(child({ exit: "timeout", text: "", reportSource: "salvaged" }), "explore", 20_000, 1000);
+		const text = (empty.content[0] as { text: string }).text;
+		expect(text).toMatch(/left no text at all/);
+		expect(text).toContain("(the subagent returned no text)");
+	});
+
+	it("marks a rescued report in the header and keeps the report itself clean", () => {
+		const rescued = composeResult(child({ exit: "timeout", text: "REPORT: 4 files written, cargo check not run.", reportSource: "rescued" }), "explore", 20_000, 1000);
+		const text = (rescued.content[0] as { text: string }).text;
+		expect(text).toMatch(/report: written in one tool-less turn/);
+		expect(text).not.toMatch(/NO FINAL REPORT/);
+		expect(rescued.details.report).toBe("REPORT: 4 files written, cargo check not run.");
+		// The header names the reason the turn was needed, so a run that spent no budget is not described as if it did.
+		const malformed = composeResult(child({ reportSource: "rescued", reportReason: "malformed" }), "explore", 20_000, 1000);
+		expect((malformed.content[0] as { text: string }).text).toMatch(/tool-less turn, because the run ended on a tool call written as text/);
+		// An ordinary report says nothing about where it came from: a banner on every report is a banner nobody reads.
+		const plain = (composeResult(child(), "explore", 20_000, 1000).content[0] as { text: string }).text;
+		expect(plain).not.toMatch(/tool-less|NO FINAL REPORT/);
+	});
+
+	it("says the child was reminded, and names the run log when debugging is on", () => {
+		const reminded = composeResult(child({ reminders: 2, reportSource: "rescued", turnLogFile: "/tmp/pi-subagent/run.jsonl" }), "explore", 20_000, 1000);
+		const text = (reminded.content[0] as { text: string }).text;
+		expect(text).toMatch(/reminders: 2 \(a tool call written as text runs nothing\)/);
+		expect(text).toContain("run log: /tmp/pi-subagent/run.jsonl");
+		expect(reminded.details.reminders).toBe(2);
+		expect(reminded.details.turnLogFile).toBe("/tmp/pi-subagent/run.jsonl");
+		const quiet = (composeResult(child(), "explore", 20_000, 1000).content[0] as { text: string }).text;
+		expect(quiet).not.toMatch(/reminders:|run log:/);
 	});
 
 	it("says the thinking level a child really ran at, when it is not the session's", () => {

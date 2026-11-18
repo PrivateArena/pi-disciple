@@ -122,6 +122,11 @@ const CASES: [label: string, config: Record<string, unknown>][] = [
 	["a tool block whose every bullet is bad", { tool: { promptGuidelines: ["{{a}}", "{{b}}"], promptSnippet: "kept" } }],
 	["documentation keys beside live ones in a tool block", { tool: { "==description": "suggested rewording", description: "live text" } }],
 	["a token spelling with spaces and case", { tool: { description: "{{ Roles }}", promptSnippet: "{{roles}}" } }],
+	["the report guarantee and the debug log, switched off", { requireFinalReport: false, debugLog: false }],
+	["a non-boolean report switch", { requireFinalReport: "always" }],
+	["a debug log dir, trimmed", { debugLogDir: " /tmp/child-logs " }],
+	["a debug log dir that is not a path", { debugLogDir: 7 }],
+	["a blank debug log dir", { debugLogDir: "   " }],
 ];
 
 describe("the shipped duplication stays honest", () => {
@@ -131,7 +136,7 @@ describe("the shipped duplication stays honest", () => {
 			const where = document(config);
 			const file = loadSubagentLimits(where.cwd, false, where.agentDir);
 			// Same accepted values, key for key.
-			for (const key of ["enabled", "delegationPrompt", "askToExtend", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole", "tool", "extendOptions", "disableExtendTurns"] as const) {
+			for (const key of ["enabled", "delegationPrompt", "askToExtend", "requireFinalReport", "debugLog", "debugLogDir", "maxTurns", "timeoutMinutes", "maxResultBytes", "keepTranscripts", "model", "roles", "defaultRole", "tool", "extendOptions", "disableExtendTurns"] as const) {
 				if (pure.limits[key] === undefined) continue;
 				expect(file.limits[key], key).toEqual(pure.limits[key]);
 			}
@@ -162,6 +167,21 @@ describe("the shipped duplication stays honest", () => {
 		expect(loadSubagentLimits(where.cwd, false, where.agentDir).limits.askToExtend).toBe(true);
 		// The pure parser returns a partial: the caller owns the default, and both agree it is on.
 		expect(parseSubagentConfig({}, "test").limits.askToExtend).toBeUndefined();
+	});
+
+	it("ships the report guarantee and the debug log on, in both readers", () => {
+		// The guarantee is the feature: off by default it would be the bug the file exists to fix.
+		expect(DEFAULT_LIMITS.requireFinalReport).toBe(true);
+		expect(DEFAULT_LIMITS.debugLog).toBe(true);
+		const where = document({});
+		const loaded = loadSubagentLimits(where.cwd, false, where.agentDir).limits;
+		expect(loaded.requireFinalReport).toBe(true);
+		expect(loaded.debugLog).toBe(true);
+		// And no path is written anywhere by default: `debugLogDir` is the machine's own temp dir, resolved at use.
+		expect(DEFAULT_LIMITS.debugLogDir).toBeUndefined();
+		expect(loaded.debugLogDir).toBeUndefined();
+		// The pure parser returns a partial: both readers default it the same way.
+		expect(parseSubagentConfig({}, "test").limits.requireFinalReport).toBeUndefined();
 	});
 
 	it("mirrors the vocabulary constants", () => {

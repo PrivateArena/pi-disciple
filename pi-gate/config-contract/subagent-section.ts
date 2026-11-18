@@ -255,6 +255,23 @@ export interface SubagentLimits {
 	 */
 	askToExtend: boolean;
 	/**
+	 * Give a child that could not report one final, tool-less turn to do it in (`subagent.requireFinalReport`).
+	 *
+	 * Without it a run that was cut off mid-turn, or that wrote its next call as text and stopped, hands back the
+	 * narration of a step it never took — and the parent cannot tell that from an answer. With it the child gets
+	 * one more request, on the same session, with no tools left to narrate, so a message is its only move. The
+	 * turn is bounded by its own grace window and never happens on a run a human stopped or a provider killed.
+	 */
+	requireFinalReport: boolean;
+	/**
+	 * Write one JSONL per child run to `subagent.debugLogDir` (default `<tmp>/pi-subagent`): the child's thinking,
+	 * every nested call, every steer, the ceiling's decisions and the final report turn — the harness's side of a
+	 * run, which the child's own transcript does not record. Off, nothing is written anywhere (`subagent.debugLog`).
+	 */
+	debugLog: boolean;
+	/** Where those logs go. Absent means `<tmp>/pi-subagent`. */
+	debugLogDir?: string;
+	/**
 	 * Extra or replacement rungs of the extension dialog (`subagent.extendOptions`), merged by `turns` over the
 	 * shipped ladder: a rung naming the `turns` of a shipped one replaces its minutes, an unseen `turns` adds a
 	 * rung. Absent means the shipped ladder exactly (`pi-subagent/ceiling.ts::EXTENSION_STEPS`).
@@ -276,6 +293,8 @@ export const DEFAULT_SUBAGENT_LIMITS: SubagentLimits = {
 	maxResultBytes: 65536,
 	keepTranscripts: 20,
 	askToExtend: true,
+	requireFinalReport: true,
+	debugLog: true,
 };
 
 export interface ParsedSubagentConfig {
@@ -401,6 +420,14 @@ export function parseSubagentConfig(raw: unknown, where = "config"): ParsedSubag
 	if (delegationPrompt !== undefined) limits.delegationPrompt = delegationPrompt;
 	const askToExtend = readBoolean(raw, "askToExtend", `${where}: subagent.askToExtend`, errors);
 	if (askToExtend !== undefined) limits.askToExtend = askToExtend;
+	const requireFinalReport = readBoolean(raw, "requireFinalReport", `${where}: subagent.requireFinalReport`, errors);
+	if (requireFinalReport !== undefined) limits.requireFinalReport = requireFinalReport;
+	const debugLog = readBoolean(raw, "debugLog", `${where}: subagent.debugLog`, errors);
+	if (debugLog !== undefined) limits.debugLog = debugLog;
+	if (raw.debugLogDir !== undefined) {
+		if (typeof raw.debugLogDir !== "string" || !raw.debugLogDir.trim()) errors.push(`${where}: subagent.debugLogDir must be a non-empty path, ignored`);
+		else limits.debugLogDir = raw.debugLogDir.trim();
+	}
 	const extendOptions = parseExtendOptions(raw.extendOptions, where, errors);
 	if (extendOptions) limits.extendOptions = extendOptions;
 	const disableExtendTurns = parseDisableExtendTurns(raw.disableExtendTurns, where, errors);

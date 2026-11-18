@@ -45,6 +45,8 @@ const child = (overrides: Partial<ChildResult> = {}): ChildResult => ({
 	exit: "done",
 	turns: 2,
 	toolCalls: 3,
+	reportSource: "final",
+	reminders: 0,
 	...overrides,
 });
 

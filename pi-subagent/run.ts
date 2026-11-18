@@ -12,6 +12,7 @@
 
 import { formatSize, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import type { ChildResult } from "./child.ts";
+import type { ReportReason, ReportSource } from "./final-report.ts";
 import { formatCeiling } from "./labels.ts";
 import type { RoleId } from "./roles.ts";
 import { uiStatus } from "./card/ui-status.ts";
@@ -20,6 +21,25 @@ import { reportHead } from "./report-budget.ts";
 import { writeReport } from "./transcript/report-spill.ts";
 
 export { clip } from "./labels.ts";
+
+/**
+ * What a run's report source says about the text it is attached to.
+ *
+ * Only the two kinds that can mislead a reader are ever said: an ordinary report gets no banner, because a
+ * banner on every report is a banner nobody reads. `salvaged` is the dangerous one — a fragment of mid-task
+ * narration is what a parent will otherwise take for a completed delegation.
+ */
+export function reportNote(source: ReportSource | undefined, hasText: boolean, reason?: ReportReason): { header?: string; banner?: string } {
+	const why = reason === "malformed" ? "on a tool call written as text, which ran nothing" : "without a report";
+	if (source === "rescued") return { header: `report: written in one tool-less turn, because the run ended ${why}` };
+	if (source !== "salvaged") return {};
+	return {
+		header: "report: NONE — the text below is a fragment, not an answer",
+		banner: hasText
+			? `⚠ NO FINAL REPORT. This child ended ${why}, so what follows is the last message it managed to send — work it described, not work it finished. Do not treat it as a report.`
+			: "⚠ NO FINAL REPORT. This child was cut off before it could summarise and left no text at all. Read the transcript below for what it actually did.",
+	};
+}
 
 /**
  * The facade over the split-out modules: everything this module exported before is still reachable from
@@ -59,7 +79,9 @@ export function composeResult(
 ): AgentToolResult<SubagentDetails> {
 	const report = result.text ?? "";
 	const cut = reportHead(report, maxResultBytes);
-	const answer = cut.head.trimEnd() || "(the subagent returned no text)";
+	const body = cut.head.trimEnd();
+	const answer = body || "(the subagent returned no text)";
+	const note = reportNote(result.reportSource, body !== "", result.reportReason);
 	const sessionFile = result.childSessionFile ?? extra.childSessionFile;
 	const childSessionId = result.childSessionId ?? extra.childSessionId;
 	const spillFile = cut.truncated ? writeReport(sessionFile, report) : undefined;
@@ -73,10 +95,13 @@ export function composeResult(
 	const header =
 		`[subagent ${role} · ${status} · ${result.turns} turns · ${result.toolCalls} tool calls · ${(elapsedMs / 1000).toFixed(1)}s]` +
 		(stoppedBy ? `\n${stoppedBy}` : "") +
+		(result.reminders ? `\nreminders: ${result.reminders} (a tool call written as text runs nothing)` : "") +
+		(note.header ? `\n${note.header}` : "") +
 		(extra.model ? `\nmodel: ${extra.model}` : "") +
 		(extra.thinking ? `\nthinking: ${extra.thinking}` : "") +
 		(ceilingNote ? `\n${ceilingNote}` : "") +
 		(sessionFile ? `\ntranscript: ${sessionFile}` : "") +
+		(result.turnLogFile ? `\nrun log: ${result.turnLogFile}` : "") +
 		(result.error ? `\nerror: ${result.error}` : "");
 	const cutNote = `[… the report is ${formatSize(cut.totalBytes)} and only its first ${formatSize(Buffer.byteLength(answer))} is shown here, per subagent.maxResultBytes`;
 	const footer = !cut.truncated
@@ -85,12 +110,16 @@ export function composeResult(
 			? `\n\n${cutNote}. The COMPLETE report: ${spillFile} — read that file; it holds nothing but the report. Do not re-read the transcript to recover the rest.]`
 			: `\n\n${cutNote}; the rest is in the transcript above.]`;
 	return {
-		content: [{ type: "text", text: `${header}\n\n${answer}${footer}` }],
+		content: [{ type: "text", text: `${header}\n\n${note.banner ? `${note.banner}\n\n` : ""}${answer}${footer}` }],
 		details: {
 			status: uiStatus(result.exit),
 			role,
 			exit: result.exit,
 			ceiling: result.ceiling,
+			reportSource: result.reportSource,
+			...(result.reportReason ? { reportReason: result.reportReason } : {}),
+			reminders: result.reminders,
+			...(result.turnLogFile ? { turnLogFile: result.turnLogFile } : {}),
 			turns: result.turns,
 			toolCalls: result.toolCalls,
 			childSessionFile: sessionFile,
@@ -98,7 +127,9 @@ export function composeResult(
 			truncated: cut.truncated,
 			elapsedMs,
 			task: extra.task,
-			report,
+			// A fragment is warned about where it is read: `details.report` is what a frontend that draws its own
+			// card shows as the report, and a spilled file must keep only the child's own words.
+			report: note.banner ? `${note.banner}\n\n${report}` : report,
 			...(spillFile ? { reportFile: spillFile } : {}),
 			...cardFields(
 				{ role, task: extra.task ?? "", model: extra.model },

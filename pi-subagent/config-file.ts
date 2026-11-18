@@ -51,6 +51,8 @@ export const DEFAULT_LIMITS: SubagentLimits = {
 	maxResultBytes: 65536,
 	keepTranscripts: 20,
 	askToExtend: true,
+	requireFinalReport: true,
+	debugLog: true,
 };
 
 export interface LoadedLimits {
@@ -172,6 +174,24 @@ export function loadSubagentLimits(cwd: string, trusted: boolean, agentDir: stri
 		if (askToExtend !== undefined) {
 			loaded.limits = { ...loaded.limits, askToExtend };
 			loaded.origins.askToExtend = file;
+		}
+		const requireFinalReport = readBoolean(section, "requireFinalReport", `${file}: subagent.requireFinalReport`, loaded.errors);
+		if (requireFinalReport !== undefined) {
+			loaded.limits = { ...loaded.limits, requireFinalReport };
+			loaded.origins.requireFinalReport = file;
+		}
+		const debugLog = readBoolean(section, "debugLog", `${file}: subagent.debugLog`, loaded.errors);
+		if (debugLog !== undefined) {
+			loaded.limits = { ...loaded.limits, debugLog };
+			loaded.origins.debugLog = file;
+		}
+		if (section.debugLogDir !== undefined) {
+			const dir = section.debugLogDir;
+			if (typeof dir !== "string" || !dir.trim()) loaded.errors.push(`${file}: subagent.debugLogDir must be a non-empty path, ignored`);
+			else {
+				loaded.limits = { ...loaded.limits, debugLogDir: dir.trim() };
+				loaded.origins.debugLogDir = file;
+			}
 		}
 		const delegationPrompt = readBoolean(section, "delegationPrompt", `${file}: subagent.delegationPrompt`, loaded.errors);
 		if (delegationPrompt !== undefined) {
