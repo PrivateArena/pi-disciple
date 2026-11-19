@@ -49,6 +49,12 @@ export function progressDetails(progress: RunProgress, host: ProgressContext): S
 		truncated: false,
 		elapsedMs: progress.elapsedMs,
 		activity: progress.lastTool ?? "thinking",
+		// What the child is doing as a word the card can branch on, its thinking, and the two files it writes —
+		// all reported live, so a running card is not the poorer cousin of a settled one.
+		phase: progress.phase,
+		reasoning: progress.reasoning,
+		childSessionFile: progress.childSessionFile,
+		turnLogFile: progress.turnLogFile,
 		ceiling: host.ceiling,
 		task: host.task,
 		model: host.model,

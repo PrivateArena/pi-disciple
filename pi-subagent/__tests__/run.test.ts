@@ -48,11 +48,20 @@ describe("run guard", () => {
 
 describe("result mapping", () => {
 	it("leads with a status header and keeps the answer head", () => {
-		const result = composeResult(child(), "explore", 20_000, 22_000);
+		const result = composeResult(
+			child({ reasoning: { turns: [{ turn: 1, text: "check the scope resolver before the gate" }], truncated: false } }),
+			"explore",
+			20_000,
+			22_000,
+		);
 		const text = (result.content[0] as { text: string }).text;
 		expect(text.startsWith("[subagent explore · DONE · 4 turns · 7 tool calls · 22.0s]")).toBe(true);
 		expect(text).toContain("Findings:");
 		expect(result.details.truncated).toBe(false);
+		// A card reloaded after the run still shows what the child thought — and the model is told no more than
+		// it was before, because the trail is for the human.
+		expect(result.details.reasoning).toEqual({ turns: [{ turn: 1, text: "check the scope resolver before the gate" }], truncated: false });
+		expect(text).not.toContain("check the scope resolver");
 	});
 
 	it("puts a human's stop reason above the report, in the caller's own words", () => {
@@ -123,7 +132,7 @@ describe("result mapping", () => {
 		const plain = (composeResult(child(), "explore", 20_000, 1000, { model: "local/x (inherited)" }).content[0] as { text: string }).text;
 		expect(plain).toContain("\nmodel: local/x (inherited)");
 		expect(plain).not.toContain("thinking:");
-		expect(progressDetails({ turns: 1, toolCalls: 0, elapsedMs: 1 }, { role: "explore", task: "t", shimTools: [], nestedCalls: 0, thinking: "off" }).thinking).toBe("off");
+		expect(progressDetails({ turns: 1, toolCalls: 0, elapsedMs: 1, phase: "thinking" }, { role: "explore", task: "t", shimTools: [], nestedCalls: 0, thinking: "off" }).thinking).toBe("off");
 	});
 
 	it("records that the role came from the config and not from the model", () => {
@@ -235,7 +244,7 @@ describe("result mapping", () => {
 	});
 
 	it("formats the progress line", () => {
-		expect(formatProgress({ turns: 4, toolCalls: 7, lastTool: "bash", elapsedMs: 22_000 }, 5)).toBe(
+		expect(formatProgress({ turns: 4, toolCalls: 7, lastTool: "bash", elapsedMs: 22_000, phase: "calling" }, 5)).toBe(
 			"subagent running · turn 4 · 7 calls · bash · 22s · 5 tools",
 		);
 	});
@@ -365,7 +374,7 @@ describe("the budget extension in the result", () => {
 	});
 
 	it("keeps a granted extension on the live card, so a long run says it has more rope", () => {
-		const details = progressDetails({ turns: 25, toolCalls: 9, elapsedMs: 40_000 }, {
+		const details = progressDetails({ turns: 25, toolCalls: 9, elapsedMs: 40_000, phase: "thinking" }, {
 			role: "explore",
 			task: "survey the gate",
 			model: "local/x (inherited)",

@@ -259,7 +259,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 			const samplingText = childRequest.sampling;
 			// A granted extension goes on the live card, so a run that got more rope looks like one.
 			let ceiling: CeilingReport | undefined;
-			let latest: RunProgress = { turns: 0, toolCalls: 0, elapsedMs: 0 };
+			let latest: RunProgress = { turns: 0, toolCalls: 0, elapsedMs: 0, phase: "thinking" };
 			let lastEmitAt = 0;
 			const emitProgress = (force = false) => {
 				if (!onUpdate) return;

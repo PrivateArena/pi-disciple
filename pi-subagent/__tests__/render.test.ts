@@ -151,7 +151,7 @@ describe("the result block", () => {
 
 	it("says what a running child is doing", () => {
 		const running = progressDetails(
-			{ turns: 1, toolCalls: 2, lastTool: "bash", elapsedMs: 8000 },
+			{ turns: 1, toolCalls: 2, lastTool: "bash", elapsedMs: 8000, phase: "calling" },
 			{ role: "explore", task: "survey the gate", shimTools: ["read"], nestedCalls: 2 },
 		);
 		const rendered = formatResultBlock(running, { content: [{ type: "text", text: "subagent running" }], details: running }, false, theme);
@@ -210,7 +210,7 @@ describe("the result block", () => {
 describe("progress details", () => {
 	it("carry a full status, not an empty object", () => {
 		const update = progressDetails(
-			{ turns: 4, toolCalls: 7, lastTool: "bash", elapsedMs: 9000 },
+			{ turns: 4, toolCalls: 7, lastTool: "bash", elapsedMs: 9000, phase: "calling" },
 			{ role: "explore", task: "survey the gate", model: "local/qwen3.8-flash-next (inherited)", shimTools: ["read", "bash"], nestedCalls: 7 },
 		);
 		expect(update.status).toBe("running");
@@ -220,11 +220,44 @@ describe("progress details", () => {
 		expect(update.task).toBe("survey the gate");
 		expect(update.model).toContain("inherited");
 		expect(update.toolCalls).toBe(7);
+		// A running card gets the phase: `activity` names the last tool, which is not the same question.
+		expect(update.phase).toBe("calling");
+		// A child that thought nothing has no thinking line, rather than an empty one to draw.
+		expect(update.reasoning).toBeUndefined();
+	});
+
+	it("say what the child is doing, and where its two files are, while it still runs", () => {
+		const trail = { turns: [{ turn: 3, text: "grep the policy first, then read the gate" }], truncated: false };
+		const update = progressDetails(
+			{
+				turns: 3,
+				toolCalls: 2,
+				lastTool: "bash",
+				elapsedMs: 8_000,
+				phase: "writing",
+				reasoning: trail,
+				childSessionFile: "/tmp/agent/sessions/subagent/child.jsonl",
+				turnLogFile: "/tmp/pi-subagent/run.jsonl",
+			},
+			{ role: "explore", task: "survey the gate", shimTools: ["read"], nestedCalls: 2 },
+		);
+		expect(update.phase).toBe("writing");
+		expect(update.reasoning).toEqual(trail);
+		// The paths the settled card already shows, while the child is still writing to them.
+		expect(update.childSessionFile).toBe("/tmp/agent/sessions/subagent/child.jsonl");
+		expect(update.turnLogFile).toBe("/tmp/pi-subagent/run.jsonl");
 	});
 
 	it("say the child is thinking before its first tool call", () => {
-		const update = progressDetails({ turns: 0, toolCalls: 0, elapsedMs: 0 }, { role: "explore", task: "t", shimTools: [], nestedCalls: 0 });
+		const update = progressDetails(
+			{ turns: 0, toolCalls: 0, elapsedMs: 0, phase: "thinking" },
+			{ role: "explore", task: "t", shimTools: [], nestedCalls: 0 },
+		);
 		expect(update.activity).toBe("thinking");
+		expect(update.phase).toBe("thinking");
+		// No debug log, no transcript yet: the fields stay absent rather than being invented as empty paths.
+		expect(update.turnLogFile).toBeUndefined();
+		expect(update.childSessionFile).toBeUndefined();
 	});
 });
 
@@ -260,7 +293,7 @@ describe("the frontend card contract", () => {
 
 	it("claims no field the run did not earn", () => {
 		const running = progressDetails(
-			{ turns: 0, toolCalls: 0, elapsedMs: 0 },
+			{ turns: 0, toolCalls: 0, elapsedMs: 0, phase: "thinking" },
 			{ role: "review", task: "critique", shimTools: [], nestedCalls: 0 },
 		);
 		expect(running.status).toBe("running");

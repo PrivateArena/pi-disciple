@@ -53,7 +53,14 @@ const settledResult = composeResult(
 const settledDetails = settledResult.details;
 
 const runningDetails = progressDetails(
-	{ turns: 2, toolCalls: 3, lastTool: "bash", elapsedMs: 12_000 },
+	{
+		turns: 2,
+		toolCalls: 3,
+		lastTool: "bash",
+		elapsedMs: 12_000,
+		phase: "calling",
+		reasoning: { turns: [{ turn: 1, text: "Start with the tree, then the manifest." }], truncated: false },
+	},
 	{ role: "explore", task: "Read package.json and summarize it", model: "local/qwen3.8-flash-next (inherited)", shimTools: ["read", "bash"], nestedCalls: 3 },
 );
 

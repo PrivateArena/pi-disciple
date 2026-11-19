@@ -120,6 +120,9 @@ export function composeResult(
 			...(result.reportReason ? { reportReason: result.reportReason } : {}),
 			reminders: result.reminders,
 			...(result.turnLogFile ? { turnLogFile: result.turnLogFile } : {}),
+			// The trail a running card was showing, kept so a card reloaded after the run still says what the child
+			// thought. The model-facing text above never mentions it.
+			reasoning: result.reasoning,
 			turns: result.turns,
 			toolCalls: result.toolCalls,
 			childSessionFile: sessionFile,

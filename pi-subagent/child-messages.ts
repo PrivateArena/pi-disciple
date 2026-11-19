@@ -46,6 +46,24 @@ export function assistantText(message: AgentMessage): string {
 		.trim();
 }
 
+/**
+ * The thinking of one assistant message, its text and tool calls left out; "" when it thought nothing. The
+ * sibling of `assistantText`, which deliberately *drops* thinking — that one feeds a report, this one feeds the
+ * card, which shows it (`reasoning.ts`). Same defensive shape for the same reason: a message shaped differently
+ * from the ones expected is a card with no thinking line, never a run lost between the run and its `dispose`.
+ */
+export function assistantThinking(message: AgentMessage): string {
+	if (message.role !== "assistant") return "";
+	const parts = Array.isArray(message.content) ? message.content : [];
+	return parts
+		// A redacted or malformed block carries no `thinking` string; it contributed nothing to show, and "" keeps
+		// the join from turning one into the word "undefined".
+		.filter((part): part is { type: "thinking"; thinking: string } => part.type === "thinking")
+		.map((part) => (typeof part.thinking === "string" ? part.thinking : ""))
+		.join("\n\n")
+		.trim();
+}
+
 /** Tokens the last assistant response occupied, from its reported usage. */
 export function contextTokens(message: AgentMessage): number {
 	if (message.role !== "assistant") return 0;

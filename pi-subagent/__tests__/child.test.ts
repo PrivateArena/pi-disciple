@@ -15,6 +15,8 @@ import {
 	type ChildRunInput,
 	type CeilingAnswer,
 	type CeilingAsk,
+	type RunPhase,
+	type RunProgress,
 } from "../child.ts";
 import { ROLES } from "../roles.ts";
 import { buildShims, type ShimHost } from "../shims.ts";
@@ -279,6 +281,113 @@ describe("runChild", () => {
 		const result = await run;
 		expect(result.toolCalls).toBe(2);
 		expect(progress).toEqual([1, 2, 2]); // the last emit carries the final state
+	});
+});
+
+describe("the live card (phase, thinking, files)", () => {
+	const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+	it("carries the child's thinking and its two files on the updates, and the trail in the result", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const progress: RunProgress[] = [];
+		const dir = mkdtempSync(join(tmpdir(), "pi-sub-card-"));
+		try {
+			const run = runChild({
+				...input({ debugLog: true, debugLogDir: dir, onProgress: (p) => progress.push(p) }),
+				hardSlackMs: 60_000,
+				sessionFactory: async () => stubSession(spy, "hang"),
+			});
+			await tick(10);
+			spy.emit?.({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "  grep for the gate first, then read the policy  " },
+						{ type: "toolCall", id: "c1", name: "grep", args: { pattern: "gate" } },
+					],
+				},
+			});
+			await tick(10);
+			spy.release?.();
+			const result = await run;
+			// Numbered with the turn that just finished — the number the card prints, not the next one.
+			const trail = { turns: [{ turn: 1, text: "grep for the gate first, then read the policy" }], truncated: false };
+			expect(progress.at(-1)?.reasoning).toEqual(trail);
+			// The settled result keeps it, so a card that was closed during the run can still show it.
+			expect(result.reasoning).toEqual(trail);
+			// The two files the run writes, named while the child is still writing to them.
+			expect(progress.at(-1)?.childSessionFile).toBe("/tmp/child.jsonl");
+			expect(progress.at(-1)?.turnLogFile).toBe(result.turnLogFile);
+			expect(result.turnLogFile).toContain("_explore_");
+			// A child between two turns is thinking, not writing: `phase` is live, not the last event's shape.
+			expect(progress.at(-1)?.phase).toBe("thinking");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves the run log out of the updates when there is no run log", async () => {
+		// `subagent.debugLog` off is the shipped default for the field's own `NULL_LOG`, whose `file` is undefined:
+		// the live card must not turn that into an empty path the way the settled payload already refuses to.
+		const spy: Spy = { disposed: false, aborted: false, steers: [] };
+		const progress: RunProgress[] = [];
+		const run = runChild({
+			...input({ onProgress: (p) => progress.push(p) }),
+			hardSlackMs: 60_000,
+			sessionFactory: async () => stubSession(spy, "hang"),
+		});
+		await tick(10);
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "no log here" }] } });
+		spy.release?.();
+		const result = await run;
+		expect(result.turnLogFile).toBeUndefined();
+		expect(progress.length).toBeGreaterThan(0);
+		expect(progress.every((p) => p.turnLogFile === undefined)).toBe(true);
+		// A thought with no text beside it is still a thought, and the only thing the card can show.
+		expect(result.reasoning).toEqual({ turns: [{ turn: 1, text: "no log here" }], truncated: false });
+	});
+
+	it("moves the phase with the run: writing, calling, and the final report while it is being written", async () => {
+		const spy: Spy = { disposed: false, aborted: false, steers: [], finalText: "REPORT: read the policy, then stopped." };
+		const phases: RunPhase[] = [];
+		const run = runChild({
+			...input({ onProgress: (p) => phases.push(p.phase) }),
+			hardSlackMs: 60_000,
+			sessionFactory: async () => {
+				// A run that ends on a call written as text is one that owes the caller a final report turn.
+				spy.messages = [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "Now I'll write the code. Starting with deps and lib.rs:\n[Tool call: bash]" }],
+						stopReason: "stop",
+					} as never,
+				];
+				return stubSession(spy, "hang");
+			},
+		});
+		await tick(10);
+		expect(phases).toEqual([]);
+		// A turn that has only thought has not started writing, so the card is not told anything.
+		spy.emit?.({ type: "message_start", message: { role: "assistant", content: [{ type: "thinking", thinking: "check the deps" }] } });
+		await tick(10);
+		expect(phases).toEqual([]);
+		spy.emit?.({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "Now I'll write the code" }] } });
+		await tick(10);
+		expect(phases).toEqual(["writing"]);
+		spy.emit?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Now I'll write the code." }] } });
+		await tick(10);
+		expect(phases).toEqual(["writing", "thinking"]);
+		spy.emit?.({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash" });
+		await tick(10);
+		expect(phases).toEqual(["writing", "thinking", "calling"]);
+		spy.release?.();
+		const result = await run;
+		expect(result.reportSource).toBe("rescued");
+		// The guaranteed report turn reaches the card *as* the report turn, which is the phase the card is
+		// asked about most and the one no `message_end` would ever have carried.
+		expect(phases.slice(3)).toContain("finalReport");
+		expect(phases.indexOf("finalReport")).toBeGreaterThan(phases.indexOf("calling"));
 	});
 });
 

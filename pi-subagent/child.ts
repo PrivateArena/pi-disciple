@@ -26,6 +26,7 @@ import { debugLogDir, logSlice, openTurnLog } from "./transcript/turn-log.ts";
 import { pickEarlier, type Exit } from "./run-exit.ts";
 import {
 	assistantText,
+	assistantThinking,
 	contentShape,
 	contextTokens,
 	lastAssistantError,
@@ -34,6 +35,7 @@ import {
 	totalUsage,
 } from "./child-messages.ts";
 import { callTextEvidence } from "./call-text.ts";
+import { createReasoningTrail, type ReasoningTrail } from "./reasoning.ts";
 import { classifyReport, planFinalReport, finalReportPrompt, requestFinalReport, salvageSource, type ReportReason, type ReportShape, type ReportSource } from "./final-report.ts";
 import type { CeilingAskHandler, CeilingReport } from "./budget/ceiling-vocabulary.ts";
 import { createCeilingClock } from "./budget/ceiling-clock.ts";
@@ -68,11 +70,25 @@ export type {
 } from "./budget/ceiling-vocabulary.ts";
 export { CEILING_OFFER_HOLD_MS, HARD_SETTLE_MS, REPORT_GRACE_MS } from "./budget/ceiling-clock.ts";
 
+/**
+ * What the child is doing right now, as far as the run's own state can tell. The card needs the distinction
+ * `activity` cannot make: that a child is writing its answer rather than still working on the problem.
+ */
+export type RunPhase = "thinking" | "writing" | "calling" | "finalReport";
+
 export interface RunProgress {
 	turns: number;
 	toolCalls: number;
 	lastTool?: string;
 	elapsedMs: number;
+	/** Live, not the phase of the last completed event — see `runChild`'s `refreshPhase`. */
+	phase: RunPhase;
+	/** Absent while the child has thought nothing (`reasoning.ts`); the transcript holds the whole record. */
+	reasoning?: ReasoningTrail;
+	/** The child's transcript, once pi has written one; absent while the file does not exist yet. */
+	childSessionFile?: string;
+	/** The harness's run log, when `subagent.debugLog` is on; absent exactly as in the settled result. */
+	turnLogFile?: string;
 }
 
 export interface ChildResult {
@@ -97,6 +113,11 @@ export interface ChildResult {
 	reminders: number;
 	/** Where this run's harness log went, when `subagent.debugLog` is on. */
 	turnLogFile?: string;
+	/**
+	 * The child's thinking, bounded to what a progress event may carry (`reasoning.ts`), so a card that stays open
+	 * after the run can still show what it was thinking. Absent when it thought nothing.
+	 */
+	reasoning?: ReasoningTrail;
 }
 
 export interface ChildRunInput {
@@ -217,8 +238,28 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 	let reminders = 0;
 	/** While the tool-less final turn runs there is no call to remind about, only a report to ask for. */
 	let inFinalTurn = false;
+	/** The child's thinking, kept for the card and clipped to what one may carry (`reasoning.ts`). */
+	const trail = createReasoningTrail();
+	/** The phase the card was last told about — the heartbeat re-uses it, so a change must be emitted (`refreshPhase`). */
+	let phase: RunPhase = "thinking";
 
-	const emit = () => input.onProgress({ turns, toolCalls, lastTool, elapsedMs: Date.now() - startedAt });
+	// `emit` reads `phaseOf` and the trail declared below it: every call site of `emit` is a callback (the event
+	// subscriber, the ceiling clock, the end of the run), so all of them execute after those declarations — legal
+	// today, but not locally obvious, which is why the order is spelled out here rather than changed.
+	const emit = () => {
+		phase = phaseOf();
+		input.onProgress({
+			turns,
+			toolCalls,
+			lastTool,
+			elapsedMs: Date.now() - startedAt,
+			phase,
+			reasoning: trail.snapshot(),
+			// pi's own fields, both assigned only once the file exists — undefined before that is the truth.
+			childSessionFile: session.sessionFile,
+			turnLogFile: log.file,
+		});
+	};
 	const contextWindow = input.model?.contextWindow ?? 0;
 	// Each reason asks once — an earlier "conclude now" can be swallowed by the queue, and the timeout ask
 	// is the one that must land. Two asks is the most a child gets before the ceiling is enforced.
@@ -252,11 +293,33 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 	const isWritingReport = () => streaming.text && !streaming.toolCall && !streaming.callText;
 	const isExecutingTool = () => runningTools.size > 0 || (session.state?.pendingToolCalls?.size ?? 0) > 0;
 
+	/**
+	 * What the child is doing, out of the state the run already keeps. `isWritingReport` is the run's existing
+	 * definition of "a report is being written" — it is what the ceiling clock defers a hard stop for — and
+	 * `inFinalTurn` is the guaranteed-report turn, so the card says "final report" exactly where the run is really
+	 * writing one, and "writing" exactly where the clock would not dare cut the child off.
+	 */
+	const phaseOf = (): RunPhase =>
+		inFinalTurn ? "finalReport" : isWritingReport() ? "writing" : runningTools.size > 0 ? "calling" : "thinking";
+
+	/**
+	 * The phase has to be *live*, not merely correct at the next event: `index.ts`'s heartbeat re-emits the last
+	 * `RunProgress`, so a phase that only moved at `message_end` would be one turn stale on a silent child — and
+	 * the report turn is the one the card is asked about. Called where the streaming shape is already recomputed
+	 * (so no per-token cost beyond one comparison) and wherever the final turn starts or ends; it emits only on an
+	 * actual change, because a card that is told "still writing" every tick is noise on the wire.
+	 */
+	const refreshPhase = () => {
+		if (phaseOf() === phase) return;
+		emit();
+	};
+
 	const unsubscribe = session.subscribe((event) => {
 		switch (event.type) {
 			case "message_start":
 			case "message_update": {
 				if (event.message.role === "assistant") streaming = contentShape(event.message);
+				refreshPhase();
 				break;
 			}
 			case "message_end": {
@@ -266,6 +329,9 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 				if (event.message.role === "assistant") {
 					streaming = { text: false, toolCall: false, callText: false };
 					remindAboutCallText(event.message);
+					// The number the card prints is the turn about to finish: `turns` counts finished turns and is
+					// incremented below, so the thought it just had belongs to `turns + 1`.
+					trail.add(turns + 1, assistantThinking(event.message));
 					turns++;
 					if (turns >= clock.maxTurns()) {
 						// A spent turn budget is a question before it is a verdict (`budget/ceiling-clock.ts`): with a
@@ -383,6 +449,9 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 		if (plan.rescue && plan.reason) {
 			reportReason = plan.reason;
 			inFinalTurn = true;
+			// The card is told before the turn starts, which is the whole point: "final report" while it is being
+			// written, not after it is over.
+			refreshPhase();
 			log.line("final_report_start", { reason: plan.reason });
 			const outcome = await requestFinalReport(session, {
 				prompt: finalReportPrompt(plan.reason),
@@ -390,6 +459,7 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 				signal: input.signal,
 			});
 			inFinalTurn = false;
+			refreshPhase();
 			log.line("final_report_end", { ...outcome, text: logSlice(outcome.text) });
 			// A stop that arrived during the rescue is the run's ending, whatever the clock said before it.
 			if (outcome.status === "aborted") finalExit = pickEarlier(finalExit, "aborted");
@@ -436,6 +506,8 @@ export async function runChild(input: ChildRunInput): Promise<ChildResult> {
 		reminders,
 		...(log.file ? { turnLogFile: log.file } : {}),
 		...(ceiling ? { ceiling } : {}),
+		// Built while the run was still streaming thoughts (`trail` is read after `dispose`, but it is plain data).
+		reasoning: trail.snapshot(),
 	};
 }
 

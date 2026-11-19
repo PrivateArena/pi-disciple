@@ -9,7 +9,8 @@
  */
 
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ChildResult } from "../child.ts";
+import type { ChildResult, RunPhase } from "../child.ts";
+import type { ReasoningTrail } from "../reasoning.ts";
 import type { CeilingReport } from "../budget/ceiling-vocabulary.ts";
 import type { ReportReason, ReportSource } from "../final-report.ts";
 import { clip, roleDisplayName, taskLabel } from "../labels.ts";
@@ -102,6 +103,10 @@ export interface SubagentDetails extends SubagentCardFields {
 	exit?: ChildResult["exit"];
 	turns: number;
 	toolCalls: number;
+	/**
+	 * The child's transcript. Reported while the run is live too, and absent until pi has actually written the file
+	 * — a path invented here is a path a human clicks on.
+	 */
 	childSessionFile?: string;
 	childSessionId?: string;
 	truncated: boolean;
@@ -128,6 +133,17 @@ export interface SubagentDetails extends SubagentCardFields {
 	task?: string;
 	/** What the child was last seen doing (`bash`, `read`, …) — only while running. */
 	activity?: string;
+	/**
+	 * What the child is doing right now, in the run's own words: still working, writing its answer, waiting on a
+	 * tool, or writing the report the final turn guarantees. Only while running — a settled run says so in `status`.
+	 */
+	phase?: RunPhase;
+	/**
+	 * The child's thinking, as a **bounded** window: the newest turns under a character budget, oldest dropped, with
+	 * `truncated` saying that something fell off. The transcript (`childSessionFile`) is the complete record; this is
+	 * what a card can carry on every progress tick. Absent while the child has thought nothing (`reasoning.ts`).
+	 */
+	reasoning?: ReasoningTrail;
 	/**
 	 * The one budget-extension offer this run got, if a budget was ever spent: what the human was asked, and
 	 * what they answered. Absent means no ceiling was reached, which is the ordinary run.
@@ -157,7 +173,11 @@ export interface SubagentDetails extends SubagentCardFields {
 	reportReason?: ReportReason;
 	/** Times the child was told that a tool call written as text runs nothing (see `call-text.ts`). */
 	reminders?: number;
-	/** The harness's own JSONL record of this run, when `subagent.debugLog` is on. */
+	/**
+	 * The harness's own JSONL record of this run, when `subagent.debugLog` is on. Reported while the run is live too
+	 * (the log is opened before the child is prompted), and absent while running exactly as on a settled run when
+	 * logging is off.
+	 */
 	turnLogFile?: string;
 	/** Debug logs this run pruned, beside `removedTranscripts`. */
 	removedLogs?: number;
