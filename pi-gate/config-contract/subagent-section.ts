@@ -140,7 +140,19 @@ export interface ExtendOption {
  */
 export const MAX_EXTEND_OPTIONS = 8;
 
-/** Bound shared with `subagent.roles`: one click may not hand out more than a role may be configured to spend. */
+/**
+ * The turn count one written rung may name — wider than {@link ROLE_TURNS_CEILING}, because a role budget is
+ * written once by whoever edits the file, while the largest rung a watching human clicks is theirs to size, and the
+ * point of writing a big one is a delegation bigger than any role guessed. Minutes stay inside what a role may be
+ * configured to spend, so no rung can be both huge and endless. Mirror:
+ * `pi-subagent/config-contract/extend-options.ts`.
+ */
+export const EXTEND_TURNS_CEILING = 1000;
+
+/**
+ * Both figures written: turns inside {@link EXTEND_TURNS_CEILING}, minutes inside what a role budget may be
+ * configured to spend.
+ */
 function parseExtendRung(value: unknown, label: string, errors: string[]): ExtendOption | undefined {
 	if (!isRecord(value)) {
 		errors.push(`${label} must be { turns, minutes }, ignored`);
@@ -148,7 +160,7 @@ function parseExtendRung(value: unknown, label: string, errors: string[]): Exten
 	}
 	const rung: ExtendOption = { turns: 0, minutes: 0 };
 	for (const [key, ceiling] of [
-		["turns", ROLE_TURNS_CEILING],
+		["turns", EXTEND_TURNS_CEILING],
 		["minutes", ROLE_TIMEOUT_CEILING_MINUTES],
 	] as const) {
 		const numberValue = value[key];
@@ -163,7 +175,7 @@ function parseExtendRung(value: unknown, label: string, errors: string[]): Exten
 
 /**
  * Parse one `subagent.extendOptions` array. Never throws; a bad rung is one error and no rung, so a typo cannot
- * silently remove the whole ladder. The list merges over the shipped ladder by `turns` — see
+ * silently remove the whole ladder. A written array *replaces* the shipped ladder — see
  * `pi-subagent/ceiling.ts::resolveExtensionSteps`. Mirror: `pi-subagent/config-contract/extend-options.ts`.
  */
 export function parseExtendOptions(raw: unknown, where: string, errors: string[]): ExtendOption[] | undefined {
@@ -193,8 +205,8 @@ export function parseDisableExtendTurns(raw: unknown, where: string, errors: str
 	const out: number[] = [];
 	raw.forEach((value, index) => {
 		const label = `${where}: subagent.disableExtendTurns[${index}]`;
-		if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > ROLE_TURNS_CEILING) {
-			errors.push(`${label} must be a number in 1..${ROLE_TURNS_CEILING}, ignored`);
+		if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > EXTEND_TURNS_CEILING) {
+			errors.push(`${label} must be a number in 1..${EXTEND_TURNS_CEILING}, ignored`);
 			return;
 		}
 		out.push(Math.floor(value));
@@ -252,6 +264,9 @@ export interface SubagentLimits {
 	 * The budgets are per-role guesses, and the common failure is a delegation that turns out bigger than the
 	 * role guessed: the dialog hands the run more turns and minutes, or ends it as it always was. Anything other
 	 * than an explicit "Extend" choice — Esc, a dialog nobody answered, no UI — enforces the ceiling unchanged.
+	 * The dialog's session menu is the one answer that outlives the run: a rung chosen there is applied to every
+	 * later run without asking, by that same explicit choice (`pi-subagent/budget/session-budget.ts`), and it is
+	 * never written to a file.
 	 */
 	askToExtend: boolean;
 	/**
@@ -272,14 +287,15 @@ export interface SubagentLimits {
 	/** Where those logs go. Absent means `<tmp>/pi-subagent`. */
 	debugLogDir?: string;
 	/**
-	 * Extra or replacement rungs of the extension dialog (`subagent.extendOptions`), merged by `turns` over the
-	 * shipped ladder: a rung naming the `turns` of a shipped one replaces its minutes, an unseen `turns` adds a
-	 * rung. Absent means the shipped ladder exactly (`pi-subagent/ceiling.ts::EXTENSION_STEPS`).
+	 * The rungs of the extension dialog (`subagent.extendOptions`), replacing the shipped ladder outright: what the
+	 * file says is what the dialog offers, one entry per rung, smallest-first. Absent means the shipped ladder
+	 * exactly (`pi-subagent/ceiling.ts::EXTENSION_STEPS`).
 	 */
 	extendOptions?: ExtendOption[];
 	/**
-	 * `turns` values of rungs to drop (`subagent.disableExtendTurns`), applied after {@link extendOptions} is
-	 * merged, so a project file may remove a rung the global file added.
+	 * `turns` values of rungs to drop (`subagent.disableExtendTurns`), applied after {@link extendOptions} replaces
+	 * the ladder — the drop lists concatenate across files, so a file that writes only drops can still remove a
+	 * rung the other file's ladder added.
 	 */
 	disableExtendTurns?: number[];
 }

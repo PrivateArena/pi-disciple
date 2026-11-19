@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_GATE_CONFIG, DEFAULT_SUBAGENT_LIMITS, flattenPermission, parseGateConfig, parseSubagentConfig, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "../schema.ts";
+import { DEFAULT_GATE_CONFIG, DEFAULT_SUBAGENT_LIMITS, EXTEND_TURNS_CEILING, flattenPermission, parseGateConfig, parseSubagentConfig, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING } from "../schema.ts";
 import { applyRoleConfig, ROLES } from "../../pi-subagent/roles.ts";
 
 describe("parseGateConfig", () => {
@@ -86,18 +86,35 @@ describe("parseSubagentConfig", () => {
 	});
 
 	it("parses a written extension ladder, rung by rung", () => {
-		// Written rungs are merged over the shipped ladder by `pi-subagent/ceiling.ts`; the parser only checks shape,
-		// so one bad rung cannot take the good ones with it.
-		const good = parseSubagentConfig({ extendOptions: [{ turns: 50, minutes: 15 }, { turns: ROLE_TURNS_CEILING, minutes: ROLE_TIMEOUT_CEILING_MINUTES }] }, "test");
+		// A written list replaces the shipped ladder in `pi-subagent/ceiling.ts`; the parser only checks shape, so one
+		// bad rung cannot take the good ones with it.
+		const good = parseSubagentConfig(
+			{ extendOptions: [{ turns: 50, minutes: 15 }, { turns: ROLE_TURNS_CEILING, minutes: 50 }, { turns: EXTEND_TURNS_CEILING, minutes: ROLE_TIMEOUT_CEILING_MINUTES }] },
+			"test",
+		);
 		expect(good.errors).toEqual([]);
-		expect(good.limits.extendOptions).toEqual([{ turns: 50, minutes: 15 }, { turns: ROLE_TURNS_CEILING, minutes: ROLE_TIMEOUT_CEILING_MINUTES }]);
+		expect(good.limits.extendOptions).toEqual([{ turns: 50, minutes: 15 }, { turns: ROLE_TURNS_CEILING, minutes: 50 }, { turns: EXTEND_TURNS_CEILING, minutes: ROLE_TIMEOUT_CEILING_MINUTES }]);
+		// A rung may name more turns than any role may be configured to spend — it is a figure a human clicks while
+		// watching a run, not one the file hands out on its own — but its minutes stay inside the role bound.
+		expect(EXTEND_TURNS_CEILING).toBeGreaterThan(ROLE_TURNS_CEILING);
 
-		const bad = parseSubagentConfig({ extendOptions: [{ turns: 50 }, "30", { turns: 0, minutes: 5 }, { turns: 500, minutes: 5 }, { turns: 40, minutes: 999 }, { turns: 30, minutes: 8 }] }, "test");
+		const bad = parseSubagentConfig(
+			{
+				extendOptions: [
+					{ turns: 50 },
+					"30",
+					{ turns: 0, minutes: 5 },
+					{ turns: EXTEND_TURNS_CEILING + 1, minutes: 5 },
+					{ turns: 40, minutes: 999 },
+					{ turns: 30, minutes: 8 },
+				],
+			},
+			"test",
+		);
 		expect(bad.limits.extendOptions).toEqual([{ turns: 30, minutes: 8 }]);
 		expect(bad.errors.join(" ")).toContain("subagent.extendOptions[0].minutes must be a number in 1..120");
 		expect(bad.errors.join(" ")).toContain("subagent.extendOptions[1] must be { turns, minutes }");
-		// The same ceilings a role budget may not cross: one click cannot out-grant this file.
-		expect(bad.errors.join(" ")).toContain(`subagent.extendOptions[3].turns must be a number in 1..${ROLE_TURNS_CEILING}`);
+		expect(bad.errors.join(" ")).toContain(`subagent.extendOptions[3].turns must be a number in 1..${EXTEND_TURNS_CEILING}`);
 		expect(bad.errors.join(" ")).toContain("subagent.extendOptions[4].minutes must be a number in 1..120");
 
 		for (const value of [[], "20/5", { turns: 50, minutes: 15 }, null]) {

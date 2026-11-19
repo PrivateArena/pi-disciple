@@ -13,6 +13,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import piSubagent from "../index.ts";
 import { ROLES_SECTION_HEADER } from "../config-view.ts";
 import { claimGuard, releaseGuard } from "../run.ts";
+import { currentSessionBudget } from "../budget/session-budget.ts";
 
 const model = (provider: string, id: string, reasoning = true): Model<any> =>
 	({ provider, id, name: id, reasoning, contextWindow: 200_000, maxTokens: 8_000 }) as unknown as Model<any>;
@@ -128,9 +129,53 @@ describe("/subagentc", () => {
 
 	it("completes the section names after the space", () => {
 		const command = stubPi().commands.get("subagentc")!;
-		expect(command.getArgumentCompletions?.("")?.map((item) => item.value)).toEqual(["all", "model", "limits", "roles", "status", "models"]);
+		expect(command.getArgumentCompletions?.("")?.map((item) => item.value)).toEqual(["all", "model", "limits", "roles", "status", "budget", "models"]);
 		expect(command.getArgumentCompletions?.("mo")?.map((item) => item.value)).toEqual(["model", "models"]);
 		expect(command.getArgumentCompletions?.("model ")).toBeNull();
+	});
+
+	it("shows the session budget on /subagentc budget, and forgets it on request", async () => {
+		const where = fixture({});
+		const session = currentSessionBudget();
+		const noticesBefore = notices.length;
+		await run("budget", where);
+		expect(notices[notices.length - 1]).toContain("no session budget");
+		expect(notices.length).toBe(noticesBefore + 1);
+		const asked: { title: string; labels: string[] }[] = [];
+		const over = {
+			ui: {
+				editor: async () => undefined,
+				notify: (text: string) => void notices.push(text),
+				select: async (title: string, labels: string[]) => {
+					asked.push({ title, labels });
+					return "Forget it — ask again each run";
+				},
+			},
+		};
+		session.set({ turns: 200, minutes: 50 });
+		try {
+			await run("budget", where, over);
+			expect(asked[0]?.title).toContain("+200 turns / +50 min");
+			expect(asked[0]?.title).toContain("without asking");
+			expect(session.get()).toBeUndefined();
+			expect(notices[notices.length - 1]).toContain("forgotten");
+		} finally {
+			session.clear();
+		}
+	});
+
+	it("keeps the session budget when the human says so", async () => {
+		const where = fixture({});
+		const session = currentSessionBudget();
+		session.set({ turns: 20, minutes: 5 });
+		try {
+			await run("budget", where, {
+				ui: { editor: async () => undefined, notify: () => undefined, select: async () => "Keep it" },
+			});
+			expect(session.get()).toEqual({ turns: 20, minutes: 5 });
+		} finally {
+			session.clear();
+		}
 	});
 
 	it("lists the models a pin may name", async () => {

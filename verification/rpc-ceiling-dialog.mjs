@@ -4,6 +4,10 @@
  * to keep that same child running past the limit it just hit.
  *
  *   node verification/rpc-ceiling-dialog.mjs ["Extend by 20 turns / 5 min" | "Reject" | "no answer"] [project dir]
+ *   node verification/rpc-ceiling-dialog.mjs "Session budget,Extend by 20 turns"      # the session menu, then a rung of it
+ *
+ * Answers are comma-separated and consumed one per dialog, so a two-menu flow (switch to the session ladder, then
+ * choose a rung there) is drivable; the last answer repeats for every later question.
  *
  * It builds its own scratch agent dir (credentials copied, config written) so the run cannot touch your real
  * `~/.pi/agent/extensions/pi-disciple/config.json` or your grants, and so the tiny `explore` budget needed to reach
@@ -21,7 +25,13 @@ import { join } from "node:path";
 
 const REAL_AGENT = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const REPO = new URL("../", import.meta.url).pathname;
-const answerWith = process.argv[2] ?? "Extend by 20 turns";
+const answers = (process.argv[2] ?? "Extend by 20 turns")
+	.split(",")
+	.map((text) => text.trim())
+	.filter(Boolean);
+let answerIndex = 0;
+/** Consumed one per question, so a menu switch answers twice; the last answer stands for every later question. */
+const nextAnswer = () => answers[Math.min(answerIndex++, Math.max(0, answers.length - 1))] ?? "";
 
 // --- scratch agent dir: real credentials, a config whose only job is a budget the child will overrun -------
 const agentDir = mkdtempSync(join(tmpdir(), "pi-ceiling-agent-"));
@@ -67,7 +77,8 @@ createInterface({ input: child.stdout }).on("line", (line) => {
 	if (event.type === "extension_ui_request" && event.method === "select") {
 		const isCeiling = String(event.title).startsWith("pi-subagent:");
 		// "no answer" leaves the question standing: it must enforce the ceiling, after the dialog times out (FM-11).
-		const chosen = answerWith === "no answer" ? undefined : (event.options ?? []).find((o) => o.toLowerCase().includes(answerWith.toLowerCase()));
+		const wanted = nextAnswer();
+		const chosen = wanted === "no answer" ? undefined : (event.options ?? []).find((o) => o.toLowerCase().includes(wanted.toLowerCase()));
 		seen.push({ kind: isCeiling ? "ceiling" : "other", chosen });
 		console.log(`\n[${isCeiling ? "CEILING DIALOG" : "other dialog"}] ${event.title}`);
 		for (const option of event.options ?? []) console.log(`   option: ${option}`);
@@ -112,4 +123,4 @@ send({
 		"Call the subagent tool exactly once with role=explore and task=\"Read every .md file in this directory, one file per read call, and report each file's title as a list\". Then relay its answer verbatim.",
 });
 // "no answer" has to outlive the dialog's own 5-minute timeout before the ceiling is allowed to land.
-setTimeout(finish, answerWith === "no answer" ? 8 * 60_000 : 180_000);
+setTimeout(finish, answers.includes("no answer") ? 8 * 60_000 : 180_000);

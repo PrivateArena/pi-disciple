@@ -12,10 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
-import { parseSubagentConfig, MAX_EXTEND_OPTIONS as GATE_MAX, ROLE_TIMEOUT_CEILING_MINUTES as GATE_RUNG_MINUTES_CEILING, ROLE_TURNS_CEILING as GATE_RUNG_TURNS_CEILING, SUBAGENT_TOOL_PROMPT_KEYS, SUBAGENT_TOOL_PROMPT_TOKENS } from "../../pi-gate/schema.ts";
+import { parseSubagentConfig, EXTEND_TURNS_CEILING as GATE_EXTEND_TURNS_CEILING, MAX_EXTEND_OPTIONS as GATE_MAX, ROLE_TIMEOUT_CEILING_MINUTES as GATE_RUNG_MINUTES_CEILING, ROLE_TURNS_CEILING as GATE_RUNG_TURNS_CEILING, SUBAGENT_TOOL_PROMPT_KEYS, SUBAGENT_TOOL_PROMPT_TOKENS } from "../../pi-gate/schema.ts";
 import { ROLES } from "../roles.ts";
 import { resolveExtensionSteps } from "../ceiling.ts";
-import { DEFAULT_LIMITS, loadSubagentLimits, MAX_EXTEND_OPTIONS, MODEL_INHERIT_WORDS, ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING, TOOL_PROMPT_KEYS, TOOL_PROMPT_TOKENS } from "../config-file.ts";
+import { DEFAULT_LIMITS, loadSubagentLimits, EXTEND_TURNS_CEILING, MAX_EXTEND_OPTIONS, MODEL_INHERIT_WORDS, ROLE_ID_PATTERN, ROLE_TIMEOUT_CEILING_MINUTES, ROLE_TURNS_CEILING, TOOL_PROMPT_KEYS, TOOL_PROMPT_TOKENS } from "../config-file.ts";
 
 const dirs: string[] = [];
 
@@ -194,41 +194,63 @@ describe("the shipped duplication stays honest", () => {
 		// The bounds a ceiling rung is checked against, same numbers in both readers: a drift would let one reader
 		// accept a rung the other refuses, which is a rung the dialog may never have offered.
 		expect(MAX_EXTEND_OPTIONS).toBe(GATE_MAX);
+		expect(EXTEND_TURNS_CEILING).toBe(GATE_EXTEND_TURNS_CEILING);
 		expect(ROLE_TURNS_CEILING).toBe(GATE_RUNG_TURNS_CEILING);
 		expect(ROLE_TIMEOUT_CEILING_MINUTES).toBe(GATE_RUNG_MINUTES_CEILING);
 	});
 });
 
 describe("subagent.extendOptions in the file", () => {
-	it("merges the project ladder over the global one by turns, and merges the drop list in", () => {
+	it("lets the project ladder replace the global one outright, and applies both drop lists", () => {
 		const where = document({ extendOptions: [{ turns: 50, minutes: 15 }, { turns: 20, minutes: 10 }], disableExtendTurns: [100] });
 		mkdirSync(join(where.cwd, ".pi", "extensions", "pi-disciple"), { recursive: true });
 		writeFileSync(
 			join(where.cwd, ".pi", "extensions", "pi-disciple", "config.json"),
-			JSON.stringify({ subagent: { extendOptions: [{ turns: 200, minutes: 90 }], disableExtendTurns: [60] } }),
+			JSON.stringify({ subagent: { extendOptions: [{ turns: 200, minutes: 90 }, { turns: 30, minutes: 8 }], disableExtendTurns: [30] } }),
 			"utf8",
 		);
 		const loaded = loadSubagentLimits(where.cwd, true, where.agentDir);
 		expect(loaded.errors).toEqual([]);
-		// 20 retuned, 50 and 200 added, 60 and 100 dropped by the two lists, and the dialog sees exactly that.
+		// A written list is the whole ladder, so the project file's two rungs are the ladder: no shipped rung and no
+		// global rung is merged in behind it. The drop lists still concatenate across files.
+		expect(loaded.limits.extendOptions).toEqual([{ turns: 200, minutes: 90 }, { turns: 30, minutes: 8 }]);
+		expect(loaded.limits.disableExtendTurns).toEqual([100, 30]);
 		expect(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns).map((step) => [step.turns, step.minutes])).toEqual([
-			[20, 10],
-			[40, 10],
-			[50, 15],
 			[200, 90],
 		]);
 		expect(loaded.origins.extendOptions).toContain("config.json");
 	});
 
+	it("reports a drop list that emptied the written ladder and keeps the ladder it wrote", () => {
+		const where = document({ extendOptions: [{ turns: 200, minutes: 90 }], disableExtendTurns: [200] });
+		const loaded = loadSubagentLimits(where.cwd, false, where.agentDir);
+		// A dialog with nothing to offer is the ceiling switch left half-on, so the drops are ignored and said so.
+		expect(loaded.errors.join(" ")).toContain("removes every rung");
+		expect(loaded.limits.disableExtendTurns).toBeUndefined();
+		expect(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns)).toEqual([{ turns: 200, minutes: 90 }]);
+	});
+
+	it("writes exactly the ladder it was asked for, rung for rung", () => {
+		// The shipped rungs are not merged in behind a written list, so a rung count is the count the dialog offers —
+		// which is what the user's own 8-rung ladder needs to survive a file that names 900 turns.
+		const written = [20, 40, 60, 80, 100, 200, 250, 900].map((turns) => ({ turns, minutes: { 20: 5, 40: 10, 60: 15, 80: 20, 100: 25, 200: 50, 250: 60, 900: 90 }[turns]! }));
+		const where = document({ extendOptions: written });
+		const loaded = loadSubagentLimits(where.cwd, false, where.agentDir);
+		expect(loaded.errors).toEqual([]);
+		expect(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns).map((step) => step.turns)).toEqual([
+			20, 40, 60, 80, 100, 200, 250, 900,
+		]);
+	});
+
 	it("reports a ladder too long for the dialog and keeps the largest rungs", () => {
-		const extra = [150, 160, 170, 180, 190, 200].map((turns) => ({ turns, minutes: 60 }));
+		const extra = [120, 130, 140, 150, 160, 170, 180, 190, 200, EXTEND_TURNS_CEILING].map((turns) => ({ turns, minutes: 60 }));
 		const where = document({ extendOptions: extra });
 		const loaded = loadSubagentLimits(where.cwd, false, where.agentDir);
 		expect(loaded.errors.join(" ")).toContain(`at most ${MAX_EXTEND_OPTIONS} rungs`);
 		const ladder = resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns);
 		expect(ladder).toHaveLength(MAX_EXTEND_OPTIONS);
-		// The two smallest shipped rungs go, the rope the human wrote for stays, and re-resolving is a no-op.
-		expect(ladder.map((step) => step.turns)).toEqual([60, 100, 150, 160, 170, 180, 190, 200]);
+		// The two smallest written rungs go, the rope the human wrote for stays, and re-resolving is a no-op.
+		expect(ladder.map((step) => step.turns)).toEqual([140, 150, 160, 170, 180, 190, 200, EXTEND_TURNS_CEILING]);
 		expect(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns)).toEqual(ladder);
 	});
 

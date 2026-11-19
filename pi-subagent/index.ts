@@ -21,7 +21,8 @@ import type { CeilingReport } from "./budget/ceiling-vocabulary.ts";
 import { childSessionDir } from "./transcript/paths.ts";
 import { debugLogDir } from "./transcript/turn-log.ts";
 import { pruneTranscripts } from "./transcript/retention.ts";
-import { createCeilingBroker, resolveExtensionSteps } from "./ceiling.ts";
+import { CEILING_SESSION_MENU_LABEL, createCeilingBroker, offeredSteps, resolveExtensionSteps } from "./ceiling.ts";
+import { currentSessionBudget } from "./budget/session-budget.ts";
 import { loadSubagentLimits, type LoadedLimits, EXTENSION_CONFIG_SLUG } from "./config-file.ts";
 import { resolveChildModel } from "./model-override.ts";
 import { resolveChildRequest, resolveModelPin } from "./child-request.ts";
@@ -287,16 +288,18 @@ export default function piSubagent(pi: ExtensionAPI) {
 
 			// A spent budget is a question before it is a verdict: one dialog per run, and only an explicit "Extend"
 			// answer raises it. Switched off, or with no UI, nothing is asked and the ceiling lands exactly as it did
-			// before this existed. The rungs are the config's (`subagent.extendOptions`), settled once per call.
+			// before this existed. The rungs are the config's (`subagent.extendOptions`), settled once per call, and a
+			// rung the human chose "every run this session" is applied by the broker without asking again.
 			const onCeiling = limits.askToExtend
 				? createCeilingBroker({
 						hasUI: ctx.hasUI,
 						ui: ctx.ui,
 						signal: controller.signal,
 						steps: resolveExtensionSteps(limits.extendOptions, limits.disableExtendTurns),
+						session: currentSessionBudget(),
 						onOutcome: (reason, answer) => {
 							if (answer.outcome !== "granted" || !answer.grant) return;
-							ceiling = { reason, outcome: "granted", turns: answer.grant.turns, minutes: answer.grant.minutes };
+							ceiling = { reason, outcome: "granted", turns: answer.grant.turns, minutes: answer.grant.minutes, remembered: answer.remembered };
 							emitProgress(true);
 						},
 					})
@@ -343,6 +346,10 @@ export default function piSubagent(pi: ExtensionAPI) {
 				});
 			} finally {
 				clearInterval(heartbeat);
+				// Nothing of this run may still be waiting now that it has ended: a ceiling or stop dialog left open
+				// would answer a question no run is asking, and the ceiling's answer can now write the session budget
+				// (`ceiling.ts`), so a late click would authorise every later run. Aborting dismisses them.
+				controller.abort();
 				releaseGuard(toolCallId);
 				liveRun.release();
 			}
@@ -369,7 +376,14 @@ export default function piSubagent(pi: ExtensionAPI) {
 		applyToolPromptDeclaration(event.systemPromptOptions, declaration);
 	});
 
+	pi.on("session_start", () => {
+		// A new, forked, switched or reloaded session is a different conversation with a human: like the gate's
+		// session grants (`pi-gate/index.ts`), a budget remembered by this one is not inherited by the next.
+		currentSessionBudget().clear();
+	});
+
 	pi.on("session_shutdown", () => {
+		currentSessionBudget().clear();
 		currentGuard()?.abort();
 	});
 
@@ -379,7 +393,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 	 * `status` keeps the old "what is running" answer, which is only ever informative during a run.
 	 */
 	pi.registerCommand("subagentc", {
-		description: "Subagent config: (all) | model | limits | roles | status | models — the model a child runs on, effective limits, roles, pins",
+		description: "Subagent config: (all) | model | limits | roles | status | budget | models — the model a child runs on, effective limits, roles, pins, session budget",
 		getArgumentCompletions: (argumentPrefix: string) => {
 			if (argumentPrefix.includes(" ")) return null; // one argument only
 			return COMMAND_ARGS.filter((name) => name.startsWith(argumentPrefix)).map((value) => ({ value, label: value }));
@@ -408,6 +422,28 @@ export default function piSubagent(pi: ExtensionAPI) {
 				ctx.ui.notify(`[subagent] ${formatRunning(currentGuard())}`, "info");
 				return;
 			}
+			// The one ceiling answer that is not in the config file. `ceiling.ts` can set it from its session menu, so
+			// this is where a human sees it without being asked, and the only way back to being asked each run.
+			if (section === "budget") {
+				const session = currentSessionBudget();
+				const remembered = session.get();
+				if (!remembered) {
+					ctx.ui.notify(`[subagent] no session budget — every spent budget asks; the dialog's "${CEILING_SESSION_MENU_LABEL}" choice remembers one`, "info");
+					return;
+				}
+				const ladder = offeredSteps(resolveExtensionSteps(loaded.limits.extendOptions, loaded.limits.disableExtendTurns));
+				const offLadder = !ladder.some((step) => step.turns === remembered.turns && step.minutes === remembered.minutes);
+				const picked = await ctx.ui.select(
+					`pi-subagent session budget: +${remembered.turns} turns / +${remembered.minutes} min\n`
+						+ `every later run extends by that much without asking${offLadder ? "\n  (no longer a rung of subagent.extendOptions, so the next spent budget asks)" : ""}`,
+					["Forget it — ask again each run", "Keep it"],
+				);
+				if (picked?.startsWith("Forget")) {
+					session.clear();
+					ctx.ui.notify("[subagent] session budget forgotten — the ceiling dialog asks again", "info");
+				}
+				return;
+			}
 			const reference = loaded.limits.model;
 			await ctx.ui.editor(
 				`pi-subagent ${section}`,
@@ -429,6 +465,7 @@ export default function piSubagent(pi: ExtensionAPI) {
 						parentTools: pi.getActiveTools(),
 						sessionDir: ctx.sessionManager.getSessionDir(),
 						running: currentGuard(),
+						sessionBudget: currentSessionBudget().get(),
 					},
 					section,
 				),

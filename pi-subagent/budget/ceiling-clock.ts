@@ -193,10 +193,12 @@ export function createCeilingClock(host: CeilingClockHost): CeilingClock {
 		host.steerToConclude(`The ${host.role.name} role passed its ${budget.timeoutMinutes} minute budget`);
 	}
 
-	function applyCeilingGrant(reason: CeilingReason, grant: CeilingGrant): void {
+	function applyCeilingGrant(reason: CeilingReason, grant: CeilingGrant, remembered = false): void {
 		budget.maxTurns += grant.turns;
 		budget.timeoutMinutes += grant.minutes;
-		host.recordCeiling({ reason, outcome: "granted", turns: grant.turns, minutes: grant.minutes });
+		// The key is absent, not `false`, for a per-run grant: a run without a session budget must report exactly
+		// the shape it reported before the session menu existed.
+		host.recordCeiling({ reason, outcome: "granted", turns: grant.turns, minutes: grant.minutes, ...(remembered ? { remembered } : {}) });
 		// The new clock starts at the answer, not at the budget that just expired: "+5 minutes" means five
 		// more from now, and the tool grace is a fresh run's privilege, not this one's leftover.
 		softAt = Date.now() + grant.minutes * 60_000;
@@ -252,7 +254,7 @@ export function createCeilingClock(host: CeilingClockHost): CeilingClock {
 			offerSettled = true;
 			offerPending = undefined;
 			if (settled) return void done();
-			if (answer.outcome === "granted" && answer.grant) applyCeilingGrant(reason, answer.grant);
+			if (answer.outcome === "granted" && answer.grant) applyCeilingGrant(reason, answer.grant, answer.remembered === true);
 			else {
 				host.recordCeiling({ reason, outcome: answer.outcome, turns: 0, minutes: 0 });
 				enforceCeiling(reason);

@@ -22,6 +22,7 @@ import { childSessionDir } from "./transcript/paths.ts";
 import { debugLogDir } from "./transcript/turn-log.ts";
 import { FINAL_REPORT_GRACE_MS } from "./final-report.ts";
 import { CEILING_DIALOG_TIMEOUT_MS, offeredSteps, resolveExtensionSteps } from "./ceiling.ts";
+import type { CeilingGrant } from "./budget/ceiling-vocabulary.ts";
 import type { SubagentLimits, SubagentToolPrompt } from "./config-file.ts";
 import type { RunGuard } from "./run-guard.ts";
 
@@ -30,10 +31,13 @@ export { effectiveBudget } from "./roles.ts";
 
 export type ConfigSection = "all" | "model" | "limits" | "roles" | "status";
 
-/** What `/subagentc <arg>` accepts: a view section, or the model catalogue to browse for a pin. */
-export type SubagentCommandArg = ConfigSection | "models";
+/**
+ * What `/subagentc <arg>` accepts: a view section, the model catalogue to browse for a pin, or `budget` — the one
+ * remembered session budget, which is not config and so is not a section of the view (`budget/session-budget.ts`).
+ */
+export type SubagentCommandArg = ConfigSection | "models" | "budget";
 
-export const COMMAND_ARGS: readonly SubagentCommandArg[] = ["all", "model", "limits", "roles", "status", "models"];
+export const COMMAND_ARGS: readonly SubagentCommandArg[] = ["all", "model", "limits", "roles", "status", "budget", "models"];
 
 export interface ConfigViewInput {
 	limits: SubagentLimits;
@@ -60,6 +64,11 @@ export interface ConfigViewInput {
 	parentTools: readonly string[];
 	sessionDir: string;
 	running?: RunGuard;
+	/**
+	 * The session's remembered ceiling budget (`budget/session-budget.ts`), when a human chose one. Not config: the
+	 * view reports it because a run can be extended by a figure no file says.
+	 */
+	sessionBudget?: CeilingGrant;
 	/** Injectable clock so tests are exact. */
 	now?: number;
 }
@@ -202,6 +211,7 @@ function limitsSection(input: ConfigViewInput): string[] {
 		limits.askToExtend
 			? `  One dialog per run is allowed at a spent budget, and the clock holds for it up to ${CEILING_OFFER_HOLD_MS / 60_000} min; a granted extension restarts\n  both budgets from the answer, so the longest run grows by the extension the human chose.`
 			: `  subagent.askToExtend is off: a spent budget is a spent budget, and no dialog is asked.`,
+			sessionBudgetLine(input.sessionBudget),
 		// The declaration's source is invisible otherwise: pi snapshots a registered tool at load, so a config edit
 		// lands in the next run's text, and this line says which fields come from the file and which from the code.
 		limits.tool
@@ -214,7 +224,7 @@ function limitsSection(input: ConfigViewInput): string[] {
  * The extension ladder this config offers, in one line — the rungs the dialog will actually show, so a view that
  * advertised a trimmed-off rung would be promising rope the question cannot offer. The shipped rungs are
  * `ceiling.ts`'s; a config that wrote `subagent.extendOptions` / `.disableExtendTurns` is credited for the result,
- * because the merged list is otherwise indistinguishable from the default one.
+ * because a written ladder replaces the shipped one and is otherwise indistinguishable from it.
  */
 function extensionLadder(limits: SubagentLimits): string {
 	const rungs = offeredSteps(resolveExtensionSteps(limits.extendOptions, limits.disableExtendTurns))
@@ -296,6 +306,17 @@ function runtimeSection(input: ConfigViewInput): string[] {
 		`delegation prompt: ${input.limits.delegationPrompt ? "on — a <delegation> system prompt section states when to hand work to a child (subagent.delegationPrompt)" : "off — subagent.delegationPrompt: false"}`,
 		`budget extension: ${input.limits.askToExtend ? `on — a spent budget asks the human once per run (${extensionLadder(input.limits)})` : "off — subagent.askToExtend: false"}`,
 	];
+}
+
+/**
+ * The session's remembered budget, printed beside the dialog that offers it (in every section that shows the
+ * dialog's settings, so no view can state the rule while omitting the exception): it is the one ceiling answer
+ * that is in no config file, so without this line the only way to notice one is to be quietly extended.
+ */
+function sessionBudgetLine(budget: CeilingGrant | undefined): string {
+	return !budget
+		? "session budget: none — every spent budget is asked about (/subagentc budget)"
+		: `session budget: +${budget.turns}t/+${budget.minutes}m — later runs extend without asking; /subagentc budget forgets it`;
 }
 
 function statusSection(input: ConfigViewInput): string[] {

@@ -197,21 +197,33 @@ describe("the ceiling switch", () => {
 		expect(view).toContain("subagent.askToExtend is off");
 	});
 
-	it("shows the ladder a config wrote, merged over the shipped rungs", () => {
-		// A retuned rung and an added one, with the two smallest shipped rungs dropped: what the view prints is what
-		// the dialog will show, which is the only way to check a merge without spending a run to reach a ceiling.
-		const limits = { ...DEFAULT_LIMITS, extendOptions: [{ turns: 20, minutes: 10 }, { turns: 150, minutes: 45 }], disableExtendTurns: [40, 60] };
+	it("shows the ladder a config wrote in place of the shipped rungs", () => {
+		// A written list is the whole ladder, and the drop list bites it: what the view prints is what the dialog
+		// will show, which is the only way to check a ladder without spending a run to reach a ceiling.
+		const limits = { ...DEFAULT_LIMITS, extendOptions: [{ turns: 20, minutes: 10 }, { turns: 150, minutes: 45 }], disableExtendTurns: [20] };
 		const view = buildConfigView(input({ limits, origins: { extendOptions: "/repo/.pi/extensions/pi-disciple/config.json" } }));
-		expect(view).toContain("+20t/+10m · +100t/+25m · +150t/+45m (subagent.extendOptions)");
-		expect(view).not.toContain("+40t/+10m");
+		expect(view).toContain("+150t/+45m (subagent.extendOptions)");
+		expect(view).not.toContain("+20t/+5m");
+		expect(view).not.toContain("+100t/+25m");
 	});
 
 	it("stops the printed ladder where the dialog stops", () => {
-		// Six written rungs over the four shipped ones is a ladder the cap trims: what `/subagentc` prints must be
-		// what the ceiling will offer, or the view promises rope a question cannot offer.
-		const crowded = { ...DEFAULT_LIMITS, extendOptions: [150, 160, 170, 180, 190, 200].map((turns) => ({ turns, minutes: 60 })) };
+		// Ten written rungs is a ladder the cap trims to the eight the dialog can show: what `/subagentc` prints must
+		// be what the ceiling will offer, or the view promises rope a question cannot offer.
+		const crowded = { ...DEFAULT_LIMITS, extendOptions: [130, 140, 150, 160, 170, 180, 190, 200, 210, 220].map((turns) => ({ turns, minutes: 60 })) };
 		const view = buildConfigView(input({ limits: crowded }));
-		expect(view).toContain("+60t/+15m · +100t/+25m · +150t/+60m · +160t/+60m · +170t/+60m · +180t/+60m · +190t/+60m · +200t/+60m (subagent.extendOptions)");
-		expect(view).not.toContain("+20t/+5m");
+		expect(view).toContain("+150t/+60m · +160t/+60m · +170t/+60m · +180t/+60m · +190t/+60m · +200t/+60m · +210t/+60m · +220t/+60m (subagent.extendOptions)");
+		expect(view).not.toContain("+130t/+60m");
+	});
+
+	it("says whether a session budget is quietly extending later runs", () => {
+		// It is the one ceiling answer that is in no config file, so the view has to name it or a human only ever
+		// discovers it by being extended.
+		const plain = buildConfigView(input({}));
+		expect(plain).toContain("session budget: none");
+		const view = buildConfigView(input({ sessionBudget: { turns: 200, minutes: 50 } }));
+		expect(view).toContain("session budget: +200t/+50m — later runs extend without asking; /subagentc budget forgets it");
+		// It travels with the dialog's own settings, so `/subagentc limits` cannot state the rule and hide the exception.
+		expect(buildConfigView(input({ sessionBudget: { turns: 20, minutes: 5 } }), "limits")).toContain("session budget: +20t/+5m");
 	});
 });

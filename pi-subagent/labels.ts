@@ -38,7 +38,9 @@ export function formatCeiling(report: CeilingReport | undefined): string {
 	const where = report.reason === "maxTurns" ? "the turn limit" : "the time budget";
 	switch (report.outcome) {
 		case "granted":
-			return `budget extended by the user at ${where}: +${report.turns} turns / +${report.minutes} min`;
+			// Says so when the figures came from the session budget rather than from a question asked this run — the
+			// card must not imply the human was consulted about a run nobody asked them about.
+			return `budget extended by the user at ${where}: +${report.turns} turns / +${report.minutes} min${report.remembered ? " (this session's remembered budget)" : ""}`;
 		case "rejected":
 			return `extension declined by the user at ${where}`;
 		case "dismissed":

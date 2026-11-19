@@ -42,6 +42,11 @@ export type CeilingOutcome = "granted" | "rejected" | "dismissed" | "no_ui";
 export interface CeilingAnswer {
 	outcome: CeilingOutcome;
 	grant?: CeilingGrant;
+	/**
+	 * The grant is this session's remembered budget (`budget/session-budget.ts`), not a one-run favour: a later run
+	 * applies the same figures without asking. Absent means the choice dies with this run.
+	 */
+	remembered?: boolean;
 }
 
 /** What the run did with its single offer, carried out to the card and the model-facing header. */
@@ -51,6 +56,8 @@ export interface CeilingReport {
 	/** Turns and minutes added by the grant; `0`/`0` when the ceiling was enforced instead. */
 	turns: number;
 	minutes: number;
+	/** The grant came from the session budget, so it was not asked this run (see {@link CeilingAnswer.remembered}). */
+	remembered?: boolean;
 }
 
 /**
